@@ -124,7 +124,9 @@ test('Luanti\'s config gets the bridge, the bind address and the admin', () => {
   assert.match(conf, /^bind_address = 1\.2\.3\.4$/m);
   assert.match(conf, /^secure\.http_mods = ai_bot$/m);
   assert.match(conf, /^ai_bot\.bridge_key = k$/m);
-  assert.match(conf, /^ai_bot\.bridge_url = http:\/\/127\.0\.0\.1:8080\/bridge\/sync$/m);
+  // Luanti's HTTP leaves from the bound address, so the mod calls the sidecar there.
+  assert.match(conf, /^ai_bot\.bridge_url = http:\/\/1\.2\.3\.4:8080\/bridge\/sync$/m);
+  assert.match(managedConfig({ config: loadConfig({}), bindAddress: '', bridgeKey: 'k' }), /^ai_bot\.bridge_url = http:\/\/127\.0\.0\.1:8080/m);
   assert.match(conf, /^name = ruben$/m);
   assert.match(conf, /^server_name = Blocky Stuff$/m);
 });

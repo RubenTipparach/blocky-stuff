@@ -26,7 +26,9 @@ export function managedConfig({ config, bindAddress, bridgeKey }) {
     bind_address: bindAddress,
     ipv6_server: 'false',
     'secure.http_mods': 'ai_bot',
-    'ai_bot.bridge_url': `http://127.0.0.1:${config.port}/bridge/sync`,
+    // Luanti sends its HTTP from bind_address (CURLOPT_INTERFACE, src/httpfetch.cpp), and from there 127.0.0.1
+    // cannot be reached: the mod calls the sidecar at the bound address instead.
+    'ai_bot.bridge_url': `http://${bindAddress || '127.0.0.1'}:${config.port}/bridge/sync`,
     'ai_bot.bridge_key': bridgeKey,
   };
   if (config.gameAdmin) lines.name = config.gameAdmin;

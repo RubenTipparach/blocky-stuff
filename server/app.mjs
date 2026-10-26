@@ -2,7 +2,7 @@
 // It ties the pieces together: the game's bridge, the bot, Discord, the admin page and MCP.
 //
 //   GET  /health                        200 "ok" (Fly's check)
-//   POST /bridge/sync                   the Lua mod, once a second (server/game.mjs); x-bridge-key, loopback only
+//   POST /bridge/sync                   the Lua mod, once a second (server/game.mjs); x-bridge-key, this machine only
 //   POST /mcp                           MCP over Streamable HTTP (server/mcp.mjs); Bearer <MCP token>
 //   GET  /admin                         the admin page (server/admin-page.mjs)
 //   GET  /auth/discord/login?return=URL to Discord, for the admin page's sign-in
@@ -130,7 +130,11 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     const y = Buffer.from(String(b ?? ''));
     return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
   };
-  const loopback = (req) => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+  // The mod calls from this machine: loopback, or the address Luanti is bound to (server/luanti.mjs).
+  const fromHere = (req) => {
+    const ip = String(req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+    return ip === '127.0.0.1' || ip === '::1' || (luanti !== null && ip === luanti.status().bindAddress);
+  };
 
   function status() {
     const s = botSettings(db, config);
@@ -284,7 +288,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'GET /health') return send(res, 200, 'ok');
 
     if (route === 'POST /bridge/sync') {
-      if (!sameKey(req.headers['x-bridge-key'], bridgeKey) || (config.luantiManaged && !loopback(req))) {
+      if (!sameKey(req.headers['x-bridge-key'], bridgeKey) || (config.luantiManaged && !fromHere(req))) {
         return send(res, 403, { error: 'Not the game.' });
       }
       const body = await readBody(req, SYNC_MAX);
