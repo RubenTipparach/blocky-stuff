@@ -1,0 +1,52 @@
+# Fly.io app for the Luanti server, its AI and its admin page (docs/deploy.md). Deployed by
+# .github/workflows/deploy.yml with the FLY_API_TOKEN secret, which also stages the other secrets.
+# One machine with one volume: the world and the sidecar's SQLite live on it, and a volume attaches to one
+# machine.
+app = "blocky-stuff"
+primary_region = "iad"
+# Luanti saves the world on SIGTERM; give it time.
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  DATA_DIR = "/data"
+  PUBLIC_URL = "https://blocky-stuff.fly.dev"
+
+# The deploy job creates this volume if it is missing.
+[mounts]
+  source = "blocky_data"
+  destination = "/data"
+  initial_size = "3gb"
+
+# The admin page, sign-in and MCP.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Never stop: Fly's proxy cannot wake a machine for UDP, so a stopped server could not be joined.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "20s"
+    interval = "30s"
+    method = "GET"
+    path = "/health"
+    timeout = "5s"
+
+# The game: Luanti speaks UDP. Fly carries UDP only on a dedicated IPv4 (the deploy job allocates it), to a
+# socket bound to fly-global-services (server/luanti.mjs binds there).
+[[services]]
+  protocol = "udp"
+  internal_port = 30000
+
+  [[services.ports]]
+    port = 30000
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

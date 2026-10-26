@@ -1,0 +1,162 @@
+# Deploy on every push to every branch, so the newest commit is what is live, after RubenTipparach/rubens-solitare-collection's deploy: tests, then build the
+# image and boot it here (the game must start and its mod must reach the sidecar), then Fly.io. The secrets live
+# in GitHub and are staged onto Fly here, so nobody has to run flyctl. docs/deploy.md has each secret.
+name: deploy
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  server:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # One Fly deploy at a time; a newer push waits rather than cancelling one mid-release.
+    concurrency:
+      group: fly-deploy
+      cancel-in-progress: false
+    env:
+      APP: blocky-stuff
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Build the very image Fly will run and boot it first: the sidecar must answer, and Luanti must start
+      # and its ai_bot mod must sync with the sidecar (a Lua error or a missing game stops it here, before
+      # anything reaches the live server).
+      - name: Build and boot the image before deploying
+        run: |
+          docker build -t blocky-check .
+          docker run -d --name blocky-check -e LUANTI_BIND_HOST= -p 8080:8080 blocky-check
+          ok=0
+          for i in $(seq 1 90); do
+            if curl -fsS -m 3 http://localhost:8080/api/info 2>/dev/null | grep -q '"game":true'; then ok=1; break; fi
+            sleep 1
+          done
+          curl -fsS -m 3 http://localhost:8080/api/info || true; echo
+          if [ "$ok" = 0 ]; then
+            echo "::error::The game did not come up, or its mod never reached the sidecar; nothing was deployed. The log follows."
+            docker logs blocky-check 2>&1 | tail -n 120
+            exit 1
+          fi
+          docker logs blocky-check 2>&1 | grep -E '\[ai_bot\]|Starting Luanti|Sidecar' || true
+          docker rm -f blocky-check > /dev/null
+
+      - name: Check Fly readiness
+        id: fly_gate
+        run: |
+          if [ -z "${FLY_API_TOKEN}" ]; then
+            echo "::notice::FLY_API_TOKEN not set; nothing was deployed. See docs/deploy.md."
+            echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! flyctl auth whoami > /dev/null 2>&1; then
+            echo "::notice::FLY_API_TOKEN rejected by Fly; skipping. Make a new one: fly tokens create org personal"
+            echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! flyctl status -a "$APP" > /dev/null 2>&1; then
+            echo "Fly app '$APP' not found; creating it in the personal organization."
+            if ! flyctl apps create "$APP" --org personal; then
+              echo "::warning::Could not create the Fly app '$APP'. If the token may not create apps, make one with: fly tokens create org personal"
+              echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      # Each is optional: a feature stays off until its secret is set (docs/deploy.md). Values are never printed.
+      - name: Sync secrets to Fly
+        if: steps.fly_gate.outputs.ready == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_CLIENT_ID: ${{ secrets.DISCORD_CLIENT_ID }}
+          DISCORD_CLIENT_SECRET: ${{ secrets.DISCORD_CLIENT_SECRET }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ADMIN_DISCORD_ID: ${{ secrets.ADMIN_DISCORD_ID }}
+          GAME_ADMIN: ${{ secrets.GAME_ADMIN }}
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          MCP_TOKEN: ${{ secrets.MCP_TOKEN }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+        run: |
+          args=()
+          for name in ANTHROPIC_API_KEY DISCORD_CLIENT_ID DISCORD_CLIENT_SECRET DISCORD_BOT_TOKEN DISCORD_CHANNEL_ID \
+            DISCORD_WEBHOOK_URL ADMIN_DISCORD_ID GAME_ADMIN GAME_PASSWORD MCP_TOKEN SESSION_SECRET; do
+            [ -n "${!name}" ] && args+=("$name=${!name}")
+          done
+          [ -z "$ANTHROPIC_API_KEY" ] && echo "::warning::ANTHROPIC_API_KEY is not set: the bot tells players it is not plugged in."
+          [ -z "$ADMIN_DISCORD_ID" ] && echo "::notice::ADMIN_DISCORD_ID is not set: nobody can use /admin yet."
+          [ -z "$GAME_ADMIN" ] && echo "::notice::GAME_ADMIN is not set: no player gets admin privileges in game."
+          if [ ${#args[@]} -gt 0 ] && ! flyctl secrets set --stage -a "$APP" "${args[@]}" > /dev/null; then
+            echo "::warning::Could not stage the secrets on Fly (token scope?). Set them with 'fly secrets set' instead."
+          fi
+
+      # The world lives on one volume, so run exactly one machine.
+      - name: Single machine for the volume
+        if: steps.fly_gate.outputs.ready == 'true'
+        run: flyctl scale count 1 -a "$APP" --yes 2>/dev/null || echo "No machines yet; the deploy makes one."
+
+      - name: Ensure the volume
+        if: steps.fly_gate.outputs.ready == 'true'
+        run: |
+          if flyctl volumes list -a "$APP" --json | jq -e 'map(select(.name == "blocky_data")) | length > 0' > /dev/null; then
+            echo "Volume blocky_data exists."; exit 0
+          fi
+          region="$(sed -n 's/^primary_region = "\(.*\)"/\1/p' fly.toml)"
+          flyctl volumes create blocky_data -a "$APP" -r "$region" -s 3 --yes
+
+      # UDP needs a dedicated IPv4 (a shared one carries only HTTP); Fly bills it monthly. Its address is what
+      # players type in Join Game, so it goes to the server as GAME_ADDRESS too.
+      - name: Ensure the game's IPv4
+        if: steps.fly_gate.outputs.ready == 'true'
+        run: |
+          ip="$(flyctl ips list -a "$APP" --json | jq -r 'map(select(.Type == "v4"))[0].Address // empty')"
+          if [ -z "$ip" ]; then
+            flyctl ips allocate-v4 -a "$APP" --yes
+            ip="$(flyctl ips list -a "$APP" --json | jq -r 'map(select(.Type == "v4"))[0].Address // empty')"
+          fi
+          flyctl ips list -a "$APP" --json | jq -e 'map(select(.Type == "v6")) | length > 0' > /dev/null \
+            || flyctl ips allocate-v6 -a "$APP" || true
+          if [ -n "$ip" ]; then
+            echo "Players join at $ip:30000"
+            echo "::notice::Players join at $ip port 30000"
+            flyctl secrets set --stage -a "$APP" "GAME_ADDRESS=$ip" > /dev/null || true
+          else
+            echo "::warning::No dedicated IPv4: players cannot reach the game. Run: fly ips allocate-v4 -a $APP"
+          fi
+
+      - name: Deploy to Fly.io
+        if: steps.fly_gate.outputs.ready == 'true'
+        run: |
+          for attempt in 1 2 3; do
+            if flyctl deploy --remote-only -a "$APP"; then exit 0; fi
+            [ "$attempt" -lt 3 ] && { echo "::warning::flyctl deploy failed (attempt ${attempt}/3); retrying"; sleep $((attempt * 20)); }
+          done
+          echo "::error::flyctl deploy failed after 3 attempts"; exit 1
+
+      - name: Check the live server
+        if: steps.fly_gate.outputs.ready == 'true'
+        run: |
+          url="https://${APP}.fly.dev"
+          for i in $(seq 1 24); do
+            info="$(curl -fsS -m 10 "$url/api/info" || true)"
+            if echo "$info" | grep -q '"game":true'; then echo "Live: $url/admin"; echo "$info"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::$url answers, but the game has not come up. Recent logs follow."
+          echo "$info"
+          flyctl logs -a "$APP" --no-tail 2>&1 | tail -n 150 || true
+          exit 1
