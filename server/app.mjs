@@ -53,12 +53,12 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
 
   // ---- Chat, between the game, Discord and the bot ----
 
-  /** The bot's answer: into the game, the log, and Discord. */
-  async function botSays(text) {
+  /** The bot's answer: into the game, the log, and Discord (always, when the question came from there). */
+  async function botSays(text, { toDiscord = false } = {}) {
     const name = botName();
     db.addChat('bot', name, text, now());
     const [r] = await Promise.all([game.act({ type: 'say', text, from: name }),
-      relay().chat ? chat.post({ text, as: name }) : null]);
+      relay().chat || toDiscord ? chat.post({ text, as: name }) : null]);
     return r;
   }
   /** An admin's or the server's announcement: the same, under the server's name. */
@@ -90,7 +90,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   function fromDiscord(m) {
     db.addChat('discord', m.name, m.text, now());
     if (relay().chat) game.act({ type: 'say', text: m.text, from: `[Discord] ${m.name}` });
-    brain.hear({ source: 'discord', name: m.name, text: m.text, admin: false }, botSays).catch((err) => log.error(err));
+    // An admin on Discord is known by their Discord id, which Discord vouches for; a name anyone can type.
+    const admin = Boolean(m.userId) && config.adminIds.includes(m.userId);
+    brain.hear({ source: 'discord', name: m.name, text: m.text, admin }, (t) => botSays(t, { toDiscord: true }))
+      .catch((err) => log.error(err));
   }
 
   // ---- Plumbing ----

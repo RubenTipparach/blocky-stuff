@@ -19,6 +19,7 @@ export const ACTIONS = {
   place: ['nodes'],
   kick: ['player', 'reason?'],
   heal: ['player'],
+  ground: ['columns'],
 };
 
 // No word from the mod for this long and the game counts as down.
@@ -108,8 +109,11 @@ export function checkAction(action) {
       return `${action.type} needs ${f}.`;
     }
   }
-  if (action.type === 'place' && (!Array.isArray(action.nodes) || action.nodes.length > 512)) {
-    return 'place takes a list of at most 512 nodes.';
+  if (action.type === 'place' && (!Array.isArray(action.nodes) || action.nodes.length > 2048)) {
+    return 'place takes a list of at most 2048 nodes.';
+  }
+  if (action.type === 'ground' && (!Array.isArray(action.columns) || action.columns.length > 25)) {
+    return 'ground takes a list of at most 25 columns.';
   }
   return null;
 }

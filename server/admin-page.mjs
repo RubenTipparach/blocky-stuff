@@ -139,7 +139,7 @@ function build() {
     <div class="muted note" style="margin:0 0 6px">Players who are not admins may ask for:</div>
     <div id="policy"></div>
     <div class="row" style="margin-top:10px"><button>Save</button><span id="botNote" class="note muted"></span></div>
-    <p class="note muted">Admins (the <code>server</code> privilege in game) may ask for anything, for anyone. Discord users never count as admins.</p>
+    <p class="note muted">Admins (the <code>server</code> privilege in game) may ask for anything, for anyone. On Discord, only the ids in ADMIN_DISCORD_ID count as admins.</p>
   </form></section>
   <section><h2>Discord</h2><dl class="status" id="discord"></dl>
     <div id="channels" style="margin:10px 0"></div>

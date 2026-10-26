@@ -6,7 +6,7 @@
 // The first policy: what players who are not admins may ask the bot for. Changed on /admin.
 export const DEFAULT_POLICY = { give: true, teleport: true, time: true, heal: true, build: false };
 // Most blocks one request may place.
-const BUILD_MAX = 512;
+const BUILD_MAX = 2048;
 
 const pos = { type: 'integer' };
 const player = { type: 'string', description: 'Player name, exactly as listed by list_players.' };
@@ -31,6 +31,18 @@ export const TOOLS = [
       const found = game.findItems(query);
       return { ok: true, message: found.length ? found.join(', ') : 'No items match.' };
     },
+  },
+  {
+    name: 'find_ground',
+    description: 'The ground at columns of the world: for each {x, z}, the y of the highest solid block and what it is. '
+      + 'Build from y + 1. Up to 25 columns at once.',
+    input_schema: {
+      type: 'object',
+      properties: { columns: { type: 'array', minItems: 1, maxItems: 25, items: { type: 'object',
+        properties: { x: pos, z: pos }, required: ['x', 'z'], additionalProperties: false } } },
+      required: ['columns'], additionalProperties: false,
+    },
+    run: ({ game }, { columns }) => game.act({ type: 'ground', columns: columns.slice(0, 25) }),
   },
   {
     name: 'give_item',

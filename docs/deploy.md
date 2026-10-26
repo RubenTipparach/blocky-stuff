@@ -48,7 +48,9 @@ One Discord application does both the admin sign-in and the bot.
    and the bot's answers to both; "Joins, leaves and server start" posts the news.
 
 People in the channel talk to the bot the same way as in game: `@Blocky …` (a Discord mention of the bot works
-too) or `!ai …`. Discord users are never admins to the bot, whatever their name.
+too) or `!ai …`. On Discord only the ids in `ADMIN_DISCORD_ID` are admins to the bot (Discord vouches for an id,
+not a name), so from your own account you can ask it for anything, building included: `@Blocky build a stone
+hut next to <player>`. Everyone else gets what the bot card on /admin allows players.
 
 ## MCP
 

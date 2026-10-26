@@ -17,7 +17,7 @@ export const COLORS = { up: 0x84e3b5, down: 0xfe6420, join: 0x1096c3, leave: 0x6
 
 /**
  * @param {{ token?: string, channelIds?: string[], webhookUrls?: string[], api?: string, fetchImpl?: typeof fetch,
- *           WebSocketImpl?: typeof WebSocket, onMessage?: (m: { channelId: string, name: string, text: string }) => void,
+ *           WebSocketImpl?: typeof WebSocket, onMessage?: (m: { channelId: string, userId: string, name: string, text: string }) => void,
  *           botName?: () => string, log?: Console }} opts
  */
 export function createDiscord(opts = {}) {
@@ -143,7 +143,7 @@ export function createDiscord(opts = {}) {
     // A mention of the bot reads as its name, so "@Blocky" works from Discord as in game.
     const text = String(d.content ?? '').replace(new RegExp(`<@!?${selfId}>`, 'g'), `@${botName()}`)
       .replace(/<a?(:\w+:)\d+>/g, '$1').replace(/<[@#][!&]?\d+>/g, '@someone').trim();
-    if (text) onMessage({ channelId: String(d.channel_id), name: clean(name, 32), text: clean(text, 400) });
+    if (text) onMessage({ channelId: String(d.channel_id), userId: String(d.author?.id ?? ''), name: clean(name, 32), text: clean(text, 400) });
   }
 
   return {

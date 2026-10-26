@@ -143,6 +143,29 @@ function actions.place(a)
 	return true, "Placed " .. placed .. " blocks" .. (protected > 0 and (", skipped " .. protected .. " protected") or "") .. "."
 end
 
+-- The surface of each column: the highest block a player could stand on, or water.
+local GROUND_TOP, GROUND_BOTTOM = 120, -60
+function actions.ground(a)
+	if type(a.columns) ~= "table" then return false, "No columns." end
+	local found = {}
+	for _, c in ipairs(a.columns) do
+		if not in_world(c.x, 0, c.z) then return false, "A column is outside the world." end
+		core.load_area(vector.new(c.x, GROUND_BOTTOM, c.z), vector.new(c.x, GROUND_TOP, c.z))
+		local hit = { x = c.x, z = c.z, y = nil, block = "not generated yet: a player has not been near" }
+		for y = GROUND_TOP, GROUND_BOTTOM, -1 do
+			local name = core.get_node(vector.new(c.x, y, c.z)).name
+			local def = core.registered_nodes[name]
+			if name ~= "air" and name ~= "ignore" and def
+				and (def.walkable or def.liquidtype ~= "none") and def.drawtype ~= "plantlike" then
+				hit.y, hit.block = y, name
+				break
+			end
+		end
+		found[#found + 1] = hit
+	end
+	return true, core.write_json(found)
+end
+
 function actions.kick(a)
 	if not core.get_player_by_name(a.player) then return false, tostring(a.player) .. " is not online." end
 	core.kick_player(a.player, line(a.reason, 200) ~= "" and line(a.reason, 200) or "Kicked by an admin.")

@@ -68,10 +68,12 @@ test('a tool call runs in the game and its result goes back to the model', async
   assert.deepEqual(back, { type: 'tool_result', tool_use_id: 't1', content: 'Healed alice.' });
 });
 
-test('a Discord user is never an admin, and gets no admin tools', async () => {
-  const { bot, client } = setup([text('Hi!')]);
-  await bot.hear({ source: 'discord', name: 'Boss', text: '@Blocky kick alice', admin: true }, () => {});
-  assert.ok(!client.calls[0].tools.some((t) => t.name === 'kick_player'));
+test('a Discord user gets admin tools only when the caller vouches for them', async () => {
+  const { bot, client } = setup([text('Hi!'), text('Building.')]);
+  await bot.hear({ source: 'discord', name: 'Boss', text: '@Blocky kick alice' }, () => {});
+  assert.ok(!client.calls[0].tools.some((t) => t.name === 'kick_player' || t.name === 'fill_box'));
+  await bot.hear({ source: 'discord', name: 'Ruben', text: '@Blocky build a hut', admin: true }, () => {});
+  assert.ok(client.calls[1].tools.some((t) => t.name === 'fill_box'));
 });
 
 test('a quick second question is dropped, and the hourly limit is said', async () => {

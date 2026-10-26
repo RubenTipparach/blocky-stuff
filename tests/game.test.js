@@ -74,5 +74,5 @@ test('a player may give and teleport only themselves', async () => {
 test('a box is its blocks, hollow is its shell, and a box too big is refused', () => {
   assert.equal(boxNodes({ item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 2, y2: 2, z2: 2 }).length, 27);
   assert.equal(boxNodes({ item: 'default:wood', x1: 2, y1: 2, z1: 2, x2: 0, y2: 0, z2: 0, hollow: true }).length, 26);
-  assert.equal(boxNodes({ item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 9, y2: 9, z2: 9 }), null);
+  assert.equal(boxNodes({ item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 19, y2: 19, z2: 19 }), null);
 });
