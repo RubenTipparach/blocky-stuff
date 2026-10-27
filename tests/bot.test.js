@@ -299,3 +299,17 @@ test('an unfinished task goes on in its own turns and the asker hears when it is
     assert.equal(await bot.work(() => {}), null); // nothing left to do
   } finally { stop(); }
 });
+
+test('a promise with nothing done is sent back once: start it now or say no', async () => {
+  const { bot, client } = setup([
+    text("I'll clear the pines for your field after my workshop!"),
+    text('Fair enough: not today, Ruben, my workshop comes first.'),
+  ]);
+  const said = await bot.hear({ source: 'discord', name: 'ruben', text: 'Blocky, clear the trees for a farm' }, () => {});
+  assert.equal(said, 'Fair enough: not today, Ruben, my workshop comes first.');
+  assert.match(client.calls[1].messages.at(-1).content, /call start_task now/);
+  // The rules: a request comes first, decide details yourself, ask for missing tools, no axes needed.
+  assert.match(client.calls[0].system, /comes before your own project/);
+  assert.match(client.calls[0].system, /request_tool/);
+  assert.match(client.calls[0].system, /no axe/);
+});

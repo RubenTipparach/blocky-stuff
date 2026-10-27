@@ -55,7 +55,7 @@ function startBot() {
   bot = fork(join(dir, 'server', 'index.mjs'), [], {
     cwd: dir,
     execArgv: ['--disable-warning=ExperimentalWarning'],
-    env: { ...process.env, LUANTI_MANAGED: 'false', SUPERVISED: '1', BRIDGE_KEY: bridgeKey, BOT_SHA: sha },
+    env: { ...process.env, LUANTI_MANAGED: 'false', SUPERVISED: '1', BRIDGE_KEY: bridgeKey, BOT_SHA: sha, IMAGE_DIR },
   });
   bot.on('message', (m) => {
     if (m?.type === 'luanti-restart') luanti?.restart().catch((err) => console.error('Luanti restart failed:', err));

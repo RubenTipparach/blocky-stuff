@@ -1,6 +1,9 @@
-# Deploy on every push to every branch, so the newest commit is what is live, after RubenTipparach/rubens-solitare-collection's deploy: tests, then build the
-# image and boot it here (the game must start and its mod must reach the sidecar), then Fly.io. The secrets live
-# in GitHub and are staged onto Fly here, so nobody has to run flyctl. docs/deploy.md has each secret.
+# Tests on every push and pull request; a deploy only when something is merged into main (owner, 2026-10-27: "Git
+# deploys will then need to be merged to trigger deploys from now on"), or when run by hand. After
+# RubenTipparach/rubens-solitare-collection's deploy: tests, then build the image and boot it here (the game must
+# start and its mod must reach the sidecar), then Fly.io. The secrets live in GitHub and are staged onto Fly here,
+# so nobody has to run flyctl. docs/deploy.md has each secret. Between merges, a pushed commit of bot code only can
+# go live from the MCP tool deploy_bot_code (server/mcp.mjs).
 name: deploy
 on:
   push:
@@ -8,6 +11,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,6 +30,8 @@ jobs:
 
   server:
     needs: test
+    # Merged into main (a push to main), or run by hand.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # One Fly deploy at a time; a newer push waits rather than cancelling one mid-release.

@@ -77,6 +77,39 @@ local function start_growing(pos, name)
 	end
 end
 
+-- Turned blocks (owner, 2026-10-27: "A lot of the houses are lacking in style. They all look super blocky"): a facing
+-- (north +z, east +x, south -z, west -x) and upside_down, made into the block's param2. Stairs rise toward their
+-- facing (upside down: hang from it); a door's front looks toward it; a torch, ladder or sign hangs on that side's wall.
+local FACEDIR = { north = 0, east = 1, south = 2, west = 3 }
+local UPSIDE = { [0] = 20, [1] = 23, [2] = 22, [3] = 21 }
+local WALL = { east = 3, west = 2, north = 5, south = 4 } -- wallmounted: the wall is on that side of the block
+local function set_turned(pos, n)
+	local name, param2 = n.item, tonumber(n.param2) or 0
+	local f = n.facing and FACEDIR[n.facing]
+	-- A door is two blocks: the door, and a hidden one above it.
+	local door = name:match("^(doors:door_[%w_]+)$")
+	if door and not door:match("_[ab]$") and core.registered_nodes[door .. "_a"] then
+		param2 = f or 0
+		core.set_node(pos, { name = door .. "_a", param2 = param2 })
+		core.get_meta(pos):set_int("state", 0)
+		local up = vector.add(pos, vector.new(0, 1, 0))
+		if core.registered_nodes["doors:hidden"] then core.set_node(up, { name = "doors:hidden", param2 = param2 }) end
+		return
+	end
+	if name == "default:torch" and n.facing and core.registered_nodes["default:torch_wall"] then
+		name = "default:torch_wall"
+	end
+	local def = core.registered_nodes[name] or {}
+	if f and (def.paramtype2 == "facedir" or def.paramtype2 == "4dir" or def.paramtype2 == "colorfacedir") then
+		param2 = n.upside_down and UPSIDE[f] or f
+	elseif n.facing and (def.paramtype2 == "wallmounted" or def.paramtype2 == "colorwallmounted") then
+		param2 = WALL[n.facing] or 1
+	elseif not f and n.upside_down and def.paramtype2 == "facedir" then
+		param2 = 20 -- a slab or stair hung from above
+	end
+	core.set_node(pos, { name = name, param2 = param2 })
+end
+
 -- Each returns ok, message.
 local actions = {}
 
@@ -152,7 +185,7 @@ function actions.place(a)
 		elseif a.soft and core.get_node(pos).name ~= "air" then
 			filled = filled + 1 -- a prank only fills empty air: it never removes or replaces a block
 		else
-			core.set_node(pos, { name = n.item })
+			set_turned(pos, n)
 			start_growing(pos, n.item)
 			placed = placed + 1
 		end

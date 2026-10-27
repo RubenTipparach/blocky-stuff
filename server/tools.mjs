@@ -175,19 +175,46 @@ export const TOOLS = [
   {
     name: 'place_blocks',
     permission: 'build',
-    description: `Place single blocks: a list of {x, y, z, item}. For shapes a box cannot make. At most ${BUILD_MAX}.`,
+    description: `Place single blocks: a list of {x, y, z, item}, with facing for blocks that turn: stairs rise toward it `
+      + '(upside_down: hang from it, for eaves and arches), a door looks out toward it (a door is placed with its '
+      + 'lower block; doors:door_wood, door_glass...), a torch, ladder or sign hangs on that side\'s wall. North is +z, '
+      + `east +x. For details a box cannot make: window frames, trims, steps, furniture. At most ${BUILD_MAX}.`,
     input_schema: {
       type: 'object',
       properties: {
         blocks: {
           type: 'array', maxItems: BUILD_MAX,
-          items: { type: 'object', properties: { x: pos, y: pos, z: pos, item: { type: 'string' } },
-            required: ['x', 'y', 'z', 'item'], additionalProperties: false },
+          items: { type: 'object', properties: { x: pos, y: pos, z: pos, item: { type: 'string' },
+            facing: { type: 'string', enum: ['north', 'east', 'south', 'west'] }, upside_down: { type: 'boolean' } },
+          required: ['x', 'y', 'z', 'item'], additionalProperties: false },
         },
       },
       required: ['blocks'], additionalProperties: false,
     },
     run: ({ game }, { blocks }) => game.act({ type: 'place', nodes: blocks.slice(0, BUILD_MAX) }),
+  },
+  {
+    name: 'build_roof',
+    permission: 'build',
+    description: 'A proper roof over walls whose outer corners are x1, z1 and x2, z2, starting at height y (one above '
+      + 'the wall tops). style "gable": two slopes of stairs meeting at a ridge, the ends closed with `gable` blocks; '
+      + '"hip": four slopes rising to a ridge or point; "flat": a slab deck with a raised rim. overhang: how far the '
+      + 'eaves stick out (default 1). Stairs like stairs:stair_wood, stair_pine_wood, stair_junglewood, '
+      + 'stair_acacia_wood, stair_brick, stair_stonebrick, stair_cobble, stair_desert_stonebrick (find_items "stair").',
+    input_schema: {
+      type: 'object',
+      properties: { x1: pos, z1: pos, x2: pos, z2: pos, y: pos, style: { type: 'string', enum: ['gable', 'hip', 'flat'] },
+        stairs: { type: 'string' }, gable: { type: 'string', description: 'Block for the gable ends (default: the walls\' look, wood).' },
+        ridge_along: { type: 'string', enum: ['x', 'z'], description: 'Which way the ridge runs (default: the longer side).' },
+        overhang: { type: 'integer', minimum: 0, maximum: 2 } },
+      required: ['x1', 'z1', 'x2', 'z2', 'y', 'stairs'], additionalProperties: false,
+    },
+    run: ({ game }, r) => {
+      const nodes = roofNodes(r);
+      if (!nodes.length) return { ok: false, message: 'That roof has no size.' };
+      if (nodes.length > ROOF_MAX) return { ok: false, message: `That roof is over ${ROOF_MAX} blocks: roof the house in parts.` };
+      return game.act({ type: 'place', nodes });
+    },
   },
   {
     name: 'follow_player',
@@ -283,6 +310,56 @@ export function describeArea(scan, { ax, ay, az, bx, by, bz }) {
 }
 
 /** The blocks of a box, or null when there are too many. */
+const ROOF_MAX = 8000;
+/**
+ * The blocks of a roof (owner, 2026-10-27: "A lot of the houses are lacking in style"): stairs rising from the eaves
+ * to a ridge, each course one in and one up; a gable's ends filled to the slope; a slab ridge where an odd width
+ * leaves one row; a hip's four sides; or a flat slab deck with a rim of stairs.
+ */
+export function roofNodes({ x1, z1, x2, z2, y, style = 'gable', stairs, gable, ridge_along: along, overhang = 1 }) {
+  const o = Math.max(0, Math.min(2, Math.round(overhang)));
+  const [ax, bx] = [Math.min(x1, x2) - o, Math.max(x1, x2) + o];
+  const [az, bz] = [Math.min(z1, z2) - o, Math.max(z1, z2) + o];
+  const slab = String(stairs).replace(/stairs:stair_(inner_|outer_)?/, 'stairs:slab_');
+  const fill = gable || String(stairs).replace(/stairs:stair_(inner_|outer_)?/, 'default:');
+  const nodes = [];
+  const put = (x, yy, z, item, facing) => nodes.push({ x, y: yy, z, item, ...(facing ? { facing } : {}) });
+  if (style === 'flat') {
+    for (let x = ax; x <= bx; x++) for (let z = az; z <= bz; z++) {
+      const rim = x === ax || x === bx || z === az || z === bz;
+      put(x, y, z, rim ? stairs : slab, rim ? (z === az ? 'north' : z === bz ? 'south' : x === ax ? 'east' : 'west') : null);
+    }
+    return nodes;
+  }
+  const alongX = along ? along === 'x' : bx - ax >= bz - az;
+  if (style === 'hip') {
+    for (let k = 0; ; k++) {
+      const [lx, rx, lz, rz] = [ax + k, bx - k, az + k, bz - k];
+      if (lx > rx || lz > rz) break;
+      if (lx === rx || lz === rz) { for (let x = lx; x <= rx; x++) for (let z = lz; z <= rz; z++) put(x, y + k, z, slab); break; }
+      for (let x = lx; x <= rx; x++) { put(x, y + k, lz, stairs, 'north'); put(x, y + k, rz, stairs, 'south'); }
+      for (let z = lz + 1; z < rz; z++) { put(lx, y + k, z, stairs, 'east'); put(rx, y + k, z, stairs, 'west'); }
+    }
+    return nodes;
+  }
+  // Gable: the slopes rise across the short way; the walls under the two ends are closed up to the roof.
+  const [wl, wr] = alongX ? [Math.min(x1, x2), Math.max(x1, x2)] : [Math.min(z1, z2), Math.max(z1, z2)];
+  const [lo, hi] = alongX ? [az, bz] : [ax, bx];
+  const [s0, s1] = alongX ? [ax, bx] : [az, bz];
+  for (let k = 0; ; k++) {
+    const [l, r] = [lo + k, hi - k];
+    if (l > r) break;
+    for (let s = s0; s <= s1; s++) {
+      const at = (c, item, facing) => (alongX ? put(s, y + k, c, item, facing) : put(c, y + k, s, item, facing));
+      if (l === r) { at(l, slab); continue; }
+      at(l, stairs, alongX ? 'north' : 'east');
+      at(r, stairs, alongX ? 'south' : 'west');
+      if (s === wl || s === wr) for (let c = l + 1; c < r; c++) at(c, fill);
+    }
+  }
+  return nodes;
+}
+
 /** How many blocks a fill_box sets. */
 export function boxCount({ x1, y1, z1, x2, y2, z2, hollow = false }) {
   const [a, b, c] = [Math.abs(x2 - x1) + 1, Math.abs(y2 - y1) + 1, Math.abs(z2 - z1) + 1];

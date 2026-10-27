@@ -372,6 +372,7 @@ export const CHARACTER_TOOLS = [
       type: 'object',
       properties: {
         title: { type: 'string', maxLength: 80 }, x: at, y: at, z: at,
+        style: { type: 'string', maxLength: 60, description: 'Its style, e.g. timber-frame, brick townhouse, log cabin, desert house.' },
         steps: { type: 'array', minItems: 3, maxItems: 12, items: { type: 'string', maxLength: 120 } },
       },
       required: ['title', 'x', 'y', 'z', 'steps'], additionalProperties: false,
@@ -402,6 +403,13 @@ export const CHARACTER_TOOLS = [
     description: 'Ask another character to build your project with you. She decides on her own turn whether to join.',
     input_schema: { type: 'object', properties: { who: { type: 'string', description: 'Her name.' },
       why: { type: 'string', maxLength: 120 } }, required: ['who'], additionalProperties: false },
+  },
+  {
+    name: 'request_tool',
+    description: 'When a job needs something none of your tools can do, ask the server\'s builders for a new tool: what '
+      + 'you need to be able to do, and the job it was for. Tell the person it has been asked for; never pretend you did it.',
+    input_schema: { type: 'object', properties: { what: { type: 'string', maxLength: 200 }, why: { type: 'string', maxLength: 200 } },
+      required: ['what', 'why'], additionalProperties: false },
   },
   {
     name: 'recall',
@@ -505,7 +513,7 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       if (ch.project) return { ok: false, message: `You are still on ${ch.project.title}: finish it, or drop_project first.` };
       const steps = (Array.isArray(input.steps) ? input.steps : []).map((x) => String(x).slice(0, 120)).filter(Boolean).slice(0, 12);
       if (steps.length < 3) return { ok: false, message: 'A project needs 3 to 12 steps.' };
-      const project = { title: String(input.title ?? 'a build').slice(0, 80), steps, done: 0, notes: [], started: now,
+      const project = { title: String(input.title ?? 'a build').slice(0, 80), style: String(input.style ?? '').slice(0, 60) || null, steps, done: 0, notes: [], started: now,
         site: { x: Math.round(Number(input.x) || 0), y: Math.round(Number(input.y) || 0), z: Math.round(Number(input.z) || 0) } };
       setState(db, ch.id, { project, goal: project.title });
       ch.project = project;
@@ -523,7 +531,7 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
           const others = crew.filter((o) => o.id !== m.id).map((o) => o.name);
           db.remember(m.id, null, `Finished ${others.length ? `with ${others.join(' and ')} ` : 'my project '}${p.title} at `
             + `(${p.site.x}, ${p.site.y}, ${p.site.z}). ${p.notes.slice(-3).join('; ')}`, 4, now);
-          setState(db, m.id, { project: null, goal: null, lastProject: { title: p.title, site: p.site, at: now } });
+          setState(db, m.id, { project: null, goal: null, lastProject: { title: p.title, style: p.style ?? null, site: p.site, at: now } });
         }
         ch.project = null;
         return { ok: true, message: `${p.title} is finished! Tell everyone, proudly, in one line.` };
@@ -542,6 +550,20 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       const rest = (p.crew ?? []).filter((m) => m.id !== ch.id);
       if (rest.length) shareProject(db, { ...p, crew: rest });
       return { ok: true, message: rest.length ? `Dropped; ${rest.map((m) => m.name).join(' and ')} carries on.` : 'Dropped.' };
+    }
+    case 'request_tool': {
+      // (owner, 2026-10-27: "Bots can also request via mcp server for new tools to be added too"; "You will check the
+      // mcp, ask me and I'll approve it to be built"): read with the MCP tool tool_requests.
+      const list = db.json('tool.requests', []);
+      const what = String(input.what ?? '').trim().slice(0, 200);
+      if (!what) return { ok: false, message: 'Say what you need to be able to do.' };
+      const same = list.find((r) => !r.done && r.what.toLowerCase() === what.toLowerCase());
+      if (same) { same.count += 1; same.last = now; same.by = [...new Set([...same.by, ch.name])]; } else {
+        list.push({ id: list.reduce((m, r) => Math.max(m, r.id), 0) + 1, what, why: String(input.why ?? '').slice(0, 200),
+          by: [ch.name], count: 1, at: now, last: now, done: null });
+      }
+      db.putJson('tool.requests', list.slice(-200));
+      return { ok: true, message: 'Asked for. Tell them it is on the wish list for the server\'s builders, and do what you can meanwhile.' };
     }
     case 'join_project': {
       if (freshProject(db, ch)) return { ok: false, message: 'You have a project of your own: finish it or drop_project first.' };

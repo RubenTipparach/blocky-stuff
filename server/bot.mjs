@@ -68,7 +68,7 @@ const TASK_TOOLS = [
 ];
 const TASK_DEFS = TASK_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
 const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
-const BUILDS = new Set(['fill_box', 'place_blocks', 'farm', 'clear_area']);
+const BUILDS = new Set(['fill_box', 'place_blocks', 'build_roof', 'farm', 'clear_area']);
 const TASK_ROUNDS_MAX = 60; // tool rounds one task may take in all, so a stuck one cannot run up the bill
 const NUDGES = 3; // times a turn is sent back to an open task before it goes on in the background
 
@@ -88,8 +88,28 @@ const CONTEXT_LINES = 20;
 const REPLY_MAX = 450;
 // What a character answers to stay out of a conversation (only between characters, and on its own turns).
 const QUIET = 'QUIET';
+// How to build something worth looking at (owner, 2026-10-27: "the houses are lacking in style. They all look super
+// blocky", "Houses should have various styles and materials. Bricks wood stone glass... All kinds of houses").
+const STYLE_GUIDE = '- Build with style, never a plain box with a flat lid. Every house gets: a foundation one block '
+  + 'wider in a different stone; corner posts of logs or a contrasting block; walls that mix two materials (a base '
+  + 'course, a band under the eaves); framed windows (glass with a sill or slabs above), a real door '
+  + '(doors:door_wood...) with a step in front; a pitched roof from build_roof with an overhang, in a colour that '
+  + 'contrasts with the walls; and details: a chimney, lanterns or wall torches, fences, a porch, flowers, a path. '
+  + 'Shapes beat boxes: an L-plan or a wing, two storeys, a tower, a balcony.\n'
+  + '- Vary the style; each house should look unlike the last (yours and the others\'). Some styles and their '
+  + 'blocks: timber-frame (default:wood or pine_wood walls between default:tree posts and beams, cobble base, '
+  + 'stair_wood gable roof); brick townhouse (default:brick, stonebrick trims, lots of glass, stair_stonebrick or '
+  + 'stair_pine_wood roof, two storeys); log cabin (default:pine_tree or default:tree walls, stair_pine_wood roof, '
+  + 'stone chimney); stone cottage (default:cobble with mossycobble, wood trims, stair_wood roof, flower beds); '
+  + 'desert house (default:desert_stonebrick or sandstonebrick, flat roof with a rim, desert_stone pillars, an inner '
+  + 'courtyard); jungle stilt house (default:junglewood on jungletree stilts, stair_junglewood hip roof, a ladder); '
+  + 'acacia ranch (default:acacia_wood, acacia_tree posts, wide low hip roof, fenced yard); modern glass house '
+  + '(default:glass or obsidian_glass walls on default:stone_block or steelblock frames, flat roof, meselamps); '
+  + 'castle keep (stonebrick, crenellations, towers, slit windows, a gate). Look names up with find_items.\n';
+// "I'll clear it", "I will plant", "let me build", "I'm going to start": a promise of work.
+const PROMISE = /\b(i'?ll|i will|i'?m going to|let me|i can)\s+(\w+\s+){0,3}?(clear|build|make|plant|sow|dig|lay|fell|cut|start|put|fix|add|do|get|set|level|craft|farm|plow|till)\b/i;
 // What a character may use on its own: look, build, walk. Never anything done to a player.
-const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'fill_box', 'place_blocks', 'clear_area', 'farm', 'harvest', 'walk_to']);
+const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'fill_box', 'place_blocks', 'build_roof', 'clear_area', 'farm', 'harvest', 'walk_to']);
 // Most blocks one idle turn may place, all its tool calls together.
 export const IDLE_BLOCKS = 20_000; // blocks a character may set in one turn of her own
 // A person keeps talking to the character they last talked with for this long, without naming it.
@@ -351,6 +371,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     if (r.ok && ACTS.has(use.name)) db.addDeed(`${turn.asker.name} (by ${ch.name})`, use.name, use.input, r.message, now());
     if (r.ok && BUILDS.has(use.name)) { turn.inspected = false; if (task) updateTask(ch.id, task.id, { built: true }); }
     if (r.ok && use.name === 'inspect_area') turn.inspected = true;
+    if (r.ok && (ACTS.has(use.name) || use.name === 'start_task')) turn.acted = true;
     return { type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'), ...(r.ok ? {} : { is_error: true }) };
   }
 
@@ -369,6 +390,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     const messages = [{ role: 'user', content: situation(ch, msg, asker, direct) }];
     let said = null;
     let nudges = 0;
+    let promised = false;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const response = await call(s, systemPrompt(ch), tools, messages);
       if (response.stop_reason === 'refusal') return 'I can\'t help with that one.';
@@ -389,6 +411,16 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
           nudges++;
           messages.push({ role: 'assistant', content: response.content });
           messages.push({ role: 'user', content: nudge(still) });
+          continue;
+        }
+        // A promise with nothing behind it (owner, 2026-10-27: "I asked them to make me a farm ... they seem to have
+        // refused"; they said "I'll fell the pines" and never did): back once, to start it now or say plainly no.
+        if (person && !still && !turn.acted && !promised && PROMISE.test(said ?? '') && round < MAX_ROUNDS - 1) {
+          promised = true;
+          messages.push({ role: 'assistant', content: response.content });
+          messages.push({ role: 'user', content: '[Harness] You said you will do something for them, but you have not started it. '
+            + 'If you will, call start_task now and begin in this turn (decide the details you can yourself, and say what '
+            + 'you chose); a request comes before your own project. If you will not, say so plainly instead.' });
           continue;
         }
         return said;
@@ -524,8 +556,17 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       + '- Big jobs are fine: fill_box sets up to 100,000 blocks at once, and clear_area takes the trees off an area or '
       + 'levels it flat (up to about 316 by 316, without cutting into builds). Clear and level a site before a large '
       + 'build instead of saying it cannot be done; for a huge area, work through it in parts.\n'
+      + STYLE_GUIDE
       + '- This game has farming (wheat and cotton): farm makes a sown field (with water channels), harvest gathers what '
       + 'is ripe and sows again. Crops take about half an hour to ripen.\n'
+      + '- A request from a person comes before your own project: start it right away, in the same turn, not "after I '
+      + 'finish". Decide the details you reasonably can (a spot near them or near what they named, a sensible size, '
+      + 'the crop or material) and say what you chose; ask only when it truly cannot be guessed. Never promise to do '
+      + 'something later without starting it.\n'
+      + '- If a job needs something none of your tools can do, call request_tool (what you need, and for what), tell them it '
+      + 'is on the wish list, and do what you can meanwhile.\n'
+      + '- Your tools change as the server grows. If you once said you could not do something (no farming, no tools, '
+      + 'too big), look at your tools again now before saying it again.\n'
       + '- When someone asks you to do something in the world and you will do it, call start_task first (the goal, and how '
       + 'you will check it), then stay on it: no new topics or projects of your own until it is done. Build it, look at it '
       + 'with inspect_area, fix what is off, and only then finish_task. If it cannot be done, task_blocked and say why. '
@@ -645,8 +686,11 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       const joinable = others.filter((c) => c.project && (c.project.crew?.length ?? 1) < 3);
       const crewmates = (ch.project?.crew ?? []).filter((m) => m.id !== ch.id).map((m) => m.name);
       const free = others.filter((c) => !c.project);
-      const build = 'with find_ground, fill_box and place_blocks, then call step_done with a note. Keep the design coherent '
-        + 'with what is already built (the notes say where), and make it look good: varied blocks, trims, windows, light, details.';
+      const build = 'with find_ground, clear_area, fill_box, place_blocks and build_roof, then look at it with inspect_area and '
+        + 'call step_done with a note. Keep to the project\'s style and what is already built (the notes say where), and make '
+        + 'it look good: two materials, trims, framed windows, a real door, a pitched roof with eaves, light, details.';
+      // The styles built lately, so the next one is different (owner: "Houses should have various styles and materials").
+      const lately = all.map((c) => c.project?.style ?? c.lastProject?.style).filter(Boolean);
       const task = ch.project && crewmates.length
         ? `Work on ${ch.project.title}, which you build with ${crewmates.join(' and ')}: the next step is ${ch.project.steps[ch.project.done]}. `
           + `Build your share of it (${ch.project.crew.find((m) => m.id === ch.id)?.part || 'what has not been done yet'}), `
@@ -661,8 +705,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
             : 'You have no project. Think of something you would love to build, true to who you are (a home of your own, a '
               + 'workshop, a tower, a garden, a farm with fields of wheat or cotton, a well, a bridge, a mine entrance, a shrine to the builder who made you...), '
               + 'something that takes many steps. Pick a spot on natural ground (dirt, grass, sand, stone; check with '
-              + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, call plan_project, '
-              + 'then build the first step.'
+              + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, clear it if trees are '
+              + 'in the way, pick a style from the guide and call plan_project with it, then build the first step.'
+              + (lately.length ? ` Styles built lately: ${[...new Set(lately)].join(', ')}; choose a different one.` : '')
               + (joinable.length && random() < 0.35 ? ` Or, if it suits you, lend a hand instead: join_project with ${joinable.map((c) => `${c.name} `
                 + `(${c.project.title})`).join(' or ')}, taking a part she has not built (a garden, an interior, a path, a matching annex).` : '');
       const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { others: onlineIds(), cast: all, now: t })}`

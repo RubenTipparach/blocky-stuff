@@ -6,7 +6,45 @@
 //   claude mcp add --transport http blocky https://blocky-stuff.fly.dev/mcp --header "Authorization: Bearer <token>"
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { openSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { TOOLS, runTool } from './tools.mjs';
+
+const REPO = process.env.REPO || 'RubenTipparach/blocky-stuff';
+// What a hot update may change: the bot's code, tests and notes. The launcher, Luanti's runner, hotdeploy itself, the
+// mod, the image and the dependencies need a full deploy, which a merge into main makes.
+const HOT_OK = (f) => /^(server\/|tests\/|docs\/)|\.md$/.test(f) && !/^server\/(launcher|luanti|hotdeploy)\.mjs$/.test(f);
+
+/**
+ * Put a pushed commit's bot code live (owner, 2026-10-27: "I want you to be able to update mjs [from the] mcp server,
+ * but only if a git commit was made also"): GitHub must have the commit, and everything it changes since the live
+ * code must be hot-updatable. server/hotdeploy.mjs does the rest, in its own process, once this answer is sent.
+ */
+async function deployBotCode({ sha }) {
+  if (!/^[0-9a-f]{7,40}$/.test(String(sha ?? ''))) return { ok: false, message: 'Give the commit sha (7 to 40 hex characters).' };
+  if (!process.env.SUPERVISED) return { ok: false, message: 'This server is not run by the launcher: it cannot update the bot alone.' };
+  const live = process.env.BOT_SHA || process.env.GIT_SHA || '';
+  if (!/^[0-9a-f]{7,40}$/.test(live)) return { ok: false, message: 'The live commit is unknown: deploy by merging into main.' };
+  const res = await fetch(`https://api.github.com/repos/${REPO}/compare/${live}...${sha}`,
+    { headers: { 'user-agent': 'blocky-stuff', accept: 'application/vnd.github+json' } }).catch(() => null);
+  if (!res?.ok) return { ok: false, message: `GitHub does not have ${sha} (${res?.status ?? 'no answer'}): commit and push it first.` };
+  const cmp = await res.json();
+  const head = cmp.commits?.at(-1)?.sha;
+  if (!head || cmp.status === 'identical') return { ok: false, message: `${sha} is what is live already.` };
+  if (cmp.status === 'behind') return { ok: false, message: `${sha} is older than the live code.` };
+  const files = (cmp.files ?? []).map((f) => f.filename);
+  const full = files.filter((f) => !HOT_OK(f));
+  if (full.length) return { ok: false, message: `These need a full deploy (merge into main): ${full.slice(0, 10).join(', ')}.` };
+  const image = process.env.IMAGE_DIR || join(dirname(fileURLToPath(import.meta.url)), '..');
+  setTimeout(() => {
+    const out = openSync(join(process.env.DATA_DIR || '/data', 'app', 'hotdeploy.log'), 'a');
+    spawn(process.execPath, [join(image, 'server', 'hotdeploy.mjs'), head], { cwd: image, detached: true, stdio: ['ignore', out, out] }).unref();
+  }, 300);
+  return { ok: true, message: `Deploying ${head.slice(0, 7)} (${files.length} files since ${live.slice(0, 7)}): the bot restarts in a few `
+    + 'seconds, the game keeps running. server_status (or GET /api/version) shows the live commit.' };
+}
 
 const LATEST = '2025-11-25';
 
@@ -94,6 +132,33 @@ const OPERATOR_TOOLS = [
         .filter((b) => b.affinity || b.trust || b.status !== 'none')
         .map((b) => ({ name: b.name, affinity: b.affinity, trust: b.trust, status: b.status, nickname: b.nickname || undefined }));
       return { ok: true, message: JSON.stringify({ ...c, memories: db.recentMemories(c.id, 25).map((m) => m.text), people }, null, 1) };
+    },
+  },
+  {
+    name: 'deploy_bot_code',
+    description: 'Put a commit\'s bot code live without restarting the game. The commit must be pushed to GitHub, and '
+      + 'change only bot code (server/, not the launcher, luanti.mjs or hotdeploy.mjs), tests or docs since the live '
+      + 'code; anything else deploys by merging into main.',
+    input_schema: { type: 'object', properties: { sha: { type: 'string' } }, required: ['sha'], additionalProperties: false },
+    run: (ctx, args) => deployBotCode(args),
+  },
+  {
+    name: 'tool_requests',
+    description: 'What the characters asked to be able to do that their tools cannot (request_tool), most asked first; '
+      + 'done ones last. Mark one done (or declined) with resolve, its id and a note.',
+    input_schema: { type: 'object', properties: { resolve: { type: 'integer' }, note: { type: 'string', maxLength: 200 } },
+      additionalProperties: false },
+    run: ({ db }, { resolve, note }) => {
+      const list = db.json('tool.requests', []);
+      if (resolve) {
+        const r = list.find((x) => x.id === resolve);
+        if (!r) return { ok: false, message: `No request ${resolve}.` };
+        r.done = { at: Date.now(), note: String(note ?? 'done') };
+        db.putJson('tool.requests', list);
+        return { ok: true, message: `Request ${resolve} marked: ${r.done.note}.` };
+      }
+      const open = list.filter((r) => !r.done).sort((a, b) => b.count - a.count);
+      return { ok: true, message: JSON.stringify({ open, done: list.filter((r) => r.done).slice(-20) }, null, 1) };
     },
   },
   {

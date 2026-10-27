@@ -154,3 +154,12 @@ test('two characters build together: an invitation, a join, steps shared, and th
   // Nobody to join now; and one with a project of her own cannot join another's.
   assert.equal(run('moss', 'join_project', { with: 'Blocky', part: 'x' }).ok, false);
 });
+
+test('a tool a character needs goes on the wish list, counted once per thing', () => {
+  const { db, blocky, moss } = fresh();
+  runCharacterTool(db, blocky, 'request_tool', { what: 'Plant trees', why: 'Ruben wants an orchard' }, undefined, 1);
+  runCharacterTool(db, moss, 'request_tool', { what: 'plant trees', why: 'a hedge' }, undefined, 2);
+  runCharacterTool(db, moss, 'request_tool', { what: 'Paint signs', why: 'a shop sign' }, undefined, 3);
+  const list = db.json('tool.requests', []);
+  assert.deepEqual(list.map((r) => [r.what, r.count, r.by]), [['Plant trees', 2, ['Blocky', 'Moss']], ['Paint signs', 1, ['Moss']]]);
+});

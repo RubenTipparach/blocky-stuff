@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGame, checkAction } from '../server/game.mjs';
-import { toolsFor, runTool, boxNodes, DEFAULT_POLICY } from '../server/tools.mjs';
+import { toolsFor, runTool, boxNodes, roofNodes, DEFAULT_POLICY } from '../server/tools.mjs';
 
 const alice = { name: 'alice', pos: { x: 1.4, y: 2.6, z: -3 }, hp: 20, privs: ['interact', 'shout'] };
 const boss = { name: 'Boss', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: ['server'] };
@@ -125,4 +125,17 @@ test('fill_box goes as one box action (up to 100,000 blocks), and clear_area cle
   assert.deepEqual([clear.type, clear.mode, clear.y, checkAction(clear)], ['clear', 'level', 12, null]);
   game.sync({ results: [{ id: clear.id, ok: true, message: 'Levelling 100 by 100 at y 12.' }] });
   await levelling;
+});
+
+test('a gable roof rises a course at a time from the eaves to a slab ridge, its ends closed; a hip has four slopes', () => {
+  const gable = roofNodes({ x1: 0, z1: 0, x2: 6, z2: 4, y: 5, stairs: 'stairs:stair_pine_wood' });
+  const at = (n, x, y, z) => n.find((b) => b.x === x && b.y === y && b.z === z);
+  assert.deepEqual([at(gable, 3, 5, -1).facing, at(gable, 3, 5, 5).facing], ['north', 'south']); // eaves, one out
+  assert.deepEqual([at(gable, 3, 6, 0).facing, at(gable, 3, 7, 1).facing], ['north', 'north']);
+  assert.equal(at(gable, 3, 8, 2).item, 'stairs:slab_pine_wood'); // the ridge
+  assert.equal(at(gable, 0, 6, 2).item, 'default:pine_wood'); // the gable end
+  assert.equal(at(gable, 3, 6, 2), undefined); // the attic stays open
+  const hip = roofNodes({ x1: 0, z1: 0, x2: 4, z2: 4, y: 5, style: 'hip', stairs: 'stairs:stair_wood', overhang: 0 });
+  assert.deepEqual([at(hip, 0, 5, 2).facing, at(hip, 4, 5, 2).facing], ['east', 'west']);
+  assert.equal(at(hip, 2, 7, 2).item, 'stairs:slab_wood'); // the point
 });
