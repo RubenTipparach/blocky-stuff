@@ -91,3 +91,21 @@ test('a character follows, comes to and stays for players who ask, each only for
   game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: 'ok' })) });
   assert.ok((await Promise.all(pending)).every((r) => r.ok));
 });
+
+test('farm and harvest go to the mod as actions, for those who may build', async () => {
+  const game = createGame();
+  game.sync({ players: [alice] });
+  assert.ok(toolsFor({ name: 'alice', admin: false }, { ...DEFAULT_POLICY, build: true }).some((t) => t.name === 'farm'));
+  assert.ok(!toolsFor({ name: 'alice', admin: false }, DEFAULT_POLICY).some((t) => t.name === 'farm'));
+  const sowing = runTool('farm', { x1: 0, z1: 0, x2: 8, z2: 5 }, { game, asker: { name: 'Boss', admin: true }, policy: DEFAULT_POLICY });
+  const [farm] = game.sync({}).actions;
+  assert.deepEqual({ ...farm, id: undefined }, { id: undefined, type: 'farm', x1: 0, z1: 0, x2: 8, z2: 5, crop: 'wheat', water: true });
+  game.sync({ results: [{ id: farm.id, ok: true, message: 'Tilled 54, sowed 48 wheat.' }] });
+  assert.equal((await sowing).ok, true);
+  const reaping = runTool('harvest', { x1: 0, z1: 0, x2: 8, z2: 5, y: 3, player: 'alice' }, { game, asker: { name: 'Boss', admin: true }, policy: DEFAULT_POLICY });
+  const [harvest] = game.sync({}).actions;
+  assert.equal(checkAction(harvest), null);
+  assert.equal(harvest.player, 'alice');
+  game.sync({ results: [{ id: harvest.id, ok: true, message: 'Harvested 48.' }] });
+  await reaping;
+});

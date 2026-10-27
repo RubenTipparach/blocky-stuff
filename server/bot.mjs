@@ -68,7 +68,7 @@ const TASK_TOOLS = [
 ];
 const TASK_DEFS = TASK_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
 const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
-const BUILDS = new Set(['fill_box', 'place_blocks']);
+const BUILDS = new Set(['fill_box', 'place_blocks', 'farm']);
 const TASK_ROUNDS_MAX = 60; // tool rounds one task may take in all, so a stuck one cannot run up the bill
 const NUDGES = 3; // times a turn is sent back to an open task before it goes on in the background
 
@@ -89,7 +89,7 @@ const REPLY_MAX = 450;
 // What a character answers to stay out of a conversation (only between characters, and on its own turns).
 const QUIET = 'QUIET';
 // What a character may use on its own: look, build, walk. Never anything done to a player.
-const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'fill_box', 'place_blocks', 'walk_to']);
+const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'fill_box', 'place_blocks', 'farm', 'harvest', 'walk_to']);
 // Most blocks one idle turn may place, all its tool calls together.
 export const IDLE_BLOCKS = 400;
 // A person keeps talking to the character they last talked with for this long, without naming it.
@@ -516,6 +516,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       + 'player to build near if it is not clear), check the ground there with find_ground, then build with '
       + 'fill_box (floors, walls, roofs; hollow for rooms, air to cut doors and windows) and place_blocks for '
       + 'details. Build a few blocks away from players, never on top of them. Say what you built and where.\n'
+      + '- This game has farming (wheat and cotton): farm makes a sown field (with water channels), harvest gathers what '
+      + 'is ripe and sows again. Crops take about half an hour to ripen.\n'
       + '- When someone asks you to do something in the world and you will do it, call start_task first (the goal, and how '
       + 'you will check it), then stay on it: no new topics or projects of your own until it is done. Build it, look at it '
       + 'with inspect_area, fix what is off, and only then finish_task. If it cannot be done, task_blocked and say why. '
@@ -649,7 +651,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
               + `${invite.project.site.z})${invite.project.invited.why ? ` (${invite.project.invited.why})` : ''}. If you like the idea, `
               + `join_project with her, saying which part you will take, then build it; if not, plan a project of your own and tell her why, kindly.`
             : 'You have no project. Think of something you would love to build, true to who you are (a home of your own, a '
-              + 'workshop, a tower, a garden, a well, a bridge, a mine entrance, a shrine to the builder who made you...), '
+              + 'workshop, a tower, a garden, a farm with fields of wheat or cotton, a well, a bridge, a mine entrance, a shrine to the builder who made you...), '
               + 'something that takes many steps. Pick a spot on natural ground (dirt, grass, sand, stone; check with '
               + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, call plan_project, '
               + 'then build the first step.'

@@ -124,6 +124,34 @@ export const TOOLS = [
       return game.act({ type: 'place', nodes });
     },
   },
+  // Farming (Minetest Game's: wheat and cotton). Seeds set with place_blocks grow too, on wet soil near water.
+  {
+    name: 'farm',
+    permission: 'build',
+    description: 'Make a field: till the ground of an area (x1, z1 to x2, z2; at most 16 by 16) into wet soil and sow it '
+      + 'with wheat or cotton, digging water channels where there is no water within 3 blocks (crops need it). The ground '
+      + 'must be dirt, grass or similar. Crops ripen in about 25 to 40 minutes in daylight; then use harvest. Wheat makes '
+      + 'flour and bread (crafted), cotton makes string and wool. A fence around the field keeps it tidy.',
+    input_schema: {
+      type: 'object',
+      properties: { x1: pos, z1: pos, x2: pos, z2: pos, crop: { type: 'string', enum: ['wheat', 'cotton'] },
+        water: { type: 'boolean', description: 'Dig water channels if needed (default true).' } },
+      required: ['x1', 'z1', 'x2', 'z2'], additionalProperties: false,
+    },
+    run: ({ game }, f) => game.act({ type: 'farm', x1: f.x1, z1: f.z1, x2: f.x2, z2: f.z2, crop: f.crop ?? 'wheat', water: f.water !== false }),
+  },
+  {
+    name: 'harvest',
+    permission: 'build',
+    description: 'Gather the ripe crops of a field (its corners, and y about the ground\'s height), sow it again, and give '
+      + 'the harvest to a player (or leave it on the field). Says how many are still growing.',
+    input_schema: {
+      type: 'object',
+      properties: { x1: pos, z1: pos, x2: pos, z2: pos, y: pos, player: { type: 'string', description: 'Who gets the harvest.' } },
+      required: ['x1', 'z1', 'x2', 'z2', 'y'], additionalProperties: false,
+    },
+    run: ({ game }, f) => game.act({ type: 'harvest', x1: f.x1, z1: f.z1, x2: f.x2, z2: f.z2, y: f.y, ...(f.player ? { player: f.player } : {}) }),
+  },
   {
     name: 'place_blocks',
     permission: 'build',

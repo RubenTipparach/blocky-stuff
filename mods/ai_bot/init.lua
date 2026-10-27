@@ -68,6 +68,15 @@ local function in_world(x, y, z)
 		and math.abs(x) < WORLD_LIMIT and math.abs(y) < WORLD_LIMIT and math.abs(z) < WORLD_LIMIT
 end
 
+-- A seed or crop set straight into the world does not grow by itself: planting it by hand starts its timer, so do the
+-- same (Minetest Game's farming: a growth step every 166 to 286 seconds, on wet soil, in light).
+local function start_growing(pos, name)
+	local def = core.registered_nodes[name]
+	if def and def.on_timer and (core.get_item_group(name, "plant") > 0 or core.get_item_group(name, "seed") > 0) then
+		core.get_node_timer(pos):start(math.random(166, 286))
+	end
+end
+
 -- Each returns ok, message.
 local actions = {}
 
@@ -144,6 +153,7 @@ function actions.place(a)
 			filled = filled + 1 -- a prank only fills empty air: it never removes or replaces a block
 		else
 			core.set_node(pos, { name = n.item })
+			start_growing(pos, n.item)
 			placed = placed + 1
 		end
 	end
@@ -172,6 +182,106 @@ function actions.ground(a)
 		found[#found + 1] = hit
 	end
 	return true, core.write_json(found)
+end
+
+-- ---- Farming (owner, 2026-10-27: "the bot is complaining that theres no farming mechanics", there is: wheat and cotton) ----
+
+local CROPS = { wheat = "farming:seed_wheat", cotton = "farming:seed_cotton" }
+local FIELD_MAX = 16
+
+-- The surface block of a column (as actions.ground sees it), and its y; or nil.
+local function surface(x, z)
+	for y = GROUND_TOP, GROUND_BOTTOM, -1 do
+		local name = core.get_node(vector.new(x, y, z)).name
+		local def = core.registered_nodes[name]
+		if name ~= "air" and name ~= "ignore" and def and (def.walkable or def.liquidtype ~= "none") and def.drawtype ~= "plantlike" then
+			return y, name
+		end
+	end
+end
+
+-- Till the ground of an area into wet soil and sow it, with water channels where none is within 3 blocks (soil needs it).
+function actions.farm(a)
+	local seed = CROPS[a.crop or "wheat"]
+	if not seed or not core.registered_nodes[seed] then return false, "This game has no " .. tostring(a.crop) .. " to sow." end
+	if not (in_world(a.x1, 0, a.z1) and in_world(a.x2, 0, a.z2)) then return false, "The field is outside the world." end
+	local x1, x2, z1, z2 = math.min(a.x1, a.x2), math.max(a.x1, a.x2), math.min(a.z1, a.z2), math.max(a.z1, a.z2)
+	if x2 - x1 + 1 > FIELD_MAX or z2 - z1 + 1 > FIELD_MAX then return false, "A field is at most " .. FIELD_MAX .. " by " .. FIELD_MAX .. "." end
+	core.load_area(vector.new(x1 - 4, GROUND_BOTTOM, z1 - 4), vector.new(x2 + 4, GROUND_TOP, z2 + 4))
+	-- Which columns are dry: no water within 3. Then a channel down every 7th column (x1 + 3, + 10) waters them.
+	local dry = false
+	for x = x1, x2 do for z = z1, z2 do
+		local y = surface(x, z)
+		if y and not core.find_node_near(vector.new(x, y, z), 3, { "group:water" }) then dry = true end
+	end end
+	local tilled, sown, water, skipped = 0, 0, 0, 0
+	for x = x1, x2 do for z = z1, z2 do
+		local y, name = surface(x, z)
+		local pos = y and vector.new(x, y, z)
+		local above = pos and vector.add(pos, vector.new(0, 1, 0))
+		local def = name and core.registered_nodes[name]
+		local up = above and core.registered_nodes[core.get_node(above).name]
+		if not pos or core.is_protected(pos, "") or not (def.soil or core.get_item_group(name, "soil") >= 2)
+			or not up or not (up.buildable_to or core.get_node(above).name == "air") then
+			skipped = skipped + 1
+		elseif a.water ~= false and dry and (x - x1) % 7 == 3 and x2 - x1 >= 2 then
+			core.set_node(pos, { name = "default:water_source" })
+			if up.buildable_to then core.set_node(above, { name = "air" }) end
+			water = water + 1
+		else
+			if def.soil and def.soil.wet then core.set_node(pos, { name = def.soil.wet }); tilled = tilled + 1 end
+			core.set_node(above, { name = seed, param2 = 1 })
+			start_growing(above, seed)
+			sown = sown + 1
+		end
+	end end
+	return true, "Tilled " .. tilled .. ", sowed " .. sown .. " " .. (a.crop or "wheat")
+		.. (water > 0 and (", dug " .. water .. " blocks of water channel") or "")
+		.. (skipped > 0 and (", skipped " .. skipped .. " spots (not soil, built on, or protected)") or "")
+		.. ". It ripens in about 25 to 40 minutes, in daylight."
+end
+
+-- Gather the ripe crops of an area (y: about the ground's height), sow each spot again, and give the harvest to a player
+-- (or drop it on the field). Tells how far the rest has grown.
+function actions.harvest(a)
+	if not (in_world(a.x1, a.y or 0, a.z1) and in_world(a.x2, a.y or 0, a.z2)) then return false, "The field is outside the world." end
+	local x1, x2, z1, z2 = math.min(a.x1, a.x2), math.max(a.x1, a.x2), math.min(a.z1, a.z2), math.max(a.z1, a.z2)
+	if x2 - x1 + 1 > FIELD_MAX * 2 or z2 - z1 + 1 > FIELD_MAX * 2 then return false, "That is too big: one field at a time." end
+	local lo, hi = vector.new(x1, (a.y or 0) - 8, z1), vector.new(x2, (a.y or 0) + 8, z2)
+	core.load_area(lo, hi)
+	local ripe, growing, got = 0, 0, {}
+	for crop, seed in pairs(CROPS) do
+		local last = "farming:" .. crop .. "_8"
+		for _, pos in ipairs(core.find_nodes_in_area(lo, hi, { "group:" .. crop })) do
+			local name = core.get_node(pos).name
+			if name == last and not core.is_protected(pos, "") then
+				local replant = false
+				for _, item in ipairs(core.get_node_drops(name, "")) do
+					local stack = ItemStack(item)
+					if not replant and stack:get_name() == seed then stack:take_item(1); replant = true end
+					if not stack:is_empty() then got[#got + 1] = stack end
+				end
+				core.set_node(pos, { name = seed, param2 = 1 })
+				start_growing(pos, seed)
+				ripe = ripe + 1
+			elseif name ~= seed and name:find("^farming:" .. crop .. "_%d$") then
+				growing = growing + 1
+			end
+		end
+	end
+	local who = a.player and core.get_player_by_name(a.player)
+	local counts = {}
+	for _, stack in ipairs(got) do
+		counts[stack:get_name()] = (counts[stack:get_name()] or 0) + stack:get_count()
+		local left = who and who:get_inventory():add_item("main", stack) or stack
+		if not left:is_empty() then core.add_item(vector.new((x1 + x2) / 2, (a.y or 0) + 1, (z1 + z2) / 2), left) end
+	end
+	local parts = {}
+	for name, n in pairs(counts) do parts[#parts + 1] = n .. " " .. name end
+	if ripe == 0 then return true, "Nothing is ripe yet (" .. growing .. " plants still growing)." end
+	return true, "Harvested " .. ripe .. " ripe plants (" .. table.concat(parts, ", ") .. ")"
+		.. (who and (", given to " .. a.player) or ", left on the field") .. ", and sowed them again; "
+		.. growing .. " still growing."
 end
 
 function actions.kick(a)
@@ -499,6 +609,8 @@ local function after(a)
 		core.after(0.5, function() face(id, a.player) end)
 	elseif a.type == "say" and a.near then
 		face(id, a.near)
+	elseif (a.type == "farm" or a.type == "harvest") and a.x1 then
+		go(id, vector.new(a.x1, a.y or select(1, surface(a.x1, a.z1)) or 0, a.z1), "mine")
 	elseif a.type == "place" and type(a.nodes) == "table" and a.nodes[1] then
 		local n = a.nodes[1]
 		go(id, vector.new(n.x, n.y, n.z), "mine")
