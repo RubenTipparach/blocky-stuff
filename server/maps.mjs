@@ -402,7 +402,7 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 syst
 main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
 h1 { color: var(--accent); font-size: 24px; margin: 0 0 4px; } h2 { color: var(--accent); font-size: 18px; margin: 28px 0 10px; }
 p { color: var(--muted); margin: 0 0 14px; } a { color: var(--accent); }
-#map { height: min(72vh, 680px); border-radius: 10px; border: 1px solid var(--line); background: #a8c7d6; }
+#map { height: min(72vh, 680px); border-radius: 10px; border: 1px solid var(--line); background: #142038; }
 .leaflet-container { font: 13px system-ui, sans-serif; }
 .who { background: rgba(20, 24, 18, .85); color: #fff; border: 0; border-radius: 6px; padding: 2px 6px; font-weight: 600; box-shadow: none; }
 .who::before { display: none; }

@@ -8,8 +8,8 @@ import { readFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 
 const COLORS_FILE = new URL('./map/colors.txt', import.meta.url);
-// A pale sky behind the picture: the darkest blocks (leaves, in shade) stand out from it.
-const BG = [168, 199, 214];
+// A dark blue behind the picture (owner, 2026-10-27: "background of map should be dark blue").
+const BG = [20, 32, 56];
 // How much light each face gets: the top, the face toward the viewer's left (south) and right (east).
 const SHADE = { top: 1, left: 0.8, right: 0.64 };
 
