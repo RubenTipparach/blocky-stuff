@@ -274,7 +274,7 @@ test('a task is carried to the end: pushed back when left open, finished only af
     const answer = await bot.hear({ source: 'game', name: 'alice', text: 'Blocky, make me a cobble floor', admin: true }, () => {});
     assert.equal(answer, 'Your floor is done, alice!');
     const sent = client.calls.map((c) => c.messages.at(-1).content);
-    assert.match(String(sent[2]), /\[Not finished\]/);
+    assert.match(JSON.stringify(sent[2]), /\[Not finished\]/);
     assert.match(JSON.stringify(sent[4]), /Not yet: look at what you built with inspect_area/);
     const [task] = bot.tasksOf('blocky');
     assert.deepEqual([task.status, task.built], ['done', true]);
@@ -308,7 +308,7 @@ test('a promise with nothing done is sent back once: start it now or say no', as
   ]);
   const said = await bot.hear({ source: 'discord', name: 'ruben', text: 'Blocky, clear the trees for a farm' }, () => {});
   assert.equal(said, 'Fair enough: not today, Ruben, my workshop comes first.');
-  assert.match(client.calls[1].messages.at(-1).content, /call start_task now/);
+  assert.match(JSON.stringify(client.calls[1].messages.at(-1).content), /call start_task now/);
   // The rules: a request comes first, decide details yourself, ask for missing tools, no axes needed.
   assert.match(client.calls[0].system, /comes before your own project/);
   assert.match(client.calls[0].system, /request_tool/);
@@ -371,4 +371,23 @@ test('two models: talk on the talking model, building on the building model, a j
   await bot.hear({ source: 'game', name: 'ruben', text: 'Blocky, hi' }, () => {});
   await bot.hear({ source: 'game', name: 'ruben', text: 'Blocky, make me a bench' }, () => {});
   assert.deepEqual(client.calls.map((c) => c.model), ['claude-haiku-5-5', 'claude-haiku-5-5', 'claude-opus-5-5', 'claude-opus-5-5', 'claude-opus-5-5']);
+});
+
+test('a reply cut off mid-call, or pushed back by the harness, leaves no tool call without a result', async () => {
+  const cut = () => ({ stop_reason: 'max_tokens', usage: {}, content: [{ type: 'tool_use', id: 'big', name: 'place_blocks', input: { blocks: [] } }] });
+  const { db, game, bot, client } = setup([cut, text('Done in smaller parts, Ruben!')]);
+  db.putJson('bot', { cooldown: 0, listen: 'every' });
+  game.sync({ players: [{ name: 'ruben', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: ['server'] }] });
+  assert.equal(await bot.hear({ source: 'game', name: 'ruben', text: 'Blocky, build a big wall' }, () => {}), 'Done in smaller parts, Ruben!');
+  // The second request answers every tool call of the first reply before saying anything else.
+  const sent = client.calls[1].messages;
+  const last = sent.at(-1).content;
+  assert.deepEqual([last[0].type, last[0].tool_use_id, last[0].is_error], ['tool_result', 'big', true]);
+  assert.match(last.at(-1).text, /cut off/);
+  for (let i = 0; i < sent.length; i++) {
+    const ids = Array.isArray(sent[i].content) ? sent[i].content.filter((b) => b.type === 'tool_use').map((b) => b.id) : [];
+    if (!ids.length) continue;
+    const answered = (sent[i + 1]?.content ?? []).filter((b) => b.type === 'tool_result').map((b) => b.tool_use_id);
+    assert.deepEqual(answered.sort(), ids.sort(), `message ${i}`);
+  }
 });
