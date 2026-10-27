@@ -48,6 +48,13 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetch, now = () => Date.now(),
   game = createGame({ now }), discord = null, bot = null, log = console, daily = false }) {
   const sessionSecret = config.sessionSecret || db.secret('session');
+  // Once: "mentions only" was the first version's default and stayed saved; everyone gets an answer now (owner,
+  // 2026-10-27: "Someone should reply"). Set it back on /admin after this if wanted.
+  if (!db.setting('once.listen-all')) {
+    const b = db.json('bot', {});
+    if (b.listen === 'mentions') db.putJson('bot', { ...b, listen: 'all' });
+    db.putSetting('once.listen-all', '1');
+  }
   const redirectUri = `${config.publicUrl}/auth/discord/callback`;
   const relay = () => ({ chat: true, news: true, ...db.json('relay', {}) });
   // The characters in the world now, and the one who speaks for the server (the first).

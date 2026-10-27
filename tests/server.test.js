@@ -311,3 +311,14 @@ test('Discord: plain messages are heard, and on reconnecting the bot catches up 
   assert.deepEqual(heard, ['are you there?', 'Test. can you guys hear me?']);
   assert.equal(seen.get(CH), '103');
 });
+
+test('once, an old "mentions only" setting becomes "every message"; after that the admin\'s choice stands', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost' });
+  const db = openDb(':memory:');
+  db.putJson('bot', { listen: 'mentions', cooldown: 5 });
+  makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
+  assert.deepEqual(db.json('bot', {}), { listen: 'all', cooldown: 5 });
+  db.putJson('bot', { listen: 'mentions' });
+  makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
+  assert.equal(db.json('bot', {}).listen, 'mentions');
+});
