@@ -357,3 +357,18 @@ test('a speaker in the world: where they stand and look, so "here" and "there" m
   await bot.hear({ source: 'discord', name: 'PscifieX', personId: 'discord:42', text: 'Blocky, come here' }, () => {});
   assert.match(client.calls[1].messages[0].content, /as ruben, though writing from Discord\) at \(-60, 10, 42\)/);
 });
+
+test('two models: talk on the talking model, building on the building model, a job switching over when it starts', async () => {
+  const { db, game, bot, client } = setup([
+    text('Hello, Ruben!'),
+    () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 't1', name: 'start_task', input: { goal: 'a bench', check: 'it is there' } }] }),
+    text('All done, a bench by you.'),
+    () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 't2', name: 'task_blocked', input: { reason: 'test' } }] }),
+    text('Set aside.'),
+  ]);
+  db.putJson('bot', { cooldown: 0, listen: 'every', model: 'claude-haiku-5-5', buildModel: 'claude-opus-5-5' });
+  game.sync({ players: [{ name: 'ruben', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: ['server'] }] });
+  await bot.hear({ source: 'game', name: 'ruben', text: 'Blocky, hi' }, () => {});
+  await bot.hear({ source: 'game', name: 'ruben', text: 'Blocky, make me a bench' }, () => {});
+  assert.deepEqual(client.calls.map((c) => c.model), ['claude-haiku-5-5', 'claude-haiku-5-5', 'claude-opus-5-5', 'claude-opus-5-5', 'claude-opus-5-5']);
+});

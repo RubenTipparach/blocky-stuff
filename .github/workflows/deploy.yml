@@ -63,7 +63,7 @@ jobs:
             if [ -n "$live" ] && [ -n "$image" ] && [ "$image" != "unknown" ] && git cat-file -e "${live}^{commit}" 2>/dev/null; then
               changed="$(git diff --name-only "$live" "$GITHUB_SHA")"
               echo "Changed since the live ${live:0:7}:"; echo "$changed"
-              others="$(echo "$changed" | grep -vE '^(server/|tests/|docs/)|\.md$' || true)"
+              others="$(echo "$changed" | grep -vE '^(server/|tests/|docs/|openspec/|\.claude/|\.github/)|\.md$' || true)"
               core="$(echo "$changed" | grep -E '^server/(launcher|luanti|hotdeploy)\.mjs$' || true)"
               if [ -n "$changed" ] && [ -z "$others" ] && [ -z "$core" ]; then mode=hot; fi
             fi

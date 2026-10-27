@@ -497,6 +497,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
       if (typeof body.name === 'string' && /^[\w-]{2,20}$/.test(body.name.trim())) next.name = body.name.trim();
       if (typeof body.model === 'string' && /^[a-z0-9.-]{3,60}$/.test(body.model)) next.model = body.model;
+      if (typeof body.buildModel === 'string' && /^[a-z0-9.-]{3,60}$/.test(body.buildModel)) next.buildModel = body.buildModel;
       if (EFFORTS.includes(body.effort)) next.effort = body.effort;
       if (typeof body.persona === 'string') next.persona = body.persona.slice(0, 2000);
       for (const k of ['cooldown', 'perHour', 'perDay']) {

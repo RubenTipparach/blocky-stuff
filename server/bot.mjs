@@ -142,6 +142,8 @@ export function botSettings(db, config) {
   return {
     enabled: saved.enabled ?? true,
     model: saved.model || config.model,
+    // The model for building (her own projects, gifts, tasks): the talking model unless set apart on /admin.
+    buildModel: saved.buildModel || saved.model || config.model,
     effort: saved.effort || config.effort,
     // Seconds between one person's questions (a quicker one waits, it is not dropped), and most an hour.
     cooldown: saved.cooldown ?? 2,
@@ -426,7 +428,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     let nudges = 0;
     let promised = false;
     for (let round = 0; round < MAX_ROUNDS; round++) {
-      const response = await call(s, systemPrompt(ch), tools, messages);
+      // Talk on the talking model; once she takes a job on or acts in the world, the building model carries it.
+      const response = await call(s, systemPrompt(ch), tools, messages, turn.acted || openTask(ch.id) ? s.buildModel : s.model);
       if (response.stop_reason === 'refusal') return 'I can\'t help with that one.';
       const task = openTask(ch.id);
       if (task) {
@@ -493,7 +496,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         + 'then one line to them.' }];
       let said = null;
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const response = await call(s, systemPrompt(ch), tools, messages);
+        const response = await call(s, systemPrompt(ch), tools, messages, s.buildModel); // a task: building
         if (response.stop_reason === 'refusal') break;
         const current = openTask(ch.id);
         if (current) {
@@ -556,15 +559,17 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     return r;
   }
 
-  async function call(s, system, tools, messages) {
+  // model: s.model (talking) or s.buildModel (building) (owner, 2026-10-27: "Can we route API to two models? speech via
+  // haiku and building via opus").
+  async function call(s, system, tools, messages, model = s.model) {
     const response = await llm.beta.messages.create({
-      model: s.model,
+      model,
       max_tokens: 4000,
       system,
       ...(tools ? { tools } : {}),
       messages,
       output_config: { effort: s.effort },
-      ...(FALLBACK_MODELS.has(s.model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
+      ...(FALLBACK_MODELS.has(model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
     });
     db.addUsage(response.usage?.input_tokens ?? 0, response.usage?.output_tokens ?? 0, now());
     return response;
@@ -925,7 +930,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         + `someone${others.length ? `, or for ${others.map((c) => c.name).join(' or ')} by name` : ''}); otherwise answer with exactly QUIET.` }];
       let placed = 0;
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const response = await call(s, systemPrompt(ch), tools, messages);
+        const response = await call(s, systemPrompt(ch), tools, messages, s.buildModel); // her own work or a gift: building
         if (response.stop_reason === 'refusal') return null;
         const uses = response.content.filter((b) => b.type === 'tool_use');
         if (response.stop_reason !== 'tool_use' || !uses.length) {

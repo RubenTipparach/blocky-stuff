@@ -16,7 +16,8 @@ import { needsOf, traitsOf } from './character.mjs';
 const REPO = process.env.REPO || 'RubenTipparach/blocky-stuff';
 // What a hot update may change: the bot's code, tests and notes. The launcher, Luanti's runner, hotdeploy itself, the
 // mod, the image and the dependencies need a full deploy, which a merge into main makes.
-const HOT_OK = (f) => /^(server\/|tests\/|docs\/)|\.md$/.test(f) && !/^server\/(launcher|luanti|hotdeploy)\.mjs$/.test(f);
+// Specs and agent files (openspec/, .claude/) and the workflows (.github/) never run on the machine: they are fine too.
+const HOT_OK = (f) => /^(server\/|tests\/|docs\/|openspec\/|\.claude\/|\.github\/)|\.md$/.test(f) && !/^server\/(launcher|luanti|hotdeploy)\.mjs$/.test(f);
 
 /**
  * Put a pushed commit's bot code live (owner, 2026-10-27: "I want you to be able to update mjs [from the] mcp server,
