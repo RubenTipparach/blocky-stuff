@@ -193,8 +193,16 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (m.userId) db.meet(personId('discord', m.userId), m.name, { at: now() });
     const linking = /^!link\s+([0-9a-f]{6})\s*$/i.exec(m.text.trim());
     if (linking && m.userId) return linkDiscord(m, linking[1]);
-    if (/^!map\b/i.test(m.text.trim())) {
-      maps.command(m.text).catch((err) => log.error('!map failed:', err));
+    if (/^!(?:map|picture|pic|photo|snap)\b/i.test(m.text.trim())) {
+      maps.command(m.text).catch((err) => log.error('picture command failed:', err));
+      return undefined;
+    }
+    if (/^!help\s*$/i.test(m.text.trim())) {
+      const names = characters().map((c) => c.name);
+      chat.post({ as: host().name, text: `Talk to ${names.join(' or ')} here: say a name, or just talk. Commands: `
+        + '!picture (everyone), !picture <name>, !picture <x> <z> (a spot), all also as !map; '
+        + '!link <code> joins your game self (type !link in game for the code). '
+        + `Maps: ${config.publicUrl}/map` }).catch((err) => log.error(err));
       return undefined;
     }
     db.addChat('discord', m.name, m.text, now());

@@ -305,12 +305,15 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     };
   }
 
-  /** !map, !map <name>, !map <x> <z> in the Discord channel. Returns true when the line was one. */
+  /**
+   * !map, !map <name>, !map <x> <z> in the Discord channel, and the same as !picture, !pic, !photo or !snap (owner,
+   * 2026-10-27: "add discord bot command to take pictures too"). Returns true when the line was one.
+   */
   async function command(text) {
-    const m = /^!map(?:\s+(.+))?$/i.exec(String(text ?? '').trim());
+    const m = /^!(?:map|picture|pic|photo|snap)(?:\s+(.+))?$/i.exec(String(text ?? '').trim());
     if (!m) return false;
     if (now() - lastMapCommand < MAP_COMMAND_GAP_MS) {
-      await chat.post({ text: 'Give the map a moment: one !map every 30 seconds.' });
+      await chat.post({ text: 'Give the camera a moment: one picture every 30 seconds.' });
       return true;
     }
     lastMapCommand = now();
@@ -324,7 +327,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     }
     const all = characters();
     const pick = arg ? all.filter((c) => c.name.toLowerCase().startsWith(arg.toLowerCase())) : all;
-    if (!pick.length) { await chat.post({ text: `Nobody called ${arg}. Try !map, !map <name> or !map <x> <z>.` }); return true; }
+    if (!pick.length) { await chat.post({ text: `Nobody called ${arg}. Try !picture, !picture <name> or !picture <x> <z>.` }); return true; }
     for (const ch of pick.slice(0, 3)) {
       const snap = await snapshot(ch);
       if (snap) await postPicture(snap, snap.title, ch);

@@ -57,7 +57,7 @@ test('the public map page, a render on request held to its pace, and !map postin
     assert.deepEqual([...new Uint8Array(await r.arrayBuffer()).subarray(0, 4)], PNG);
     assert.equal((await fetch(`${base}/map/render?x=0&z=0`)).status, 429);
     assert.equal((await fetch(`${base}/map/render?x=a`)).status, 400);
-    await server.maps.command('!map blocky');
+    await server.maps.command('!picture blocky');
     assert.equal(pictures.length, 1);
     assert.equal(pictures[0].as, 'Blocky');
     assert.deepEqual([...pictures[0].png.subarray(0, 4)], PNG);
