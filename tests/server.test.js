@@ -276,3 +276,14 @@ test('asleep while nobody is in the game; switching sleep off wakes them at once
     await new Promise((r) => server.close(r));
   }
 });
+
+test('/help is a guide: how to join, the characters, every command, seen only by the asker', async () => {
+  const s = await start({ GAME_ADDRESS: '1.2.3.4' });
+  const replies = [];
+  await s.server.slash({ name: 'help', options: {}, userId: '42', userName: 'x', reply: async (t, o) => replies.push(o) });
+  const { embed, ephemeral } = replies[0];
+  assert.equal(ephemeral, true);
+  const text = JSON.stringify(embed);
+  for (const want of ['luanti.org', '1.2.3.4', '30000', 'Blocky', 'Moss', '/picture', '/link', '/talk', '/rel', '/map']) assert.ok(text.includes(want), want);
+  await s.close();
+});

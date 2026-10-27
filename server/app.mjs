@@ -204,14 +204,40 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     return `Got it, ${userName}: you and ${entry.name} in the game are one and the same to us now.`;
   }
 
-  const helpText = () => `Talk to ${characters().map((c) => c.name).join(' or ')} here or in the game: say a name, or just talk. `
-    + 'Commands: /picture (everyone), /picture who:<name>, /picture who:<x> <z> (a spot); /map; /link code:<code> joins your '
-    + `game account (type /link in the game for the code). In the game: /talk, /follow, /come, /stay, /rel, /link. Maps: ${config.publicUrl}/map`;
+  /**
+   * /help (owner, 2026-10-27: "help to get a list of commands and instructions on how to play the game"): how to join,
+   * who the characters are and how to talk to them, and every command, as one embed only the asker sees.
+   */
+  const helpEmbed = () => {
+    const cast = characters();
+    const field = (name, value) => ({ name, value: value.slice(0, 1024) });
+    return {
+      color: parseInt(String(host().chatColor ?? '#f2b84b').slice(1), 16) || 0xf2b84b,
+      title: `How to play on ${config.serverName}`,
+      description: `A Luanti world where ${cast.map((c) => `**${c.name}**`).join(' and ')} live, build their own projects, `
+        + 'and remember everyone they meet.',
+      url: `${config.publicUrl}/map`,
+      fields: [
+        field('🎮 Join the game', `1. Get Luanti, free: ${LUANTI_URL}\n2. Open it, go to **Join Game**\n`
+          + `3. Address \`${config.gameAddress || new URL(config.publicUrl).hostname}\`, port \`${config.gamePort}\`\n`
+          + '4. Pick a name and password, then **Register** (next time, **Login**)'),
+        field('💬 Talk to the characters', `${cast.map((c) => `**${c.name}**: ${String(c.personality ?? '').split(/(?<=\.)\s/)[0]}`).join('\n')}\n`
+          + 'Just chat, here or in the game. Say a name to talk to one; in the game you can also look at her. Ask them '
+          + 'for help, items, or a build; how they treat you depends on how you treat them.'),
+        field('🧭 Discord commands', '`/picture`: what the characters are up to (`who:Moss`, or `who:120 -40` for a spot)\n'
+          + '`/map`: the live map\n`/link code:…`: join your game and Discord accounts\n`/help`: this guide'),
+        field('⛏️ In-game commands', '`/talk <name> <message>`: talk to one character\n`/follow <name>`, `/come <name>`, '
+          + '`/stay <name>`: move her\n`/rel`: how each one feels about you\n`/link`: a code for `/link` here'),
+        field('🗺️ The map', `${config.publicUrl}/map: drag, zoom, slice the world open, click a block for its coordinates.`),
+      ],
+      footer: { text: 'Only you can see this.' },
+    };
+  };
 
   // Discord's slash commands (server/discord.mjs registers them): answered where they were typed.
   async function slash(c) {
     if (c.userId) db.meet(personId('discord', c.userId), c.userName, { at: now(), talked: false });
-    if (c.name === 'help') return c.reply(helpText(), { ephemeral: true });
+    if (c.name === 'help') return c.reply('', { ephemeral: true, embed: helpEmbed() });
     if (c.name === 'map') return c.reply(`The live map of the world: ${config.publicUrl}/map`);
     if (c.name === 'link') return c.reply(linkWithCode(c.userId, c.userName, c.options.code), { ephemeral: true });
     if (c.name === 'picture') {

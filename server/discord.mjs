@@ -232,7 +232,9 @@ export function createDiscord(opts = {}) {
       name: d.data?.name, options, channelId: String(d.channel_id ?? ''), userId: String(user.id ?? ''),
       userName: clean(d.member?.nick ?? user.global_name ?? user.username ?? 'someone', 32),
       // reply: answer now; defer: "thinking...", then followup (up to 15 minutes later) with text or a picture.
-      reply: (text, { ephemeral = false } = {}) => respond(4, { content: clean(text, 1900), allowed_mentions: { parse: [] }, ...(ephemeral ? { flags: 64 } : {}) }),
+      // An embed may go with the text (or instead of it): { embed } in the options.
+      reply: (text, { ephemeral = false, embed = null } = {}) => respond(4, { content: text ? clean(text, 1900) : '',
+        ...(embed ? { embeds: [embed] } : {}), allowed_mentions: { parse: [] }, ...(ephemeral ? { flags: 64 } : {}) }),
       defer: ({ ephemeral = false } = {}) => respond(5, ephemeral ? { flags: 64 } : null),
       followup,
     });
