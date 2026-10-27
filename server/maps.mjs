@@ -33,6 +33,8 @@ const RENDER_GAP_MS = 15_000; // one on-request render per address this often
 const MAP_COMMAND_GAP_MS = 30_000; // !map at most this often
 const TILE = 64; // blocks a side, per tile
 const TILE_KEEP_MS = 30 * 60_000; // a drawn tile is good for this long
+// A chunk's block data for the browser is kept less long than the page's 5 minutes, so a page's refresh is current.
+const RUNS_KEEP_MS = 4 * 60_000;
 const TILE_AT_ONCE = 4; // tiles scanned at once, so the game never stalls on a map
 // Bump when tiles are drawn differently: kept tiles of an older drawing are drawn again.
 const TILE_VERSION = 3;
@@ -267,7 +269,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     const key = `runs_${cx}_${cz}`;
     const file = join(dir, 'tiles', `${key}.json.gz`);
     const meta = db.json('maps.tiles', {});
-    if (meta[key] && now() - meta[key] < TILE_KEEP_MS) {
+    if (meta[key] && now() - meta[key] < RUNS_KEEP_MS) {
       try { return await readFile(file); } catch { /* gone: read it again */ }
     }
     if (drawing.has(key)) return drawing.get(key);
@@ -358,7 +360,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
         res.end('The game is not answering; try again soon.');
         return true;
       }
-      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip', 'cache-control': 'public, max-age=300' });
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip', 'cache-control': 'public, max-age=240' });
       res.end(gz);
       return true;
     }
