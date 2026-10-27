@@ -91,7 +91,13 @@ const REPLY_MAX = 450;
 const QUIET = 'QUIET';
 // How to build something worth looking at (owner, 2026-10-27: "the houses are lacking in style. They all look super
 // blocky", "Houses should have various styles and materials. Bricks wood stone glass... All kinds of houses").
-const STYLE_GUIDE = '- Build with style, never a plain box with a flat lid. Every house gets: a foundation one block '
+const STYLE_GUIDE = '- People must be able to walk in (owner: "the floor is blocking the door"). Lay the floor AT ground '
+  + 'level, replacing the top ground block (find_ground gives its y), so the walls and door start one above it. A door '
+  + 'opening is 1 wide and 2 high, its lower block level with the floor (cut it with fill_box air, then hang the door). '
+  + 'Outside the door: solid ground or a step of stairs at the same height, and a path of at least 2 blocks out to open '
+  + 'ground. Inside: rooms at least 3 high above the floor. When the door is in, call check_entrance on the doorway; a '
+  + 'building is not done until it passes.\n'
+  + '- Build with style, never a plain box with a flat lid. Every house gets: a foundation one block '
   + 'wider in a different stone; corner posts of logs or a contrasting block; walls that mix two materials (a base '
   + 'course, a band under the eaves); framed windows (glass with a sill or slabs above), a real door '
   + '(doors:door_wood...) with a step in front; a real roof from build_roof, in a colour that contrasts with the '
@@ -119,7 +125,7 @@ const STYLE_GUIDE = '- Build with style, never a plain box with a flat lid. Ever
 // "I'll clear it", "I will plant", "let me build", "I'm going to start": a promise of work.
 const PROMISE = /\b(i'?ll|i will|i'?m going to|let me|i can)\s+(\w+\s+){0,3}?(clear|build|make|plant|sow|dig|lay|fell|cut|start|put|fix|add|do|get|set|level|craft|farm|plow|till)\b/i;
 // What a character may use on its own: look, build, walk. Never anything done to a player.
-const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'browse_styles', 'fill_box', 'place_blocks', 'build_roof', 'clear_area', 'farm', 'harvest', 'walk_to']);
+const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'check_entrance', 'browse_styles', 'fill_box', 'place_blocks', 'build_roof', 'clear_area', 'farm', 'harvest', 'walk_to']);
 // Most blocks one idle turn may place, all its tool calls together.
 export const IDLE_BLOCKS = 20_000; // blocks a character may set in one turn of her own
 // A person keeps talking to the character they last talked with for this long, without naming it.
@@ -615,14 +621,45 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   function context() {
     const lines = db.chat(CONTEXT_LINES).map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.name}: ${c.text}`);
     const online = game.connected ? game.players.map((p) => `${p.name} at (${p.pos?.x}, ${p.pos?.y}, ${p.pos?.z})`
-      + `${p.privs.includes('server') ? ' [admin]' : ''}`).join('; ') || 'nobody' : 'the game server is not running';
+      + `${p.look ? ` facing ${p.look.facing}` : ''}${p.privs.includes('server') ? ' [admin]' : ''}`).join('; ') || 'nobody'
+      : 'the game server is not running';
     return `Recent chat (oldest first):\n${lines.join('\n') || '(none)'}\n\nOnline: ${online}`;
   }
 
   const onlineIds = () => game.players.map((p) => personId('game', p.name));
 
+  /**
+   * The speaker in the world, if they are in it: by their game name, or (from Discord) the game account their Discord
+   * one is linked to. Null when they are not in the game.
+   */
+  function speakerInWorld(msg) {
+    if (msg.source === 'game') return game.player(msg.name);
+    const own = msg.personId && db.person(msg.personId);
+    if (!own) return null;
+    const ids = [own.id, ...(db.people().find((p) => p.id === own.id)?.aliases ?? []).map((a) => a.id)];
+    const name = ids.find((id) => id.startsWith('game:'))?.slice(5);
+    return name ? game.player(name) : null;
+  }
+  const OPPOSITE = { north: 'south', south: 'north', east: 'west', west: 'east', 'north-east': 'south-west',
+    'south-west': 'north-east', 'north-west': 'south-east', 'south-east': 'north-west' };
+  /**
+   * Where the speaker stands and looks, and how to read "here" and "there" by it (owner, 2026-10-27: "bots should
+   * also be able to read my position when I talk about stuff so they know what 'here' or 'over there' means").
+   */
+  function placeLine(msg) {
+    const p = speakerInWorld(msg);
+    if (!p?.pos) return '';
+    const l = p.look;
+    return `\n\nWhere ${msg.name} is: in the world${msg.source === 'discord' ? ' (as ' + p.name + ', though writing from Discord)' : ''} `
+      + `at (${p.pos.x}, ${p.pos.y}, ${p.pos.z})${l ? `, facing ${l.facing}${l.pitch > 25 ? ', looking up' : l.pitch < -25 ? ', looking down' : ''}` : ''}`
+      + `${l?.at ? `, looking at ${l.at.block} at (${l.at.x}, ${l.at.y}, ${l.at.z}), ${l.at.dist} blocks away` : ''}. When they say "here" `
+      + 'they mean where they stand (build beside them, not on them)'
+      + `${l?.at ? `; "there", "that", "over there" most likely the spot they are looking at` : ''}`
+      + `${l ? `; "in front of me" is toward the ${l.facing}, "behind me" the ${OPPOSITE[l.facing]}` : ''}.`;
+  }
+
   function situation(ch, msg, asker, direct) {
-    const where = msg.source === 'discord' ? ' (on Discord, not in the world)' : msg.source === 'character'
+    const where = msg.source === 'discord' ? (speakerInWorld(msg) ? ' (on Discord, and in the world too)' : ' (on Discord, not in the world)') : msg.source === 'character'
       ? ' (a fellow character)' : '';
     const head = `${context()}\n\n${characterContext(db, ch, { speakerId: msg.personId, others: onlineIds(), cast: cast(), now: now() })}`
       + `\n\n${asker.name}${where}${asker.admin ? ' (an admin)' : ''}`;
@@ -633,6 +670,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         + 'forth is a good chat; when it has run its course, answer with exactly QUIET.';
     }
     return `${head} ${direct ? 'says to you' : 'says (not by your name, but you are the one answering)'}: ${msg.text}`
+      + placeLine(msg)
       + (direct ? '' : '\n\nAnswer them. If it is plainly meant for another player, a short friendly word is enough.');
   }
 
@@ -740,7 +778,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     const weights = CHAT_TOPICS.map(([, trait], i) => 20 + tr[trait] + need(i));
     let pick = random() * weights.reduce((a, b) => a + b, 0);
     const [topic] = CHAT_TOPICS.find((_, i) => (pick -= weights[i]) < 0) ?? CHAT_TOPICS[0];
-    const look = new Set(['inspect_area', 'find_ground', 'browse_styles']);
+    const look = new Set(['inspect_area', 'find_ground', 'check_entrance', 'browse_styles']);
     const tools = [...toolsFor({ name: ch.name, admin: true }, s.policy).filter((x) => look.has(x.name))
       .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
     ...INNER_TOOLS.filter((x) => x.name !== 'pressed' && x.name !== 'set_relationship')];
@@ -847,7 +885,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       const free = others.filter((c) => !c.project);
       const build = 'with find_ground, clear_area, fill_box, place_blocks and build_roof, then look at it with inspect_area and '
         + 'call step_done with a note. Keep to the project\'s style and what is already built (the notes say where), and make '
-        + 'it look good: two materials, trims, framed windows, a real door, a pitched roof with eaves, light, details.';
+        + 'it look good: two materials, trims, framed windows, a real door, a pitched roof with eaves, light, details. The '
+        + 'floor goes at ground level; once the door is in, check_entrance must pass before you call that step done.';
       // The styles built lately, so the next one is different (owner: "Houses should have various styles and materials").
       const lately = all.map((c) => c.project?.style ?? c.lastProject?.style).filter(Boolean);
       const task = gift

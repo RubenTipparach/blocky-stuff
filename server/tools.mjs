@@ -39,6 +39,16 @@ export const TOOLS = [
     },
   },
   {
+    name: 'check_entrance',
+    description: 'Walk into a building the way a person would: from two steps outside the doorway, through it, to two '
+      + 'steps inside, each step needing something to stand on and two blocks of room, at most one block up or down. Give '
+      + 'the doorway\'s lower block (where the feet go) and, if you know it, the side it opens to. Says whether one can '
+      + 'walk in, or exactly what is in the way. Every building with a door must pass before it is done.',
+    input_schema: { type: 'object', properties: { x: pos, y: pos, z: pos, facing: { type: 'string', enum: ['north', 'east', 'south', 'west'] } },
+      required: ['x', 'y', 'z'], additionalProperties: false },
+    run: ({ game }, { x, y, z, facing }) => game.act({ type: 'entrance', x, y, z, ...(facing ? { facing } : {}) }),
+  },
+  {
     name: 'browse_styles',
     description: `The catalogue of ${STYLES.length} building styles from many cultures and times (prehistoric to future, `
       + 'and fantasy): each with its walls, accents, roof (a build_roof shape, pitch and stairs) and the features that make '

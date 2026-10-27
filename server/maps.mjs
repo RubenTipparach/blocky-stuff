@@ -761,7 +761,9 @@ function isoScript(first) {
   return `const A = ${A}, YMIN = ${YMIN}, YMAX = ${YMAX}, C = ${C}, NY = YMAX - YMIN + 1;
 const W = 2 * C * A + 2 * A, H = Math.round(C * A + (YMAX - YMIN + 3) * A + 3 * A), OX = C * A, OY = (YMAX - YMIN + 2) * A;
 const gx = (x, z) => (x - z) * A, gy = (x, y, z) => (x + z) * A / 2 - y * A;
-const at = (x, y, z) => [-(gy(x, y, z) + A / 2), gx(x, z) + A];
+// The map's longitude is the drawing's x flipped (-gx): drawn as computed, the world came out mirrored (owner,
+// 2026-10-27: "the bridge sways to the right, the map sways to the left").
+const at = (x, y, z) => [-(gy(x, y, z) + A / 2), -(gx(x, z) + A)];
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: -4, maxZoom: 3, zoomSnap: 0.5, attributionControl: false,
   maxBoundsViscosity: 1 }).setView(at(${Number(first.x) || 0}, ${Number(first.y) || 10}, ${Number(first.z) || 0}), 0);
 const origin = (cx, cz) => { const x1 = cx * C, z1 = cz * C; return [(x1 - z1) * A - OX, (x1 + z1) * A / 2 - YMIN * A - OY]; };
@@ -809,7 +811,7 @@ function draw(chunk) {
   const blit = (sx, sy, rgba) => {
     const alpha = (rgba[3] ?? 255) / 255;
     for (let yy = 0; yy < SP.w; yy++) { const ty = sy + yy; if (ty < 0 || ty >= H) continue;
-      for (let xx = 0; xx < SP.w; xx++) { const f = SP.face[yy * SP.w + xx]; if (!f) continue; const tx = sx + xx; if (tx < 0 || tx >= W) continue;
+      for (let xx = 0; xx < SP.w; xx++) { const f = SP.face[yy * SP.w + xx]; if (!f) continue; const tx = W - 1 - (sx + xx); if (tx < 0 || tx >= W) continue;
         const k = SHADE[f] * (SP.edge[yy * SP.w + xx] ? 0.86 : 1), o = (ty * W + tx) * 4, da = px[o + 3] / 255, oa = alpha + da * (1 - alpha);
         for (let c = 0; c < 3; c++) px[o + c] = oa ? (Math.min(255, rgba[c] * k) * alpha + px[o + c] * da * (1 - alpha)) / oa : 0;
         px[o + 3] = oa * 255; } }
@@ -843,7 +845,7 @@ async function fetchChunk(cx, cz, fresh = false) {
   try { const r = await fetch('/map/chunk/' + cx + '/' + cz + '.json', fresh ? { cache: 'reload' } : undefined); return r.ok ? await r.json() : null; } catch { return null; } finally { done(); }
 }
 // The block (x, z) at the middle of the view, taking the ground as about y 10.
-const centerXZ = () => { const c = map.getCenter(); const u = (c.lng - A) / A, v = (-c.lat - A / 2 + 10 * A) * 2 / A; return [Math.round((u + v) / 2), Math.round((v - u) / 2)]; };
+const centerXZ = () => { const c = map.getCenter(); const u = (-c.lng - A) / A, v = (-c.lat - A / 2 + 10 * A) * 2 / A; return [Math.round((u + v) / 2), Math.round((v - u) / 2)]; };
 // After a refresh: the chunks read anew are fetched past the browser's cache and drawn again.
 function afterRefresh(keys) {
   for (const key of keys) {
@@ -859,12 +861,12 @@ async function show(cx, cz, chunk) {
   if (!src) return;
   const [ox, oy] = origin(cx, cz);
   if (chunk.overlay) { const old = chunk.src; chunk.overlay.setUrl(src); setTimeout(() => URL.revokeObjectURL(old), 2000); }
-  else chunk.overlay = L.imageOverlay(src, [[-oy, ox], [-(oy + H), ox + W]], { zIndex: 1000 + cx + cz, interactive: false }).addTo(map);
+  else chunk.overlay = L.imageOverlay(src, [[-oy, -(ox + W)], [-(oy + H), -ox]], { zIndex: 1000 + cx + cz, interactive: false }).addTo(map);
   chunk.src = src;
 }
 function wanted() {
   const b = map.getBounds();
-  const gx1 = b.getWest(), gx2 = b.getEast(), gy1 = -b.getNorth(), gy2 = -b.getSouth();
+  const gx1 = -b.getEast(), gx2 = -b.getWest(), gy1 = -b.getNorth(), gy2 = -b.getSouth();
   const umin = gx1 / A - 2, umax = gx2 / A + 2, vmin = 2 * gy1 / A + 2 * YMIN - 4, vmax = 2 * gy2 / A + 2 * YMAX + 4;
   const out = [];
   for (let p = Math.floor((umin - C) / C); p <= Math.ceil((umax + C) / C); p++) {
@@ -921,7 +923,7 @@ fetch('/map/explored.json').then((r) => r.json()).then((e) => {
     const corners = [[cx1, cz1], [cx2, cz1], [cx1, cz2], [cx2, cz2]].map(([cx, cz]) => origin(cx, cz));
     const west = Math.min(...corners.map(([ox]) => ox)), east = Math.max(...corners.map(([ox]) => ox + W));
     const north = Math.min(...corners.map(([, oy]) => oy)), south = Math.max(...corners.map(([, oy]) => oy + H));
-    const box = L.latLngBounds([[-north, west], [-south, east]]);
+    const box = L.latLngBounds([[-north, -east], [-south, -west]]);
     map.setMaxBounds(box.pad(0.05));
     map.setMinZoom(Math.min(0, map.getBoundsZoom(box) - 0.5));
   }
@@ -938,7 +940,7 @@ const blockAt = (x, y, z) => {
   return chunk.data.names[id - 1];
 };
 map.on('click', (e) => {
-  const gxc = e.latlng.lng, gyc = -e.latlng.lat;
+  const gxc = -e.latlng.lng, gyc = -e.latlng.lat;
   const top = view.cut ? view.cutAt : YMAX;
   for (let y = top; y >= YMIN; y--) {
     const u = (gxc - A) / A, v = ((gyc - A / 2) + y * A) * 2 / A;

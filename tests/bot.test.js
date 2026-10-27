@@ -340,3 +340,20 @@ test('past the daily limit a person still hears back; the characters\' own turns
   await bot.hear({ source: 'discord', name: 'ruben', text: 'can you make a bridge' }, (t) => said.push(t));
   assert.match(said[0], /resting for today/);
 });
+
+test('a speaker in the world: where they stand and look, so "here" and "there" mean something', async () => {
+  const { db, game, bot, client } = setup([text('On it!'), text('Coming!')]);
+  db.putJson('bot', { cooldown: 0, listen: 'every' });
+  game.sync({ players: [{ name: 'ruben', pos: { x: -60, y: 10, z: 42 }, hp: 20, privs: [],
+    look: { facing: 'north-east', pitch: -10, at: { x: -52, y: 9, z: 50, block: 'default:dirt_with_grass', dist: 11 } } }] });
+  await bot.hear({ source: 'game', name: 'ruben', text: 'Blocky, build a well over there' }, () => {});
+  const asked = client.calls[0].messages[0].content;
+  assert.match(asked, /at \(-60, 10, 42\), facing north-east, looking at default:dirt_with_grass at \(-52, 9, 50\), 11 blocks away/);
+  assert.match(asked, /"behind me" the south-west/);
+  // From Discord, linked to the game account: the same place.
+  db.meet('game:ruben', 'ruben', { at: 0 });
+  db.meet('discord:42', 'PscifieX', { at: 0 });
+  db.link('game:ruben', 'discord:42');
+  await bot.hear({ source: 'discord', name: 'PscifieX', personId: 'discord:42', text: 'Blocky, come here' }, () => {});
+  assert.match(client.calls[1].messages[0].content, /as ruben, though writing from Discord\) at \(-60, 10, 42\)/);
+});

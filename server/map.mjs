@@ -195,13 +195,23 @@ export function renderIso(scan, { markColors = {}, markNames = {}, scale, fixed 
       }
     }
   }
+  // The drawing above has east going down-right and north down-left, which is the world in a mirror (owner,
+  // 2026-10-27: "the bridge sways to the right, the map sways to the left"): flip it left to right, so the picture
+  // matches the game. Marks and names go on after, at their flipped places, so the text reads the right way.
+  for (let y = 0; y < height; y++) {
+    for (let x = 0, r = width - 1; x < r; x++, r--) {
+      const o1 = (y * width + x) * 4;
+      const o2 = (y * width + r) * 4;
+      for (let c = 0; c < 4; c++) { const tmp = px[o1 + c]; px[o1 + c] = px[o2 + c]; px[o2 + c] = tmp; }
+    }
+  }
   // Marks: a pin of the character's colour (players white) over where they stand, and the name beside it.
   const put = (tx, ty, rgb) => { if (tx >= 0 && ty >= 0 && tx < width && ty < height) px.set([...rgb, 255], (ty * width + tx) * 4); };
   for (const m of Array.isArray(scan.marks) ? scan.marks : []) {
     const hex = markColors[m.id ?? m.player] ?? (m.player ? '#ffffff' : '#f2b84b');
     const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) || 255);
     const [sx, sy] = at(m.x, m.y + 2, m.z);
-    const cx = Math.round(sx + a);
+    const cx = width - 1 - Math.round(sx + a);
     const cy = Math.round(sy + a / 2);
     const r = Math.max(3, Math.round(a * 0.7));
     for (let yy = -r - 1; yy <= 2 * r + 1; yy++) {
