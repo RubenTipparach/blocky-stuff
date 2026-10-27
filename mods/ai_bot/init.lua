@@ -82,7 +82,45 @@ end
 -- facing (upside down: hang from it); a door's front looks toward it; a torch, ladder or sign hangs on that side's wall.
 local FACEDIR = { north = 0, east = 1, south = 2, west = 3 }
 local UPSIDE = { [0] = 20, [1] = 23, [2] = 22, [3] = 21 }
-local WALL = { east = 3, west = 2, north = 5, south = 4 } -- wallmounted: the wall is on that side of the block
+
+-- ---- Attached blocks: torches, ladders, signs (owner, 2026-10-27: "why are all the torches upside down", "bots dont
+-- seem to understand correctly placing things on surfaces", "same with ladders") ----
+-- These hang on a surface, kept in param2 (wallmounted: 0 ceiling, 1 floor, 2..5 a wall). Set straight into the world
+-- they had 0, hanging from the ceiling. Now each finds what it is against: the wall it was told (facing), else for a
+-- ladder or sign the first solid wall, for a torch the floor, then a wall, then the ceiling.
+local SIDES = { east = vector.new(1, 0, 0), west = vector.new(-1, 0, 0), north = vector.new(0, 0, 1), south = vector.new(0, 0, -1) }
+local SIDE_ORDER = { "north", "east", "south", "west" }
+local function wallmounted(def) return def and (def.paramtype2 == "wallmounted" or def.paramtype2 == "colorwallmounted") end
+local function solid_at(pos)
+	local def = core.registered_nodes[core.get_node(pos).name]
+	return def ~= nil and def.walkable == true
+end
+-- The param2 for an attached block at pos: toward the surface it hangs on.
+local function attach_dir(pos, name, facing, upside)
+	if facing and SIDES[facing] then return core.dir_to_wallmounted(SIDES[facing]) end
+	if upside then return 0 end
+	local down, up = vector.new(0, -1, 0), vector.new(0, 1, 0)
+	local walls_first = name:find("ladder") or name:find("sign")
+	local function a_wall()
+		for _, s in ipairs(SIDE_ORDER) do if solid_at(vector.add(pos, SIDES[s])) then return core.dir_to_wallmounted(SIDES[s]) end end
+	end
+	if walls_first then
+		local w = a_wall()
+		if w then return w end
+	end
+	if solid_at(vector.add(pos, down)) then return 1 end
+	local w = a_wall()
+	if w then return w end
+	if solid_at(vector.add(pos, up)) then return 0 end
+	return 1
+end
+-- A torch is three blocks in Minetest Game: on the floor, on a wall, from the ceiling.
+local function torch_for(param2)
+	if param2 == 1 or not core.registered_nodes["default:torch_wall"] then return "default:torch" end
+	if param2 == 0 then return "default:torch_ceiling" end
+	return "default:torch_wall"
+end
+
 local function set_turned(pos, n)
 	local name, param2 = n.item, tonumber(n.param2) or 0
 	local f = n.facing and FACEDIR[n.facing]
@@ -96,14 +134,12 @@ local function set_turned(pos, n)
 		if core.registered_nodes["doors:hidden"] then core.set_node(up, { name = "doors:hidden", param2 = param2 }) end
 		return
 	end
-	if name == "default:torch" and n.facing and core.registered_nodes["default:torch_wall"] then
-		name = "default:torch_wall"
-	end
 	local def = core.registered_nodes[name] or {}
-	if f and (def.paramtype2 == "facedir" or def.paramtype2 == "4dir" or def.paramtype2 == "colorfacedir") then
+	if wallmounted(def) then
+		param2 = attach_dir(pos, name, n.facing, n.upside_down)
+		if name:match("^default:torch") then name = torch_for(param2) end
+	elseif f and (def.paramtype2 == "facedir" or def.paramtype2 == "4dir" or def.paramtype2 == "colorfacedir") then
 		param2 = n.upside_down and UPSIDE[f] or f
-	elseif n.facing and (def.paramtype2 == "wallmounted" or def.paramtype2 == "colorwallmounted") then
-		param2 = WALL[n.facing] or 1
 	elseif not f and n.upside_down and def.paramtype2 == "facedir" then
 		param2 = 20 -- a slab or stair hung from above
 	end
@@ -178,7 +214,13 @@ function actions.place(a)
 	-- Blocks nobody is near may not be loaded; load them, or set_node does nothing there.
 	core.load_area(lo, hi)
 	local placed, protected, filled = 0, 0, 0
+	-- Attached blocks (torches, ladders, signs) last, so the walls and floors they hang on are there first.
+	local ordered, later = {}, {}
 	for _, n in ipairs(a.nodes) do
+		if wallmounted(core.registered_nodes[n.item]) then later[#later + 1] = n else ordered[#ordered + 1] = n end
+	end
+	for _, n in ipairs(later) do ordered[#ordered + 1] = n end
+	for _, n in ipairs(ordered) do
 		local pos = vector.new(n.x, n.y, n.z)
 		if core.is_protected(pos, "") then
 			protected = protected + 1
@@ -380,6 +422,26 @@ function actions.clear(a)
 	if not level then return true, "Clearing trees and plants from " .. cols .. " columns; the ground stays as it was." .. more end
 	return true, "Levelling " .. (x2 - x1 + 1) .. " by " .. (z2 - z1 + 1) .. " at y " .. y .. ". Build from y " .. (y + 1) .. "." .. more
 end
+
+-- Once per map block, as it loads: torches and ladders the characters set before attach_dir existed are turned the
+-- right way. A floor torch hanging from the ceiling (param2 0, upside down) finds its surface again; a ladder lying on
+-- the floor or the ceiling goes onto a wall beside it, if there is one. Players' torches are never like that.
+core.register_lbm({
+	label = "ai_bot: torches and ladders the right way up",
+	name = "ai_bot:attached_right_way_v1",
+	nodenames = { "default:torch", "default:ladder_wood", "default:ladder_steel" },
+	run_at_every_load = false,
+	action = function(pos, node)
+		if node.name == "default:torch" then
+			if node.param2 == 1 then return end
+			local p2 = attach_dir(pos, node.name)
+			core.swap_node(pos, { name = torch_for(p2), param2 = p2 })
+		elseif node.param2 <= 1 then
+			local p2 = attach_dir(pos, node.name)
+			if p2 > 1 then core.swap_node(pos, { name = node.name, param2 = p2 }) end
+		end
+	end,
+})
 
 -- ---- Farming (owner, 2026-10-27: "the bot is complaining that theres no farming mechanics", there is: wheat and cotton) ----
 

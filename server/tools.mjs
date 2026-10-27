@@ -195,7 +195,9 @@ export const TOOLS = [
     permission: 'build',
     description: `Place single blocks: a list of {x, y, z, item}, with facing for blocks that turn: stairs rise toward it `
       + '(upside_down: hang from it, for eaves and arches), a door looks out toward it (a door is placed with its '
-      + 'lower block; doors:door_wood, door_glass...), a torch, ladder or sign hangs on that side\'s wall. North is +z, '
+      + 'lower block; doors:door_wood, door_glass...). Torches, ladders and signs attach themselves to what is next to '
+      + 'them: put a ladder in the air right beside a wall (one per block of height), a torch on top of a floor or beside '
+      + 'a wall; facing names the wall to hang it on (a ladder on the north wall: facing north). North is +z, '
       + `east +x. For details a box cannot make: window frames, trims, steps, furniture. At most ${BUILD_MAX}.`,
     input_schema: {
       type: 'object',
