@@ -250,9 +250,10 @@ test('every game server account is listed, saying who on Discord it is linked to
   await s.close();
 });
 
-test('asleep while nobody is in the game; switching sleep off wakes them at once', async () => {
+test('asleep once nobody has been around for the delay; switching sleep off, or a word on Discord, wakes them', async () => {
   const config = loadConfig({ PUBLIC_URL: 'http://localhost', ADMIN_DISCORD_ID: '111', ANTHROPIC_API_KEY: '' });
   const db = openDb(':memory:');
+  db.putSetting('activity.last', '1'); // the last word from a player: long ago
   let turns = 0;
   const bot = { ready: true, hear: async () => null, idle: async () => { turns++; return null; } };
   const discord = createDiscord({ log: quiet });
@@ -272,6 +273,13 @@ test('asleep while nobody is in the game; switching sleep off wakes them at once
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(turns, 1); // woken at once
     assert.equal((await sync()).characters.some((c) => c.asleep), false);
+    // Sleep on again, with the default hour: a player's word on Discord keeps them up.
+    await fetch(`${base}/api/admin/bot`, { method: 'POST', headers: as, body: JSON.stringify({ sleep: true }) });
+    assert.equal((await sync()).characters.every((c) => c.asleep), true);
+    server.fromDiscord({ name: 'ruben', text: 'evening all' });
+    assert.equal((await sync()).characters.some((c) => c.asleep), false);
+    await fetch(`${base}/api/admin/bot`, { method: 'POST', headers: as, body: JSON.stringify({ sleepAfter: 1 }) });
+    assert.equal(db.json('bot', {}).sleepAfter, 5); // at least 5 minutes
   } finally {
     await new Promise((r) => server.close(r));
   }

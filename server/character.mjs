@@ -272,10 +272,26 @@ export function characterContext(db, ch, { speakerId = null, others = [], cast: 
 /** Her project in words: what, where, how far, what is next. */
 export function projectLine(p, now = Date.now()) {
   const next = p.steps[p.done];
-  return `Your project: ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}), started ${ago(now - p.started)}; `
+  const crew = (p.crew ?? []).map((c) => c.name);
+  return `Your project: ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}), started ${ago(now - p.started)}`
+    + `${crew.length > 1 ? `, built together by ${crew.join(' and ')}` : ''}; `
     + `${p.done} of ${p.steps.length} steps done.${next ? ` Next step: ${next}.` : ''}`
     + `${p.notes?.length ? ` So far: ${p.notes.slice(-4).join('; ')}.` : ''}`;
 }
+
+// ---- Building together (owner, 2026-10-27: "bots should occasionally decide to collaborate on stuff") ----
+// A shared project is one object kept on every member of its crew; a change by one is written to all of them.
+const MAX_CREW = 3;
+const fresh = (db, id) => db.json('characters', []).find((c) => c.id === id) ?? null;
+const freshProject = (db, ch) => (fresh(db, ch.id)?.project ?? ch.project ?? null);
+function shareProject(db, p, patch = (project) => ({ project })) {
+  for (const m of p?.crew ?? []) setState(db, m.id, patch(p, m));
+}
+/** The character called `name` (by name, any case), from the saved cast. */
+const castNamed = (db, name) => {
+  const n = String(name ?? '').trim().toLowerCase();
+  return db.json('characters', []).find((c) => c.name.toLowerCase() === n || c.id === n) ?? null;
+};
 
 const person = { type: 'string', description: 'The person\'s name or nickname as you know it.' };
 const at = { type: 'integer' };
@@ -372,6 +388,20 @@ export const CHARACTER_TOOLS = [
     description: 'Give up your current project (it is in the way, or you lost heart), and why.',
     input_schema: { type: 'object', properties: { reason: { type: 'string', maxLength: 160 } }, required: ['reason'],
       additionalProperties: false },
+  },
+  {
+    name: 'join_project',
+    description: 'Help another character with her project, when you have none of your own: say whose, and which part '
+      + 'you will take on (a garden, the interior, a path, a matching annex...). You then build it together: her steps '
+      + 'become yours too.',
+    input_schema: { type: 'object', properties: { with: { type: 'string', description: 'Her name.' },
+      part: { type: 'string', maxLength: 120 } }, required: ['with', 'part'], additionalProperties: false },
+  },
+  {
+    name: 'invite_to_project',
+    description: 'Ask another character to build your project with you. She decides on her own turn whether to join.',
+    input_schema: { type: 'object', properties: { who: { type: 'string', description: 'Her name.' },
+      why: { type: 'string', maxLength: 120 } }, required: ['who'], additionalProperties: false },
   },
   {
     name: 'recall',
@@ -482,26 +512,67 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       return { ok: true, message: `${projectLine(project, now)} Build the first step now.` };
     }
     case 'step_done': {
-      const p = ch.project;
+      // As saved now, not as the turn began: a crewmate may have built a step meanwhile.
+      const p = freshProject(db, ch);
       if (!p) return { ok: false, message: 'You have no project: plan_project first.' };
-      p.notes = [...(p.notes ?? []), String(input.note ?? '').slice(0, 160)].slice(-12);
+      p.notes = [...(p.notes ?? []), `${(p.crew?.length ?? 0) > 1 ? `${ch.name}: ` : ''}${String(input.note ?? '').slice(0, 160)}`].slice(-12);
       p.done += 1;
+      const crew = p.crew?.length ? p.crew : [{ id: ch.id, name: ch.name }];
       if (p.done >= p.steps.length) {
-        db.remember(ch.id, null, `Finished my project: ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}). ${p.notes.slice(-3).join('; ')}`, 4, now);
-        setState(db, ch.id, { project: null, goal: null, lastProject: { title: p.title, site: p.site, at: now } });
+        for (const m of crew) {
+          const others = crew.filter((o) => o.id !== m.id).map((o) => o.name);
+          db.remember(m.id, null, `Finished ${others.length ? `with ${others.join(' and ')} ` : 'my project '}${p.title} at `
+            + `(${p.site.x}, ${p.site.y}, ${p.site.z}). ${p.notes.slice(-3).join('; ')}`, 4, now);
+          setState(db, m.id, { project: null, goal: null, lastProject: { title: p.title, site: p.site, at: now } });
+        }
         ch.project = null;
         return { ok: true, message: `${p.title} is finished! Tell everyone, proudly, in one line.` };
       }
-      setState(db, ch.id, { project: p });
+      for (const m of crew) setState(db, m.id, { project: p });
+      ch.project = p;
       return { ok: true, message: projectLine(p, now) };
     }
     case 'drop_project': {
-      const p = ch.project;
+      const p = freshProject(db, ch);
       if (!p) return { ok: true, message: 'You have no project.' };
       db.remember(ch.id, null, `Gave up on ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}): ${input.reason}`, 2, now);
       setState(db, ch.id, { project: null, goal: null });
       ch.project = null;
-      return { ok: true, message: 'Dropped.' };
+      // The rest of the crew carries on without her.
+      const rest = (p.crew ?? []).filter((m) => m.id !== ch.id);
+      if (rest.length) shareProject(db, { ...p, crew: rest });
+      return { ok: true, message: rest.length ? `Dropped; ${rest.map((m) => m.name).join(' and ')} carries on.` : 'Dropped.' };
+    }
+    case 'join_project': {
+      if (freshProject(db, ch)) return { ok: false, message: 'You have a project of your own: finish it or drop_project first.' };
+      const host = castNamed(db, input.with);
+      if (!host || host.id === ch.id) return { ok: false, message: `There is no other character called ${input.with}.` };
+      const p = host.project;
+      if (!p) return { ok: false, message: `${host.name} has no project right now.` };
+      const crew = p.crew?.length ? p.crew : [{ id: host.id, name: host.name }];
+      if (crew.length >= MAX_CREW) return { ok: false, message: `${p.title} has enough hands already.` };
+      const part = String(input.part ?? '').slice(0, 120);
+      const shared = { ...p, crew: [...crew, { id: ch.id, name: ch.name, part }], invited: null,
+        notes: [...(p.notes ?? []), `${ch.name} joined to do ${part}`].slice(-12) };
+      shareProject(db, shared, (project) => ({ project, goal: project.title }));
+      ch.project = shared;
+      db.remember(ch.id, null, `Joined ${host.name} on ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}), to do ${part}.`, 3, now);
+      db.remember(host.id, null, `${ch.name} joined me on ${p.title}, to do ${part}.`, 3, now);
+      return { ok: true, message: `You and ${host.name} build ${p.title} together now. ${projectLine(shared, now)} Say hello `
+        + `to her by name in your line, and build your part of the next step: what she has not.` };
+    }
+    case 'invite_to_project': {
+      const p = freshProject(db, ch);
+      if (!p) return { ok: false, message: 'You have no project to invite anyone to: plan_project first.' };
+      const who = castNamed(db, input.who);
+      if (!who || who.id === ch.id) return { ok: false, message: `There is no other character called ${input.who}.` };
+      if ((p.crew ?? []).some((m) => m.id === who.id)) return { ok: true, message: `${who.name} is already building it with you.` };
+      if (who.project) return { ok: false, message: `${who.name} is busy with ${who.project.title}. Maybe later.` };
+      const invited = { ...p, crew: p.crew?.length ? p.crew : [{ id: ch.id, name: ch.name }], invited: { id: who.id, by: ch.name,
+        why: String(input.why ?? '').slice(0, 120), at: now } };
+      shareProject(db, invited);
+      ch.project = invited;
+      return { ok: true, message: `Asked. ${who.name} decides on her own turn; tell her by name in your line, if you like.` };
     }
     case 'pressed': {
       const p = turn.speakerId && db.person(turn.speakerId);

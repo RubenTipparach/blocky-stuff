@@ -129,3 +129,28 @@ test('unlinking an account makes it its own person again', () => {
   assert.equal(db.person('discord:42').id, 'discord:42');
   assert.equal(db.unlink('discord:42'), false);
 });
+
+test('two characters build together: an invitation, a join, steps shared, and the finish remembered by both', () => {
+  const { db } = fresh();
+  const get = (id) => cast(db).find((c) => c.id === id);
+  const run = (id, name, input) => runCharacterTool(db, get(id), name, input, undefined, 1000);
+  assert.equal(run('blocky', 'plan_project', { title: 'Twin Towers', x: 0, y: 5, z: 0, steps: ['base', 'walls', 'roof'] }).ok, true);
+  assert.equal(run('blocky', 'invite_to_project', { who: 'Moss', why: 'you know stone' }).ok, true);
+  assert.equal(get('moss').project, null); // invited, not yet in
+  assert.equal(get('blocky').project.invited.id, 'moss');
+  const joined = run('moss', 'join_project', { with: 'Blocky', part: 'the stone base and the garden' });
+  assert.equal(joined.ok, true);
+  assert.deepEqual(get('moss').project.crew.map((m) => m.name), ['Blocky', 'Moss']);
+  // A step by either is a step for both.
+  run('moss', 'step_done', { note: 'stone base laid' });
+  assert.equal(get('blocky').project.done, 1);
+  assert.match(get('blocky').project.notes.at(-1), /^Moss: stone base laid/);
+  run('blocky', 'step_done', { note: 'walls up' });
+  assert.equal(run('moss', 'step_done', { note: 'roof on' }).ok, true);
+  assert.equal(get('blocky').project, null);
+  assert.equal(get('moss').project, null);
+  assert.match(db.recentMemories('blocky', 5).map((m) => m.text).join(' '), /Finished with Moss Twin Towers/);
+  assert.match(db.recentMemories('moss', 5).map((m) => m.text).join(' '), /Finished with Blocky Twin Towers/);
+  // Nobody to join now; and one with a project of her own cannot join another's.
+  assert.equal(run('moss', 'join_project', { with: 'Blocky', part: 'x' }).ok, false);
+});

@@ -112,9 +112,11 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
 
   // When a person last did anything (chat in game or on Discord, joined, gave an order): the characters keep working
   // on their own while a player is online, and for WORK_AFTER_MS after the last of this.
-  let lastActivity = now();
+  // Kept in the database, so a bot restart does not count as someone being around.
+  let lastActivity = Number(db.setting('activity.last')) || now();
+  const active = () => { lastActivity = now(); db.putSetting('activity.last', String(lastActivity)); };
   game.onEvent((e) => {
-    if (e.type === 'chat' || e.type === 'join' || e.type === 'order') lastActivity = now();
+    if (e.type === 'chat' || e.type === 'join' || e.type === 'order') active();
     if (e.type === 'chat' && typeof e.name === 'string' && typeof e.text === 'string') {
       // Everyone who chats is someone the bot knows, whether or not it answers.
       db.meet(personId('game', e.name), e.name, { at: now() });
@@ -140,8 +142,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       db.addChat('game', '*', line, now());
       if (relay().news) chat.news(e.type, `**${e.name}** ${e.type === 'join' ? 'joined' : 'left'} the game.`);
       // Listening to everything, the bot may greet whoever arrives.
-      if (e.type === 'join' && botSettings(db, config).listen === 'all') {
-        setTimeout(() => brain.hear({ source: 'game', name: e.name, text: '(just joined the game)', admin: false,
+      if (e.type === 'join' && botSettings(db, config).listen !== 'mentions') {
+        setTimeout(() => brain.hear({ source: 'game', name: e.name, text: '(just joined the game)', admin: false, event: true,
           personId: personId('game', e.name) },
           (t, ch) => botSays(t, ch, { near: e.name })).catch((err) => log.error(err)), 3000);
       }
@@ -160,7 +162,12 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   // at least for an hour or so").
   let idling = false;
   /** Asleep: the sleep setting is on and nobody is in the game. */
-  const asleep = () => botSettings(db, config).sleep && game.players.length === 0;
+  // Asleep: nobody in the game, and no player has said anything (in the game or on Discord) for the sleep delay
+  // (owner, 2026-10-27: "a slider for how much time without player or discord chat activity to sleep. Default is 1 hour").
+  const asleep = () => {
+    const s = botSettings(db, config);
+    return s.sleep && game.players.length === 0 && now() - lastActivity >= s.sleepAfter * 60_000;
+  };
   async function idleTick() {
     const s = botSettings(db, config);
     if (idling || !s.idle.enabled || !game.connected || asleep()) return;
@@ -260,7 +267,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   }
 
   function fromDiscord(m) {
-    lastActivity = now();
+    active();
     if (m.userId) db.meet(personId('discord', m.userId), m.name, { at: now() });
     db.addChat('discord', m.name, m.text, now());
     if (relay().chat) game.act({ type: 'say', text: m.text, from: `[Discord] ${m.name}` });
@@ -474,7 +481,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       for (const k of ['cooldown', 'perHour', 'perDay']) {
         if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
       }
-      if (body.listen === 'all' || body.listen === 'mentions') next.listen = body.listen;
+      if (['all', 'every', 'mentions'].includes(body.listen)) next.listen = body.listen;
+      if (Number.isFinite(Number(body.sleepAfter))) next.sleepAfter = Math.min(720, Math.max(5, Math.round(Number(body.sleepAfter))));
       if (typeof body.sleep === 'boolean') {
         // Switched off: wake them now (owner: "If I toggle sleep off wake bots up immediately"): the next sync stands
         // their bodies up, and an own turn starts at once instead of at the next tick.

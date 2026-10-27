@@ -116,9 +116,14 @@ export function botSettings(db, config) {
     // Asleep while nobody is in the game (owner, 2026-10-27: "a sleep toggle for bots to go to sleep when no one is on
     // the server"): no own turns, bodies lying down. Off (the first value): awake and working, within the limits.
     sleep: saved.sleep ?? false, // (owner: "Sleep is off by default")
+    // Minutes without a player in the game or a word from one (game or Discord) before they fall asleep.
+    sleepAfter: Number.isFinite(saved.sleepAfter) ? saved.sleepAfter : 60,
     pranks: saved.pranks ?? true,
-    // 'all' (the first value): every chat line gets an answer. 'mentions': only lines that name a character.
-    listen: saved.listen === 'mentions' ? 'mentions' : 'all',
+    // 'all' (the first value): every chat line is heard, and one not said to a character by name gets an answer when
+    // it is worth one (owner, 2026-10-27: "there should be some evaluation of each message is worth responding to or
+    // not ... something to detect if something is in context of a conversation"). 'every': each gets an answer.
+    // 'mentions': only lines that name a character.
+    listen: ['mentions', 'every'].includes(saved.listen) ? saved.listen : 'all',
     // The hour (UTC) the daily summary goes to Discord and the game; -1 is off. 16:00 UTC is 9 in the morning in
     // California.
     summaryHour: Number.isInteger(saved.summaryHour) ? saved.summaryHour : 16,
@@ -133,7 +138,7 @@ export function botSettings(db, config) {
   };
 }
 
-export function createBot({ db, game, config, client = null, now = () => Date.now(), log = console }) {
+export function createBot({ db, game, config, client = null, now = () => Date.now(), log = console, random = Math.random }) {
   const llm = client ?? (config.anthropicApiKey ? new Anthropic({ apiKey: config.anthropicApiKey }) : null);
   const recent = new Map(); // person -> times of their questions this hour
   const lastWith = new Map(); // person -> { id: character, at }
@@ -171,7 +176,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     if (byName.length) return byName;
     const facing = msg.target && all.find((c) => c.id === msg.target);
     if (facing) return [facing];
-    if (s.listen !== 'all') return [];
+    if (s.listen === 'mentions') return [];
     const pid = msg.personId;
     const last = pid && lastWith.get(pid);
     const sticky = last && now() - last.at < STICKY_MS && all.find((c) => c.id === last.id);
@@ -215,6 +220,14 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       return off;
     }
     const direct = named(m.text, chosen).length > 0 || Boolean(m.only);
+    // Not said to her by name, nor while looking at her: is it for the characters at all, and worth an answer?
+    if (!direct && m.target !== chosen[0].id && m.source !== 'character' && !m.event && s.listen === 'all') {
+      const verdict = await worth(chosen[0], m, s);
+      if (!verdict.answer) {
+        note('skipped', chosen[0], m.name, `${m.source === 'discord' ? '[Discord] ' : ''}"${m.text}": ${verdict.why}`);
+        return null;
+      }
+    }
     let first = null;
     for (const ch of chosen) {
       if (m.source !== 'character') {
@@ -247,6 +260,37 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       }
     }
     return first;
+  }
+
+  /**
+   * Whether a line nobody addressed to a character deserves an answer from `ch`, judged against the recent chat: a
+   * reply to something a character said, a greeting or question to everyone, a request, yes; players talking among
+   * themselves, fillers and reactions, no. A cheap call with no tools; when in doubt (or it fails), she answers.
+   */
+  async function worth(ch, m, s) {
+    if (s.perDay && todayCalls() >= s.perDay) return { answer: false, why: 'the daily limit is reached' };
+    const names = cast().map((c) => c.name);
+    const lines = db.chat(12).map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.source === 'bot' ? `${c.name} (character)` : c.name}: ${c.text}`);
+    const last = m.personId && lastWith.get(m.personId);
+    const ago = last ? Math.round((now() - last.at) / 60_000) : null;
+    try {
+      const response = await call(s, 'You decide whether the characters of a game\'s chat should answer a message. '
+        + 'Answer with only JSON: {"answer": true or false, "why": a reason in at most 8 words}.', null,
+      [{ role: 'user', content: `Characters (not players): ${names.join(', ')}.\n\nRecent chat, oldest first (the last `
+        + `line is the new message):\n${lines.join('\n') || '(none)'}\n\nNew message from ${m.name}`
+        + `${m.source === 'discord' ? ' on Discord' : ' in the game'}: "${m.text}"\n`
+        + `${ch.name} would answer it${ago !== null ? ` (${m.name} last talked with her ${ago} min ago)` : ''}.\n\n`
+        + 'Answer true when the message is part of a conversation with a character (it replies to what a character just '
+        + 'said or asked, or follows up on it), is said to everyone or to the characters ("hi all", "anyone around?", '
+        + '"can you hear me?"), asks a question or for help or something in the world, or greets on arriving. Answer '
+        + 'false when players are talking with each other, it replies to another player, it is filler or a reaction '
+        + '(lol, ok, nice, brb) that no character asked for, or a character speaking up would butt in.' }]);
+      const raw = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ');
+      const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      return { answer: j.answer !== false, why: String(j.why ?? '').slice(0, 80) || (j.answer === false ? 'not for the characters' : '') };
+    } catch {
+      return { answer: true, why: '' };
+    }
   }
 
   // The game, as one character acts on it: every action carries who did it, so that character's body goes there.
@@ -582,17 +626,35 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       const turn = { speakerId: null, moved: new Map(), romance: s.romance };
       const g = actingAs(ch);
       const others = all.filter((c) => c.id !== ch.id);
-      const sites = others.filter((c) => c.project).map((c) => `${c.name} is building ${c.project.title} at `
-        + `(${c.project.site.x}, ${c.project.site.y}, ${c.project.site.z})`);
-      const task = ch.project
-        ? `Work on your project now: build the next step (${ch.project.steps[ch.project.done]}) with find_ground, fill_box `
-          + 'and place_blocks, then call step_done with a note. Keep the design coherent with what you already built '
-          + '(the notes say where), and make it look good: varied blocks, trims, windows, light, details.'
-        : 'You have no project. Think of something you would love to build, true to who you are (a home of your own, a '
-          + 'workshop, a tower, a garden, a well, a bridge, a mine entrance, a shrine to the builder who made you...), '
-          + 'something that takes many steps. Pick a spot on natural ground (dirt, grass, sand, stone; check with '
-          + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, call plan_project, '
-          + 'then build the first step.';
+      const sites = others.filter((c) => c.project && !(c.project.crew ?? []).some((m) => m.id === ch.id))
+        .map((c) => `${c.name} is building ${c.project.title} at (${c.project.site.x}, ${c.project.site.y}, ${c.project.site.z})`
+          + `${(c.project.crew?.length ?? 0) > 1 ? ` with ${c.project.crew.filter((m) => m.id !== c.id).map((m) => m.name).join(' and ')}` : ''}`);
+      // Now and then they build together (owner, 2026-10-27: "bots should occasionally decide to collaborate"): an
+      // invitation is always put to her; otherwise, a chance to offer a hand or ask for one.
+      const invite = !ch.project && others.find((c) => c.project?.invited?.id === ch.id);
+      const joinable = others.filter((c) => c.project && (c.project.crew?.length ?? 1) < 3);
+      const crewmates = (ch.project?.crew ?? []).filter((m) => m.id !== ch.id).map((m) => m.name);
+      const free = others.filter((c) => !c.project);
+      const build = 'with find_ground, fill_box and place_blocks, then call step_done with a note. Keep the design coherent '
+        + 'with what is already built (the notes say where), and make it look good: varied blocks, trims, windows, light, details.';
+      const task = ch.project && crewmates.length
+        ? `Work on ${ch.project.title}, which you build with ${crewmates.join(' and ')}: the next step is ${ch.project.steps[ch.project.done]}. `
+          + `Build your share of it (${ch.project.crew.find((m) => m.id === ch.id)?.part || 'what has not been done yet'}), `
+          + `${build} A word to ${crewmates.join(' or ')} by name now and then is welcome: you are a team.`
+        : ch.project
+          ? `Work on your project now: build the next step (${ch.project.steps[ch.project.done]}) ${build}`
+            + (free.length && random() < 0.15 ? ` If you would enjoy company, you might invite_to_project ${free.map((c) => c.name).join(' or ')}.` : '')
+          : invite
+            ? `${invite.name} asked you to build ${invite.project.title} with her at (${invite.project.site.x}, ${invite.project.site.y}, `
+              + `${invite.project.site.z})${invite.project.invited.why ? ` (${invite.project.invited.why})` : ''}. If you like the idea, `
+              + `join_project with her, saying which part you will take, then build it; if not, plan a project of your own and tell her why, kindly.`
+            : 'You have no project. Think of something you would love to build, true to who you are (a home of your own, a '
+              + 'workshop, a tower, a garden, a well, a bridge, a mine entrance, a shrine to the builder who made you...), '
+              + 'something that takes many steps. Pick a spot on natural ground (dirt, grass, sand, stone; check with '
+              + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, call plan_project, '
+              + 'then build the first step.'
+              + (joinable.length && random() < 0.35 ? ` Or, if it suits you, lend a hand instead: join_project with ${joinable.map((c) => `${c.name} `
+                + `(${c.project.title})`).join(' or ')}, taking a part she has not built (a garden, an interior, a path, a matching annex).` : '');
       const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { others: onlineIds(), cast: all, now: t })}`
         + `${sites.length ? `\n\nThe others: ${sites.join('; ')}.` : ''}\n\n`
         + `Nobody is asking you for anything right now, so you are on your own time. ${task} At most ${IDLE_BLOCKS} `

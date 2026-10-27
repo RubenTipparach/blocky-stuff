@@ -109,7 +109,7 @@ test('the reply is one chat line, cut to length', () => {
 
 test('every line from a person gets an answer, from the character they talk with; characters may stay quiet', async () => {
   const { db, bot } = setup([text('Hi there!'), text('Aye.'), text('Still me.'), text('QUIET'), text('Hello!')]);
-  db.putJson('bot', { cooldown: 0 });
+  db.putJson('bot', { cooldown: 0, listen: 'every' });
   const who = [];
   const hear = (text, extra = {}) => bot.hear({ source: 'game', name: 'alice', text, ...extra }, (t, ch) => who.push([ch.name, t]));
   assert.equal(await hear('lol'), 'Hi there!'); // no name: the first character answers
@@ -122,6 +122,26 @@ test('every line from a person gets an answer, from the character they talk with
   db.putJson('bot', { cooldown: 0, listen: 'mentions' });
   assert.equal(await hear('hello all'), null);
   assert.equal(await hear('@Blocky hello'), 'Hello!');
+});
+
+test('a line nobody addressed is weighed against the conversation: players\' own talk is skipped, a reply to a character is not', async () => {
+  const { db, bot, client } = setup([
+    text('{"answer": false, "why": "players talking among themselves"}'),
+    text('{"answer": true, "why": "answers what Moss asked"}'), text('Hello to you too!'),
+    text('Aye, what now?'),
+  ]);
+  db.putJson('bot', { cooldown: 0 });
+  const said = [];
+  const hear = (text, extra = {}) => bot.hear({ source: 'discord', name: 'ruben', text, ...extra }, (t) => said.push(t));
+  assert.equal(await hear('lol bob that was great'), null);
+  assert.match(bot.activity().find((a) => a.kind === 'skipped').text, /players talking among themselves/);
+  db.addChat('bot', 'Moss', 'What do you need from an old digger?', 1);
+  assert.equal(await hear('not much, just saying hi'), 'Hello to you too!');
+  // The judge saw the recent chat, with the character's question in it.
+  assert.match(client.calls[1].messages[0].content, /Moss \(character\): What do you need/);
+  // Said to her by name: no judging, she answers.
+  assert.equal(await hear('Moss, you there?'), 'Aye, what now?');
+  assert.equal(client.calls.length, 4);
 });
 
 test('a character naming another may get an answer, but not forever', () => {

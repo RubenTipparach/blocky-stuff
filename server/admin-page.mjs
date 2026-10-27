@@ -258,12 +258,15 @@ function build() {
     <div class="two"><label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label>
     <label class="field">Model<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label></div>
     <div class="two"><label class="field">Listens to<select id="b_listen"><option value="mentions">Only messages that say its name</option>
-      <option value="all">Every chat message (it joins in when it has something to say)</option></select></label>
+      <option value="all">Every chat message, answering what is worth it (replies, questions, hellos; not players' own talk)</option>
+      <option value="every">Every chat message, always answering</option></select></label>
     <label class="field">Daily summary at (UTC hour, -1 = off)<input id="b_summaryHour" type="number" min="-1" max="23"></label></div>
     <div class="three"><label class="field">Cooldown (s)<input id="b_cooldown" type="number" min="0"></label>
     <label class="field">Per player / hour<input id="b_perHour" type="number" min="0"></label>
     <label class="field">Calls / day (0 = no limit)<input id="b_perDay" type="number" min="0"></label></div>
-    <label class="check"><input type="checkbox" id="b_sleep"> Sleep: when nobody is in the game, they sleep (no projects, no AI calls). Off: they stay awake and keep working</label>
+    <label class="check"><input type="checkbox" id="b_sleep"> Sleep: when nobody is around, they sleep (no projects, no AI calls). Off: they stay awake and keep working</label>
+    <label class="field" id="sleepAfterRow">Fall asleep after <b id="sleepAfterText"></b> with nobody in the game and no chat from players (game or Discord)
+      <input id="b_sleepAfter" type="range" min="5" max="720" step="5"></label>
     <label class="check"><input type="checkbox" id="b_romance"> Romance: characters fond of someone may flirt, and date (always PG)</label>
     <label class="check"><input type="checkbox" id="b_pranks"> Pranks: characters hostile to someone may drop a few harmless blocks on their build, once a day</label>
     <label class="check"><input type="checkbox" id="b_idle"> They work on their own projects when nobody is asking them anything (while someone is online, and for an hour after anyone's last word)</label>
@@ -443,8 +446,18 @@ function build() {
   $('b_listen').value = s.listen; $('b_summaryHour').value = s.summaryHour;
   $('b_romance').checked = s.romance; $('b_pranks').checked = s.pranks; $('b_sleep').checked = s.sleep;
   // Sleep saves at once when switched (switching it off wakes them right away).
+  const sleepWords = (m) => (m < 60 ? m + ' min' : (m % 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : (m / 60) + (m === 60 ? ' hour' : ' hours')));
+  const showSleep = () => { $('sleepAfterRow').style.display = $('b_sleep').checked ? '' : 'none'; $('sleepAfterText').textContent = sleepWords(Number($('b_sleepAfter').value)); };
+  $('b_sleepAfter').value = s.sleepAfter; showSleep();
   $('b_sleep').onchange = async () => {
-    try { await api('/api/admin/bot', { sleep: $('b_sleep').checked }); $('botNote').textContent = $('b_sleep').checked ? 'They will sleep while nobody is in the game.' : 'Awake: they are getting up.'; refreshSoon(); }
+    showSleep();
+    try { await api('/api/admin/bot', { sleep: $('b_sleep').checked }); $('botNote').textContent = $('b_sleep').checked ? 'They will sleep after ' + sleepWords(Number($('b_sleepAfter').value)) + ' with nobody around.' : 'Awake: they are getting up.'; refreshSoon(); }
+    catch (e) { $('botNote').textContent = e.message; }
+  };
+  // The delay saves when let go (and shows as it moves).
+  $('b_sleepAfter').oninput = showSleep;
+  $('b_sleepAfter').onchange = async () => {
+    try { await api('/api/admin/bot', { sleepAfter: Number($('b_sleepAfter').value) }); $('botNote').textContent = 'They fall asleep after ' + sleepWords(Number($('b_sleepAfter').value)) + ' with nobody around.'; refreshSoon(); }
     catch (e) { $('botNote').textContent = e.message; }
   };
   $('b_idle').checked = s.idle.enabled; $('b_idleAfter').value = s.idle.after; $('b_idlePerHour').value = s.idle.perHour;
@@ -507,7 +520,7 @@ function build() {
     try {
       await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value,
         effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
-        perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, sleep: $('b_sleep').checked, summaryHour: Number($('b_summaryHour').value),
+        perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, sleep: $('b_sleep').checked, sleepAfter: Number($('b_sleepAfter').value), summaryHour: Number($('b_summaryHour').value),
         idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value }, policy });
       $('botNote').textContent = 'Saved.';
     } catch (e) { $('botNote').textContent = e.message; }
@@ -588,7 +601,7 @@ function refresh() {
   if (me) $('moodLine').textContent = 'Mood: ' + me.mood.label + (me.mood.reason ? ' (' + me.mood.reason + ')' : '')
     + (me.project ? ' · Project: ' + me.project.title + ' at ' + me.project.site.x + ', ' + me.project.site.y + ', ' + me.project.site.z
       + ' (' + me.project.done + ' of ' + me.project.steps.length + ' steps)' : me.goal ? ' · Working on: ' + me.goal : '');
-  const kinds = { answered: 'ok', quiet: 'muted', ignored: 'warn', limited: 'warn', error: 'bad', 'own turn': 'muted', prank: 'warn' };
+  const kinds = { answered: 'ok', quiet: 'muted', skipped: 'muted', ignored: 'warn', limited: 'warn', error: 'bad', 'own turn': 'muted', prank: 'warn' };
   $('activity').innerHTML = (st.activity || []).length ? st.activity.map((e) => '<tr><td class="muted">' + clock(e.at) + '</td><td class="'
     + (kinds[e.kind] || '') + '">' + esc(e.kind) + '</td><td>' + esc(e.character || '') + '</td><td>' + esc(e.who || '') + '</td><td>'
     + esc(e.text) + '</td></tr>').join('') : '<tr><td colspan="5" class="muted">Nothing yet.</td></tr>';
