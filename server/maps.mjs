@@ -18,7 +18,7 @@
 //   GET /map/explored.json           the 64-block chunks the world has anything in, and their bounds (owner: "isomap
 //                                    should be bounded by explored areas ... so I cant just scroll infinitely")
 //   GET /map/img/<name>.png          a kept picture
-//   GET /map/render?x=&z=[&y=][&r=]  a fresh picture of any spot (r up to 48 blocks around), a few a minute per address
+//   GET /map/render?x=&z=[&y=][&r=]  a fresh picture of any spot (r up to 64 blocks around), a few a minute per address
 
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -27,7 +27,7 @@ import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { renderIso, renderTile, colorOf } from './map.mjs';
 
-const RADIUS = 32; // a snapshot covers 64 by 64 blocks
+const RADIUS = 64; // a snapshot covers 128 by 128 blocks (owner, 2026-10-27: "I'd double the block resolution 128x128")
 const EVERY_MS = 20 * 60_000; // a character's picture is refreshed this often while she is about
 const RENDER_GAP_MS = 15_000; // one on-request render per address this often
 const MAP_COMMAND_GAP_MS = 30_000; // !map at most this often
@@ -63,7 +63,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
 
   /** A picture of the area around (x, z): { png, scan } or { error }. y: about the ground there, if known. */
   async function render({ x, z, y = null, r = RADIUS }) {
-    const rr = Math.max(8, Math.min(48, Math.round(r)));
+    const rr = Math.max(8, Math.min(64, Math.round(r)));
     const yy = Number.isFinite(y) ? Math.round(y) : null;
     const r1 = await game.act({ type: 'scan', x1: Math.round(x) - rr, z1: Math.round(z) - rr, w: 2 * rr, d: 2 * rr,
       // Down to 48 blocks under her, whole columns to there (owner: "this should scan down to the lower depths").
@@ -403,7 +403,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
       const z = Number(url.searchParams.get('z'));
       if (!Number.isFinite(x) || !Number.isFinite(z) || Math.abs(x) > 30000 || Math.abs(z) > 30000) {
         res.writeHead(400, { 'content-type': 'text/plain' });
-        res.end('Give x and z: /map/render?x=10&z=-20 (optional y, and r up to 48).');
+        res.end('Give x and z: /map/render?x=10&z=-20 (optional y, and r up to 64).');
         return true;
       }
       if (now() - (lastAsk.get(ip) ?? 0) < RENDER_GAP_MS) {
@@ -428,6 +428,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   }
 
   function page(view = 'iso') {
+    legendCast = characters();
     const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const byId = Object.fromEntries(characters().map((c) => [c.id, c]));
     const cards = Object.values(kept()).sort((x, y) => y.at - x.at).map((m) => {
@@ -456,6 +457,10 @@ p { color: var(--muted); margin: 0 0 14px; } a { color: var(--accent); }
 .tog { display: inline-flex; gap: 6px; align-items: center; color: var(--text); cursor: pointer; white-space: nowrap; } .tog input { accent-color: var(--accent); width: 16px; height: 16px; }
 .cut input[type=range]:disabled { opacity: .4; }
 .cut input { flex: 1 1 200px; max-width: 420px; accent-color: var(--accent); } .cut output { font: 600 14px ui-monospace, monospace; color: var(--text); min-width: 120px; }
+.legend { background: rgba(20, 24, 18, .9); color: #fff; padding: 6px 10px; border-radius: 8px; font: 12px system-ui, sans-serif; max-width: 200px; }
+.legend summary { cursor: pointer; font-weight: 600; } .legend .leg { display: grid; gap: 3px; margin-top: 6px; }
+.legend .leg span { display: flex; gap: 8px; align-items: center; } .legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; flex: none; }
+.legend hr { border: 0; border-top: 1px solid #3a4636; margin: 4px 0; width: 100%; }
 .coords { background: rgba(20, 24, 18, .85); color: #fff; padding: 4px 8px; border-radius: 6px; font: 12px ui-monospace, monospace; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 16px; }
 figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
@@ -471,7 +476,8 @@ Parts of the world nobody has been to yet stay blank. <a href="/map${view === 'i
 ${view === 'iso' ? `<div class="cut"><label class="tog"><input type="checkbox" id="cutOn"> Cut at height</label>
 <input type="range" id="cut" min="${ISO.YMIN + 1}" max="${ISO.YMAX}" step="1" value="${ISO.YMAX}"><output id="cutOut">everything</output></div>
 <div class="toggles"><label class="tog"><input type="checkbox" id="show_trees"> Trees</label><label class="tog"><input type="checkbox" id="show_characters"> Characters</label>
-<label class="tog"><input type="checkbox" id="show_players"> Players</label><label class="tog"><input type="checkbox" id="show_names"> Names</label></div>` : ''}
+<label class="tog"><input type="checkbox" id="show_players"> Players</label><label class="tog"><input type="checkbox" id="show_names"> Names</label>
+<label class="tog"><input type="checkbox" id="show_doing"> What they're doing</label></div>` : ''}
 <div id="map"></div>
 <h2>What the characters are up to</h2>
 <p>Isometric pictures of each character, aimed at where she is, refreshed every 20 minutes.</p>
@@ -514,7 +520,7 @@ const map = L.map('map', { crs: L.CRS.Simple, minZoom: -4, maxZoom: 3, zoomSnap:
 const origin = (cx, cz) => { const x1 = cx * C, z1 = cz * C; return [(x1 - z1) * A - OX, (x1 + z1) * A / 2 - YMIN * A - OY]; };
 
 // What to show: the cut (off = everything), trees, characters, players, names. Remembered on this device.
-const view = { cut: false, cutAt: YMAX, trees: true, characters: true, players: true, names: true };
+const view = { cut: false, cutAt: YMAX, trees: true, characters: true, players: true, names: true, doing: true };
 try { Object.assign(view, JSON.parse(localStorage.getItem('blocky.mapview') || '{}')); } catch {}
 const save = () => { try { localStorage.setItem('blocky.mapview', JSON.stringify(view)); } catch {} };
 
@@ -670,7 +676,7 @@ const setCutText = () => { cutOut.textContent = view.cut ? 'y ' + view.cutAt + '
 cutBox.checked = view.cut; cutRange.value = view.cutAt; setCutText();
 cutBox.addEventListener('change', () => { view.cut = cutBox.checked; setCutText(); save(); redrawAll(); });
 cutRange.addEventListener('input', () => { view.cutAt = Number(cutRange.value); setCutText(); save(); redrawAll(); });
-for (const k of ['trees', 'characters', 'players', 'names']) {
+for (const k of ['trees', 'characters', 'players', 'names', 'doing']) {
   const box = $('show_' + k);
   box.checked = view[k];
   box.addEventListener('change', () => { view[k] = box.checked; save(); if (k === 'trees') redrawAll(); else where(); });
@@ -678,10 +684,25 @@ for (const k of ['trees', 'characters', 'players', 'names']) {
 ${markersScript()}`;
 }
 
+// The legend's body: a dot per character in her colour, players, and swatches of the common ground (from the same
+// colour table the map is drawn with).
+let legendCast = [];
+function legendHtml() {
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const dot = (color) => `<i style="background:${color};border-radius:50%"></i>`;
+  const sw = (name) => { const [r, g, b] = colorOf(name); return `<i style="background:rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})"></i>`; };
+  const ground = [['default:dirt_with_grass', 'Grass'], ['default:dirt_with_coniferous_litter', 'Forest floor'], ['default:pine_needles', 'Pine trees'],
+    ['default:sand', 'Sand'], ['default:water_source', 'Water'], ['default:stone', 'Stone'], ['default:dirt_with_snow', 'Snow'],
+    ['default:cobble', 'Cobblestone (builds)'], ['default:wood', 'Wood (builds)']];
+  return `<div class="leg">${legendCast.map((c) => `<span>${dot(c.dressColor || c.chatColor)}${esc(c.name)}</span>`).join('')}`
+    + `<span>${dot('#ffffff')}Players</span><hr>${ground.map(([n, label]) => `<span>${sw(n)}${label}</span>`).join('')}</div>`;
+}
+
 // Live markers for both views: `at(x, y, z)` turns a block into the view's map position. Name tags only (owner:
 // "just the name tag is fine"), and the iso view's toggles (characters, players, names) apply.
 function markersScript() {
-  return `map.createPane('people').style.zIndex = 650; // over the map's chunks
+  return `const LEGEND = ${JSON.stringify(legendHtml())};
+map.createPane('people').style.zIndex = 650; // over the map's chunks
 const layer = L.layerGroup().addTo(map);
 const shows = (k) => (typeof view === 'undefined' ? true : view[k]);
 const where = async () => {
@@ -689,12 +710,21 @@ const where = async () => {
     const w = await (await fetch('/map/where.json', { cache: 'no-store' })).json();
     layer.clearLayers();
     const mark = (p, fill, r) => { const m = L.circleMarker(at(p.x, p.y, p.z), { pane: 'people', radius: r, color: '#141812', weight: 2, fillColor: fill, fillOpacity: 1 });
-      if (shows('names')) m.bindTooltip(p.name, { permanent: true, direction: 'right', className: 'who', offset: [8, 0] });
+      // The name, and (a signpost, the owner liked it) what a character is building.
+      if (shows('names')) m.bindTooltip(p.name + (p.doing && shows('doing') ? ' · ' + p.doing : ''), { permanent: true, direction: 'right', className: 'who', offset: [8, 0] });
       m.addTo(layer); };
     if (shows('characters')) for (const c of w.characters) mark(c, c.color, 8);
     if (shows('players')) for (const p of w.players) mark(p, '#ffffff', 6);
   } catch {}
 };
 where();
-setInterval(where, 10000);`;
+setInterval(where, 10000);
+// The legend: who is who, and what the common colours are.
+const Legend = L.Control.extend({ onAdd() {
+  const el = L.DomUtil.create('div', 'legend');
+  L.DomEvent.disableClickPropagation(el);
+  el.innerHTML = '<details open><summary>Legend</summary>' + LEGEND + '</details>';
+  return el;
+} });
+new Legend({ position: 'bottomright' }).addTo(map);`;
 }
