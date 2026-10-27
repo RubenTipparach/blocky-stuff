@@ -9,8 +9,10 @@
 //                                    style map", "I wanted the isometric look on that map") with a depth slider, the
 //                                    characters and players on it, and the latest picture of each character;
 //                                    /map?view=flat is the same world flat, from above
-//   GET /map/iso/<cx>/<cz>.png?top=  the 64 by 64 block chunk (cx, cz) drawn isometric in a fixed frame, cut at y = top,
-//                                    with a clear background; chunks laid front over back make the map
+//   GET /map/chunk/<cx>/<cz>.json    the 64 by 64 block chunk (cx, cz) as data: each column as runs of one block, and
+//                                    each block's colour; the page draws the isometric map from these itself, so a cut
+//                                    or a toggle is redrawn in the browser at once (owner: "ship renderer on front end")
+//   GET /map/iso/<cx>/<cz>.png?top=  the same chunk drawn isometric on the server, cut at y = top (for other uses)
 //   GET /map/tiles/<x>/<y>.png       a 64 by 64 block tile of the flat map (x east, y south)
 //   GET /map/where.json              where the characters and players are now
 //   GET /map/explored.json           the 64-block chunks the world has anything in, and their bounds (owner: "isomap
@@ -22,7 +24,8 @@ import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { renderIso, renderTile } from './map.mjs';
+import { gzipSync } from 'node:zlib';
+import { renderIso, renderTile, colorOf } from './map.mjs';
 
 const RADIUS = 32; // a snapshot covers 64 by 64 blocks
 const EVERY_MS = 20 * 60_000; // a character's picture is refreshed this often while she is about
@@ -259,6 +262,37 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     return explored;
   }
 
+  /** A chunk's columns as runs (gzipped JSON): { names, colors, cols }, kept like the tiles. */
+  async function chunkRuns(cx, cz) {
+    const key = `runs_${cx}_${cz}`;
+    const file = join(dir, 'tiles', `${key}.json.gz`);
+    const meta = db.json('maps.tiles', {});
+    if (meta[key] && now() - meta[key] < TILE_KEEP_MS) {
+      try { return await readFile(file); } catch { /* gone: read it again */ }
+    }
+    if (drawing.has(key)) return drawing.get(key);
+    const job = (async () => {
+      await slot();
+      try {
+        const r1 = await game.act({ type: 'scan', runs: true, x1: cx * ISO.C, z1: cz * ISO.C, w: ISO.C, d: ISO.C, y1: ISO.YMIN, y2: ISO.YMAX });
+        if (!r1.ok) return null;
+        const scan = JSON.parse(r1.message);
+        const names = Array.isArray(scan.names) ? scan.names : [];
+        const body = gzipSync(JSON.stringify({ cx, cz, names, colors: names.map((n) => colorOf(n)),
+          leaves: names.map((n) => /leaves|needles|foliage/.test(n)), cols: (scan.cols ?? []).map((c) => c || []) }));
+        await mkdir(join(dir, 'tiles'), { recursive: true });
+        await writeFile(file, body);
+        db.putJson('maps.tiles', { ...db.json('maps.tiles', {}), [key]: now() });
+        return body;
+      } finally {
+        free();
+        drawing.delete(key);
+      }
+    })();
+    drawing.set(key, job);
+    return job;
+  }
+
   /** Where everyone is: characters (with their colours) and players online. */
   function where() {
     const byId = Object.fromEntries(characters().map((c) => [c.id, c]));
@@ -314,6 +348,18 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
       }
       res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=300' });
       res.end(png);
+      return true;
+    }
+    const runs = /^\/map\/chunk\/(-?\d{1,4})\/(-?\d{1,4})\.json$/.exec(url.pathname);
+    if (runs && req.method === 'GET') {
+      const gz = game.connected ? await chunkRuns(Number(runs[1]), Number(runs[2])).catch(() => null) : null;
+      if (!gz) {
+        res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '30' });
+        res.end('The game is not answering; try again soon.');
+        return true;
+      }
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip', 'cache-control': 'public, max-age=300' });
+      res.end(gz);
       return true;
     }
     const iso = /^\/map\/iso\/(-?\d{1,4})\/(-?\d{1,4})\.png$/.exec(url.pathname);
@@ -406,7 +452,9 @@ p { color: var(--muted); margin: 0 0 14px; } a { color: var(--accent); }
 .leaflet-container { font: 13px system-ui, sans-serif; }
 .who { background: rgba(20, 24, 18, .85); color: #fff; border: 0; border-radius: 6px; padding: 2px 6px; font-weight: 600; box-shadow: none; }
 .who::before { display: none; }
-.cut { display: flex; gap: 12px; align-items: center; margin: 0 0 10px; color: var(--muted); }
+.cut, .toggles { display: flex; gap: 12px 18px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; color: var(--muted); }
+.tog { display: inline-flex; gap: 6px; align-items: center; color: var(--text); cursor: pointer; white-space: nowrap; } .tog input { accent-color: var(--accent); width: 16px; height: 16px; }
+.cut input[type=range]:disabled { opacity: .4; }
 .cut input { flex: 1 1 200px; max-width: 420px; accent-color: var(--accent); } .cut output { font: 600 14px ui-monospace, monospace; color: var(--text); min-width: 120px; }
 .coords { background: rgba(20, 24, 18, .85); color: #fff; padding: 4px 8px; border-radius: 6px; font: 12px ui-monospace, monospace; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 16px; }
@@ -416,11 +464,14 @@ figcaption { padding: 10px 12px; display: grid; gap: 2px; } figcaption span { co
 code { background: #232a1f; padding: 1px 6px; border-radius: 4px; }
 </style></head><body><main>
 <h1>${esc(config.serverName)} map</h1>
-<p>${view === 'iso' ? 'Drag and zoom the world, and slide the cut to look 10 blocks deeper at a time.' : 'Drag and zoom the world from above.'}
+<p>${view === 'iso' ? 'Drag and zoom the world; switch on the cut to slice it open one block at a time.' : 'Drag and zoom the world from above.'}
 The characters and players move on it live. Join at
 <code>${esc(config.gameAddress || new URL(config.publicUrl).hostname)}:${config.gamePort}</code> with <a href="https://www.luanti.org/en/">Luanti</a>.
 Parts of the world nobody has been to yet stay blank. <a href="/map${view === 'iso' ? '?view=flat' : ''}">${view === 'iso' ? 'Top-down view' : 'Isometric view'}</a></p>
-${view === 'iso' ? `<div class="cut"><label for="cut">Cut at height</label><input type="range" id="cut" min="${ISO.YMIN + 10}" max="${ISO.YMAX}" step="10" value="${ISO.YMAX}"><output id="cutOut">everything</output></div>` : ''}
+${view === 'iso' ? `<div class="cut"><label class="tog"><input type="checkbox" id="cutOn"> Cut at height</label>
+<input type="range" id="cut" min="${ISO.YMIN + 1}" max="${ISO.YMAX}" step="1" value="${ISO.YMAX}"><output id="cutOut">everything</output></div>
+<div class="toggles"><label class="tog"><input type="checkbox" id="show_trees"> Trees</label><label class="tog"><input type="checkbox" id="show_characters"> Characters</label>
+<label class="tog"><input type="checkbox" id="show_players"> Players</label><label class="tog"><input type="checkbox" id="show_names"> Names</label></div>` : ''}
 <div id="map"></div>
 <h2>What the characters are up to</h2>
 <p>Isometric pictures of each character, aimed at where she is, refreshed every 20 minutes.</p>
@@ -431,7 +482,7 @@ ${view === 'iso' ? isoScript(first) : flatScript(first)}
 </script></body></html>`;
   }
 
-  return { render, snapshot, tick, command, handle, settings, page, postNow, tile, isoChunk, where };
+  return { render, snapshot, tick, command, handle, settings, page, postNow, tile, isoChunk, chunkRuns, where };
 }
 
 // The flat map's script: one map unit is one block, x east and z north as the map's up; tiles are 64 blocks at zoom 2.
@@ -447,39 +498,110 @@ const coords = new Coords({ position: 'bottomleft' }).addTo(map);
 map.on('mousemove', (e) => { coords.el.textContent = 'x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat); });`;
 }
 
-// The isometric map's script. One map unit is one pixel of the drawing at zoom 0; a block at (x, y, z) sits at
-// GX = (x - z) * A, GY = (x + z) * A / 2 - y * A (as server/map.mjs draws it), and the map's up is -GY. Each chunk is an
-// image in the shared frame, placed from ISO alone, the nearer (larger cx + cz) over the farther.
+// The isometric map's script. The page draws the map itself (owner, 2026-10-27: "ship renderer on front end"): it
+// fetches each explored chunk's columns once (/map/chunk, runs of one block), keeps them, and draws them into a canvas
+// per chunk, so the cut (1 block at a time) and the toggles redraw at once without asking the server. One map unit is
+// one pixel of the drawing at zoom 0; a block at (x, y, z) sits at GX = (x - z) * A, GY = (x + z) * A / 2 - y * A, the
+// map's up is -GY, and each chunk's canvas is placed from ISO alone, the nearer (larger cx + cz) over the farther.
 function isoScript(first) {
   const { A, YMIN, YMAX, C } = ISO;
-  return `const A = ${A}, YMIN = ${YMIN}, YMAX = ${YMAX}, C = ${C};
+  return `const A = ${A}, YMIN = ${YMIN}, YMAX = ${YMAX}, C = ${C}, NY = YMAX - YMIN + 1;
 const W = 2 * C * A + 2 * A, H = Math.round(C * A + (YMAX - YMIN + 3) * A + 3 * A), OX = C * A, OY = (YMAX - YMIN + 2) * A;
 const gx = (x, z) => (x - z) * A, gy = (x, y, z) => (x + z) * A / 2 - y * A;
 const at = (x, y, z) => [-(gy(x, y, z) + A / 2), gx(x, z) + A];
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: -4, maxZoom: 3, zoomSnap: 0.5, attributionControl: false,
   maxBoundsViscosity: 1 }).setView(at(${Number(first.x) || 0}, ${Number(first.y) || 10}, ${Number(first.z) || 0}), 0);
-// Only the explored world: the chunks with anything saved, and no panning past their bounds.
-let known = null;
-fetch('/map/explored.json').then((r) => r.json()).then((e) => {
-  if (!e.bounds) return;
-  known = new Set(e.chunks.map(([cx, cz]) => cx + ',' + cz));
-  const { cx1, cz1, cx2, cz2 } = e.bounds;
-  const corners = [[cx1, cz1], [cx2, cz1], [cx1, cz2], [cx2, cz2]].map(([cx, cz]) => origin(cx, cz));
-  const west = Math.min(...corners.map(([ox]) => ox)), east = Math.max(...corners.map(([ox]) => ox + W));
-  const north = Math.min(...corners.map(([, oy]) => oy)), south = Math.max(...corners.map(([, oy]) => oy + H));
-  const box = L.latLngBounds([[-north, west], [-south, east]]);
-  map.setMaxBounds(box.pad(0.05));
-  map.setMinZoom(Math.min(0, map.getBoundsZoom(box) - 0.5));
-  load();
-}).catch(() => {});
-let cutAt = YMAX; // not "top": the browser already has a window.top
-const shown = new Map();
 const origin = (cx, cz) => { const x1 = cx * C, z1 = cz * C; return [(x1 - z1) * A - OX, (x1 + z1) * A / 2 - YMIN * A - OY]; };
-function load() {
+
+// What to show: the cut (off = everything), trees, characters, players, names. Remembered on this device.
+const view = { cut: false, cutAt: YMAX, trees: true, characters: true, players: true, names: true };
+try { Object.assign(view, JSON.parse(localStorage.getItem('blocky.mapview') || '{}')); } catch {}
+const save = () => { try { localStorage.setItem('blocky.mapview', JSON.stringify(view)); } catch {} };
+
+// ---- Drawing a chunk ----
+// One block's sprite, 2A square: which face each pixel is (1 top, 2 south, 3 east) and whether it is on its edge.
+const SP = (() => {
+  const w = 2 * A, face = new Uint8Array(w * w), edge = new Uint8Array(w * w);
+  const inside = (px, py, poly) => { let hit = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j]; if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) hit = !hit; } return hit; };
+  const polys = [[[A, 0], [w, A / 2], [A, A], [0, A / 2]], [[0, A / 2], [A, A], [A, w], [0, w - A / 2]], [[A, A], [w, A / 2], [w, w - A / 2], [A, w]]];
+  for (let y = 0; y < w; y++) for (let x = 0; x < w; x++) face[y * w + x] = polys.findIndex((p) => inside(x + 0.5, y + 0.5, p)) + 1;
+  for (let y = 0; y < w; y++) for (let x = 0; x < w; x++) { const f = face[y * w + x]; if (!f) continue;
+    edge[y * w + x] = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]].some(([nx, ny]) => nx < 0 || ny < 0 || nx >= w || ny >= w || face[ny * w + nx] !== f) ? 1 : 0; }
+  return { w, face, edge };
+})();
+const SHADE = [0, 1, 0.8, 0.64];
+
+// A chunk's columns as a dense block grid: (z * C + x) * NY + (y - YMIN) -> name index + 1 (0 is air).
+function grid(data) {
+  const g = new Uint16Array(C * C * NY);
+  data.cols.forEach((col, i) => { for (let k = 0; k + 2 < col.length; k += 3) {
+    const top = col[k], len = col[k + 1], id = col[k + 2] + 1;
+    for (let y = top; y > top - len; y--) if (y >= YMIN && y <= YMAX) g[i * NY + (y - YMIN)] = id; } });
+  return g;
+}
+
+// Draw a chunk under the current view into a fresh canvas; returns a PNG URL for an image overlay.
+function draw(chunk) {
+  const { g, data } = chunk;
+  const cut = view.cut ? view.cutAt : YMAX;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  const px = img.data;
+  const leaf = data.leaves;
+  const block = (x, y, z) => (x >= C || z >= C || y > cut || y < YMIN ? 0 : g[(z * C + x) * NY + (y - YMIN)]);
+  const open = (x, y, z) => { const id = block(x, y, z); return id === 0 || leaf[id - 1]; };
+  const blit = (sx, sy, rgba) => {
+    const alpha = (rgba[3] ?? 255) / 255;
+    for (let yy = 0; yy < SP.w; yy++) { const ty = sy + yy; if (ty < 0 || ty >= H) continue;
+      for (let xx = 0; xx < SP.w; xx++) { const f = SP.face[yy * SP.w + xx]; if (!f) continue; const tx = sx + xx; if (tx < 0 || tx >= W) continue;
+        const k = SHADE[f] * (SP.edge[yy * SP.w + xx] ? 0.86 : 1), o = (ty * W + tx) * 4, da = px[o + 3] / 255, oa = alpha + da * (1 - alpha);
+        for (let c = 0; c < 3; c++) px[o + c] = oa ? (Math.min(255, rgba[c] * k) * alpha + px[o + c] * da * (1 - alpha)) / oa : 0;
+        px[o + 3] = oa * 255; } }
+  };
+  for (let s = 0; s <= 2 * C - 2; s++) {
+    for (let x = Math.max(0, s - C + 1); x <= Math.min(C - 1, s); x++) {
+      const z = s - x, base = (z * C + x) * NY, edge = x === C - 1 || z === C - 1;
+      for (let y = YMIN; y <= cut; y++) {
+        const id = g[base + (y - YMIN)];
+        if (!id) continue;
+        if (leaf[id - 1] && !view.trees) continue;
+        if (!(y === cut || edge || open(x, y + 1, z) || open(x, y, z + 1) || open(x + 1, y, z))) continue;
+        blit(OX + (x - z) * A, OY + ((x + z) * A) / 2 - (y - YMIN) * A, data.colors[id - 1]);
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return new Promise((done) => canvas.toBlob((b) => done(b ? URL.createObjectURL(b) : null)));
+}
+
+// ---- Which chunks, fetched once and kept ----
+let known = null;
+const chunks = new Map(); // "cx,cz" -> { data, g, at, overlay, drawn }
+const FRESH = 5 * 60 * 1000;
+let fetching = 0;
+const queue = [];
+const turn = () => (fetching < 4 ? (fetching++, Promise.resolve()) : new Promise((r) => queue.push(r)));
+const done = () => { fetching--; const next = queue.shift(); if (next) { fetching++; next(); } };
+async function fetchChunk(cx, cz) {
+  await turn();
+  try { const r = await fetch('/map/chunk/' + cx + '/' + cz + '.json'); return r.ok ? await r.json() : null; } catch { return null; } finally { done(); }
+}
+async function show(cx, cz, chunk) {
+  const src = await draw(chunk);
+  if (!src) return;
+  const [ox, oy] = origin(cx, cz);
+  if (chunk.overlay) { const old = chunk.src; chunk.overlay.setUrl(src); setTimeout(() => URL.revokeObjectURL(old), 2000); }
+  else chunk.overlay = L.imageOverlay(src, [[-oy, ox], [-(oy + H), ox + W]], { zIndex: 1000 + cx + cz, interactive: false }).addTo(map);
+  chunk.src = src;
+}
+function wanted() {
   const b = map.getBounds();
   const gx1 = b.getWest(), gx2 = b.getEast(), gy1 = -b.getNorth(), gy2 = -b.getSouth();
-  const umin = gx1 / A - 2, umax = gx2 / A + 2, vmin = 2 * gy1 / A + 2 * YMIN - 4, vmax = 2 * gy2 / A + 2 * cutAt + 4;
-  const want = [];
+  const umin = gx1 / A - 2, umax = gx2 / A + 2, vmin = 2 * gy1 / A + 2 * YMIN - 4, vmax = 2 * gy2 / A + 2 * YMAX + 4;
+  const out = [];
   for (let p = Math.floor((umin - C) / C); p <= Math.ceil((umax + C) / C); p++) {
     for (let q = Math.floor((vmin - 2 * C) / C); q <= Math.ceil(vmax / C); q++) {
       if ((p + q) % 2 !== 0) continue;
@@ -487,81 +609,90 @@ function load() {
       if (known && !known.has(cx + ',' + cz)) continue;
       const [ox, oy] = origin(cx, cz);
       if (ox > gx2 || ox + W < gx1 || oy > gy2 || oy + H < gy1) continue;
-      want.push([cx, cz]);
+      out.push([cx, cz]);
     }
   }
-  const mid = map.getCenter();
-  want.sort((a, b) => { const [ax, ay] = origin(...a), [bx, by] = origin(...b);
-    return Math.hypot(ax + W / 2 - mid.lng, -(ay + H / 2) - mid.lat) - Math.hypot(bx + W / 2 - mid.lng, -(by + H / 2) - mid.lat); });
-  for (const [cx, cz] of want.slice(0, 60)) {
-    const key = cx + ',' + cz + ',' + cutAt;
-    if (shown.has(key)) continue;
-    shown.set(key, null); // being fetched
-    picture(cx, cz, cutAt).then((src) => {
-      if (!src || !shown.has(key)) { shown.delete(key); return; }
-      const [ox, oy] = origin(cx, cz);
-      shown.set(key, L.imageOverlay(src, [[-oy, ox], [-(oy + H), ox + W]], { zIndex: 1000 + cx + cz, interactive: false }).addTo(map));
+  return out.slice(0, 80);
+}
+function load() {
+  for (const [cx, cz] of wanted()) {
+    const key = cx + ',' + cz;
+    if (chunks.has(key)) continue;
+    const chunk = { at: Date.now() };
+    chunks.set(key, chunk);
+    fetchChunk(cx, cz).then((data) => {
+      if (!data) { chunks.delete(key); return; }
+      chunk.data = data; chunk.g = grid(data); chunk.at = Date.now();
+      show(cx, cz, chunk);
     });
   }
 }
-// Each chunk's picture is fetched once and kept in the page (owner: "cache these locally ... only fetch from server
-// every 5 mins"): a chunk stays on the map once loaded, and is fetched again only when it is over 5 minutes old and in
-// view. At most four fetches at a time.
-const pictures = new Map(); // key -> { src, at }
-const FRESH = 5 * 60 * 1000;
-let fetching = 0;
-const queue = [];
-const turn = () => (fetching < 4 ? (fetching++, Promise.resolve()) : new Promise((r) => queue.push(r)));
-const done = () => { fetching--; const next = queue.shift(); if (next) { fetching++; next(); } };
-async function picture(cx, cz, top, again) {
-  const key = cx + ',' + cz + ',' + top;
-  const had = pictures.get(key);
-  if (had && !again && Date.now() - had.at < FRESH) return had.src;
-  await turn();
-  try {
-    const r = await fetch('/map/iso/' + cx + '/' + cz + '.png?top=' + top);
-    if (!r.ok) return had ? had.src : null;
-    const src = URL.createObjectURL(await r.blob());
-    if (had) setTimeout(() => URL.revokeObjectURL(had.src), 2000);
-    pictures.set(key, { src, at: Date.now() });
-    return src;
-  } catch { return had ? had.src : null; } finally { done(); }
-}
-// Every minute: chunks in view whose picture is over 5 minutes old are fetched again and swapped in place.
+map.on('moveend', load);
+// Every minute: chunks in view over 5 minutes old are fetched again and redrawn in place.
 setInterval(() => {
   const b = map.getBounds();
-  for (const [key, img] of shown) {
-    if (!img || !b.intersects(img.getBounds())) continue;
-    const [cx, cz, top] = key.split(',').map(Number);
-    const had = pictures.get(key);
-    if (had && Date.now() - had.at >= FRESH) picture(cx, cz, top, true).then((src) => { if (src && src !== had.src) img.setUrl(src); });
+  for (const [key, chunk] of chunks) {
+    if (!chunk.overlay || Date.now() - chunk.at < FRESH || !b.intersects(chunk.overlay.getBounds())) continue;
+    chunk.at = Date.now();
+    const [cx, cz] = key.split(',').map(Number);
+    fetchChunk(cx, cz).then((data) => { if (data) { chunk.data = data; chunk.g = grid(data); show(cx, cz, chunk); } });
   }
 }, 60 * 1000);
-map.on('moveend', load);
-load();
-const cut = document.getElementById('cut'), cutOut = document.getElementById('cutOut');
-let wait = null;
-cut.addEventListener('input', () => {
-  cutAt = Number(cut.value);
-  cutOut.textContent = cutAt >= YMAX ? 'everything' : 'y ' + cutAt + ' and below';
-  clearTimeout(wait);
-  wait = setTimeout(() => { for (const img of shown.values()) if (img) map.removeLayer(img); shown.clear(); load(); }, 250);
-});
+// Redraw every loaded chunk (after the cut or trees change), a few at a time so the page stays responsive.
+let redrawing = null;
+function redrawAll() {
+  clearTimeout(redrawing);
+  const list = [...chunks.entries()].filter(([, c]) => c.g);
+  const step = () => { for (const [key, c] of list.splice(0, 4)) { const [cx, cz] = key.split(',').map(Number); show(cx, cz, c); }
+    if (list.length) redrawing = setTimeout(step, 0); };
+  redrawing = setTimeout(step, 30);
+}
+
+// Only the explored world: the chunks with anything saved, and no panning past their bounds.
+fetch('/map/explored.json').then((r) => r.json()).then((e) => {
+  if (e.bounds) {
+    known = new Set(e.chunks.map(([cx, cz]) => cx + ',' + cz));
+    const { cx1, cz1, cx2, cz2 } = e.bounds;
+    const corners = [[cx1, cz1], [cx2, cz1], [cx1, cz2], [cx2, cz2]].map(([cx, cz]) => origin(cx, cz));
+    const west = Math.min(...corners.map(([ox]) => ox)), east = Math.max(...corners.map(([ox]) => ox + W));
+    const north = Math.min(...corners.map(([, oy]) => oy)), south = Math.max(...corners.map(([, oy]) => oy + H));
+    const box = L.latLngBounds([[-north, west], [-south, east]]);
+    map.setMaxBounds(box.pad(0.05));
+    map.setMinZoom(Math.min(0, map.getBoundsZoom(box) - 0.5));
+  }
+  load();
+}).catch(() => load());
+
+// ---- The controls ----
+const $ = (id) => document.getElementById(id);
+const cutBox = $('cutOn'), cutRange = $('cut'), cutOut = $('cutOut');
+const setCutText = () => { cutOut.textContent = view.cut ? 'y ' + view.cutAt + ' and below' : 'everything'; cutRange.disabled = !view.cut; };
+cutBox.checked = view.cut; cutRange.value = view.cutAt; setCutText();
+cutBox.addEventListener('change', () => { view.cut = cutBox.checked; setCutText(); save(); redrawAll(); });
+cutRange.addEventListener('input', () => { view.cutAt = Number(cutRange.value); setCutText(); save(); redrawAll(); });
+for (const k of ['trees', 'characters', 'players', 'names']) {
+  const box = $('show_' + k);
+  box.checked = view[k];
+  box.addEventListener('change', () => { view[k] = box.checked; save(); if (k === 'trees') redrawAll(); else where(); });
+}
 ${markersScript()}`;
 }
 
-// Live markers for both views: `at(x, y, z)` turns a block into the view's map position.
+// Live markers for both views: `at(x, y, z)` turns a block into the view's map position. Name tags only (owner:
+// "just the name tag is fine"), and the iso view's toggles (characters, players, names) apply.
 function markersScript() {
   return `map.createPane('people').style.zIndex = 650; // over the map's chunks
 const layer = L.layerGroup().addTo(map);
+const shows = (k) => (typeof view === 'undefined' ? true : view[k]);
 const where = async () => {
   try {
     const w = await (await fetch('/map/where.json', { cache: 'no-store' })).json();
     layer.clearLayers();
-    for (const c of w.characters) L.circleMarker(at(c.x, c.y, c.z), { pane: 'people', radius: 8, color: '#141812', weight: 2, fillColor: c.color, fillOpacity: 1 })
-      .bindTooltip(c.name + (c.doing ? ' · ' + c.doing : ''), { permanent: true, direction: 'right', className: 'who', offset: [8, 0] }).addTo(layer);
-    for (const p of w.players) L.circleMarker(at(p.x, p.y, p.z), { pane: 'people', radius: 6, color: '#141812', weight: 2, fillColor: '#ffffff', fillOpacity: 1 })
-      .bindTooltip(p.name, { permanent: true, direction: 'right', className: 'who', offset: [8, 0] }).addTo(layer);
+    const mark = (p, fill, r) => { const m = L.circleMarker(at(p.x, p.y, p.z), { pane: 'people', radius: r, color: '#141812', weight: 2, fillColor: fill, fillOpacity: 1 });
+      if (shows('names')) m.bindTooltip(p.name, { permanent: true, direction: 'right', className: 'who', offset: [8, 0] });
+      m.addTo(layer); };
+    if (shows('characters')) for (const c of w.characters) mark(c, c.color, 8);
+    if (shows('players')) for (const p of w.players) mark(p, '#ffffff', 6);
   } catch {}
 };
 where();

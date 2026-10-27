@@ -215,3 +215,33 @@ test('characters are renamed, added and removed on the admin page; the last one 
   assert.equal((await post({ id: '', name: '!' })).status, 400);
   await s.close();
 });
+
+test('an admin can link a Discord user to a game name typed in, before that player has joined', async () => {
+  const s = await start();
+  s.db.meet('discord:77', 'SudoStonk');
+  const r = await s.call('/api/admin/link', { method: 'POST', headers: s.as('111'), body: { keep: 'discord:77', gameName: 'sudo' } });
+  assert.equal(r.status, 200);
+  assert.equal(s.db.person('game:sudo').id, 'discord:77');
+  await s.close();
+});
+
+test('the game server\'s accounts not yet linked to Discord are offered for linking', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { mkdtempSync, mkdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dataDir = mkdtempSync(join(tmpdir(), 'blocky-auth-'));
+  mkdirSync(join(dataDir, 'world'));
+  const auth = new DatabaseSync(join(dataDir, 'world', 'auth.sqlite'));
+  auth.exec("CREATE TABLE auth (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, password TEXT NOT NULL, last_login INTEGER NOT NULL DEFAULT 0)");
+  for (const [n, t] of [['ruben', 200], ['sudo', 100], ['alice', 50]]) auth.prepare("INSERT INTO auth (name, password, last_login) VALUES (?, 'secret', ?)").run(n, t);
+  auth.close();
+  const s = await start({ DATA_DIR: dataDir });
+  s.db.meet('game:ruben', 'ruben');
+  s.db.meet('discord:42', 'PscifieX');
+  s.db.link('discord:42', 'game:ruben');
+  const r = await s.call('/api/admin', { headers: s.as('111') });
+  assert.deepEqual(r.json.gameAccounts.map((a) => a.name), ['sudo', 'alice']);
+  assert.ok(!JSON.stringify(r.json.gameAccounts).includes('secret'));
+  await s.close();
+});

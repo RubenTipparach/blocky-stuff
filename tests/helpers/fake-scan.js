@@ -44,3 +44,27 @@ export function sampleWorld(x, y, z) {
   if (y > ground - 6 && (x * 7 + y * 3 + z) % 23 === 0) return 'default:stone_with_iron';
   return 'default:stone';
 }
+
+// The mod's `runs` scan of the same world: each column top down as runs of one block (top y, length, name index).
+export function fakeRuns(world, { x1, z1, w, d, y1, y2 }) {
+  const names = [];
+  const index = new Map();
+  const id = (n) => { if (!index.has(n)) { index.set(n, names.length); names.push(n); } return index.get(n); };
+  const cols = [];
+  for (let z = z1; z < z1 + d; z++) {
+    for (let x = x1; x < x1 + w; x++) {
+      const col = [];
+      let top = null, len = 0, cur = null;
+      for (let y = y2; y >= y1; y--) {
+        const n = world(x, y, z);
+        const c = n ? id(n) : null;
+        if (c !== null && c === cur && top - len === y) { len++; continue; }
+        if (cur !== null) col.push(top, len, cur);
+        top = y; len = c === null ? 0 : 1; cur = c;
+      }
+      if (cur !== null) col.push(top, len, cur);
+      cols.push(col);
+    }
+  }
+  return { x1, z1, w, d, y1, names, cols, marks: [] };
+}

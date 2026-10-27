@@ -553,6 +553,22 @@ function actions.scan(a)
 			local h = top[(z - z1) * (w + 1) + (x - x1)]
 			if not h then
 				cols[#cols + 1] = false
+			elseif a.runs then
+				-- The whole column as runs of one block, top down: top y, length, name index, ... (air left out). The web
+				-- map draws (and cuts) these in the browser (owner, 2026-10-27: "ship renderer on front end").
+				local col, run_top, run_len, run_id = {}, nil, 0, nil
+				for y = h, y1, -1 do
+					local c = data[area:index(x, y, z)]
+					local cid = (c ~= AIR and c ~= IGNORE) and id(c) or nil
+					if cid ~= nil and cid == run_id and run_top - run_len == y then
+						run_len = run_len + 1
+					else
+						if run_id ~= nil then col[#col + 1] = run_top col[#col + 1] = run_len col[#col + 1] = run_id end
+						run_top, run_len, run_id = y, cid and 1 or 0, cid
+					end
+				end
+				if run_id ~= nil then col[#col + 1] = run_top col[#col + 1] = run_len col[#col + 1] = run_id end
+				cols[#cols + 1] = col
 			elseif a.tops then
 				-- A flat map wants each column's ground, and its canopy if a tree stands over it (server/maps.mjs).
 				local g = ground[(z - z1) * (w + 1) + (x - x1)]

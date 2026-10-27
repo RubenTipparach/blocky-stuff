@@ -176,11 +176,17 @@ function renderPlayers(force) {
     const k = kindOf(p);
     const missing = k.game && !k.discord ? 'discord' : k.discord && !k.game ? 'game' : null;
     const pool = missing ? people.filter((o) => o.id !== p.id && (() => { const ok = kindOf(o); return missing === 'discord' ? ok.discord && !ok.game : ok.game && !ok.discord; })()) : [];
-    const picker = missing ? (pool.length ? '<div class="row" style="margin-top:4px"><select class="linkWith" style="width:auto;min-height:32px">'
-      + '<option value="">Link a ' + (missing === 'game' ? 'game player' : 'Discord user') + '...</option>'
-      + pool.map((o) => '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>').join('') + '</select>'
-      + '<button class="quiet" data-link style="min-height:32px">Link</button></div>'
-      : '<span class="muted note">no unlinked ' + (missing === 'game' ? 'game players' : 'Discord users') + ' yet</span>') : '';
+    // A Discord user without a game account: every account on the game server not yet linked to Discord (they need
+    // not have met the characters), or a typed name. A game player without Discord: the Discord users on their own.
+    const gameOptions = (state.gameAccounts || []).filter((a) => !accounts(p).some((x) => x.id === 'game:' + a.name.toLowerCase()));
+    const options = missing === 'game' ? gameOptions.map((a) => '<option value="name:' + esc(a.name) + '">' + esc(a.name)
+      + (a.lastLogin ? ' (last on ' + agoOf(a.lastLogin) + ')' : '') + '</option>').join('')
+      : pool.map((o) => '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>').join('');
+    const picker = missing ? '<div class="row" style="margin-top:6px">' + (options ? '<select class="linkWith" style="width:auto;min-height:32px">'
+      + '<option value="">Link a ' + (missing === 'game' ? 'game account' : 'Discord user') + '...</option>' + options + '</select>' : '')
+      + (missing === 'game' ? '<input class="gameName" maxlength="32" placeholder="or type a game name" style="width:150px;min-height:32px">' : '')
+      + ((options || missing === 'game') ? '<button class="quiet" data-link style="min-height:32px">Link</button>'
+        : '<span class="muted note" style="margin:0">no Discord users on their own yet</span>') + '</div>' : '';
     const cell = (prefix) => (list(p, prefix) || '<span class="muted">none</span>') + (missing === (prefix === 'game:' ? 'game' : 'discord') ? picker : '');
     return '<tr data-id="' + esc(p.id) + '" data-name="' + esc(p.name) + '"><td><span class="dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:'
       + esc(p.color || '#9aa8ff') + '"></span><b>' + esc(p.name) + '</b></td><td>' + cell('game:') + '</td><td>' + cell('discord:') + '</td><td>' + p.talks
@@ -446,9 +452,17 @@ function build() {
     try {
       if (ev.target.closest('[data-link]')) {
         const sel = row.querySelector('select.linkWith');
-        if (!sel || !sel.value) { note.textContent = 'Pick the account to link first.'; return; }
-        await api('/api/admin/link', { keep: row.dataset.id, other: sel.value });
-        note.textContent = 'Linked: ' + row.dataset.name + ' and ' + sel.options[sel.selectedIndex].text + ' are one person now.';
+        const typed = row.querySelector('input.gameName');
+        if (typed && typed.value.trim()) {
+          await api('/api/admin/link', { keep: row.dataset.id, gameName: typed.value.trim() });
+          note.textContent = 'Linked: ' + row.dataset.name + ' is ' + typed.value.trim() + ' in game.';
+        } else if (sel && sel.value.startsWith('name:')) {
+          await api('/api/admin/link', { keep: row.dataset.id, gameName: sel.value.slice(5) });
+          note.textContent = 'Linked: ' + row.dataset.name + ' is ' + sel.value.slice(5) + ' in game.';
+        } else if (sel && sel.value) {
+          await api('/api/admin/link', { keep: row.dataset.id, other: sel.value });
+          note.textContent = 'Linked: ' + row.dataset.name + ' and ' + sel.options[sel.selectedIndex].text + ' are one person now.';
+        } else { note.textContent = 'Pick the account to link, or type their game name.'; return; }
       } else if (ev.target.closest('[data-unlink]')) {
         await api('/api/admin/unlink', { id: ev.target.closest('[data-unlink]').dataset.unlink });
         note.textContent = 'Unlinked.';

@@ -19,6 +19,9 @@ import { createDiscord } from './discord.mjs';
 import { mcpAuthorized, mcpCall, storeMcpToken } from './mcp.mjs';
 import { ADMIN_PAGE } from './admin-page.mjs';
 import { createMaps } from './maps.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { TOOLS } from './tools.mjs';
 import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId, affinityWord,
   trustWord } from './character.mjs';
@@ -221,6 +224,26 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   }
   if (daily) setInterval(() => { dailySummary().catch((err) => log.error('daily summary failed:', err)); }, 10 * 60_000).unref();
 
+  /**
+   * Every player account on the game server (owner, 2026-10-27: "a drop down of players unlinked on the server side"):
+   * names and last login from the world's auth.sqlite, read-only. Passwords are never read.
+   */
+  function gameAccounts() {
+    const file = join(config.dataDir, 'world', 'auth.sqlite');
+    if (!existsSync(file)) return [];
+    let auth;
+    try {
+      auth = new DatabaseSync(file, { readOnly: true });
+      return auth.prepare('SELECT name, last_login FROM auth ORDER BY last_login DESC LIMIT 500').all()
+        .map((r) => ({ name: String(r.name), lastLogin: Number(r.last_login) * 1000 }));
+    } catch (err) {
+      log.error('reading game accounts failed:', err.message);
+      return [];
+    } finally {
+      try { auth?.close(); } catch { /* closed */ }
+    }
+  }
+
   // ---- Plumbing ----
 
   const hits = new Map();
@@ -351,6 +374,13 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         characters: castOf(db, config, now()), people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
         memories: db.allMemories(80),
         activity: brain.activity?.() ?? [],
+        // Game accounts not yet part of anyone who is also on Discord: what Players can link a Discord user to.
+        gameAccounts: gameAccounts().filter((a) => {
+          const p = db.person(personId('game', a.name));
+          if (!p) return true;
+          const all = [p.id, ...(db.people().find((x) => x.id === p.id)?.aliases ?? []).map((x) => x.id)];
+          return !all.some((id) => id.startsWith('discord:'));
+        }),
         maps: { url: `${config.publicUrl}/map`, settings: maps.settings(), kept: db.json('maps', {}) },
         policyTools: TOOLS.filter((t) => t.permission && t.permission !== 'admin').map((t) => ({ name: t.name, permission: t.permission })),
         missing: config.missing, chat: db.chat(80), usage: db.usage(14),
@@ -441,7 +471,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     // Join two people into one, as !link does: { keep, other } (ids); `other` becomes an alias of `keep`.
     if (route === 'POST /api/admin/link') {
       const a = typeof body.keep === 'string' ? db.person(body.keep) : null;
-      const b = typeof body.other === 'string' ? db.person(body.other) : null;
+      // A game name typed on /admin: that player, made now if they have not joined yet.
+      const typed = typeof body.gameName === 'string' && /^[\w-]{1,32}$/.test(body.gameName.trim()) ? body.gameName.trim() : null;
+      if (typed) db.meet(personId('game', typed), typed, { at: now(), talked: false });
+      const b = typed ? db.person(personId('game', typed)) : typeof body.other === 'string' ? db.person(body.other) : null;
       if (!a || !b) return send(res, 404, { error: 'No such person.' });
       if (!db.link(a.id, b.id)) return send(res, 400, { error: 'They are already one person.' });
       for (const c of characters()) db.remember(c.id, a.id, `Learned that ${b.name} is also ${a.name}.`, 2, now());
