@@ -1,0 +1,517 @@
+// The sidecar's HTTP server, after RubenTipparach/rubens-solitare-collection's server/app.mjs: plain node:http.
+// It ties the pieces together: the game's bridge, the bot, Discord, the admin page and MCP.
+//
+//   GET  /health                        200 "ok" (Fly's check)
+//   POST /bridge/sync                   the Lua mod, once a second (server/game.mjs); x-bridge-key, this machine only
+//   POST /mcp                           MCP over Streamable HTTP (server/mcp.mjs); Bearer <MCP token>
+//   GET  /admin                         the admin page (server/admin-page.mjs)
+//   GET  /auth/discord/login?return=URL to Discord, for the admin page's sign-in
+//   GET  /auth/discord/callback         from Discord; back to URL#blocky_token=<session>
+//   GET  /api/info                      what is switched on, for setup
+//   /api/admin...                       the admin page's calls, each checked against ADMIN_DISCORD_ID (below)
+
+import { createServer } from 'node:http';
+import { timingSafeEqual, randomBytes } from 'node:crypto';
+import { sign, verify, nonce } from './tokens.mjs';
+import { createGame } from './game.mjs';
+import { createBot, botSettings } from './bot.mjs';
+import { createDiscord } from './discord.mjs';
+import { mcpAuthorized, mcpCall, storeMcpToken } from './mcp.mjs';
+import { ADMIN_PAGE } from './admin-page.mjs';
+import { TOOLS } from './tools.mjs';
+import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId, affinityWord,
+  trustWord } from './character.mjs';
+
+// The characters keep working on their own for this long after anyone last said or did anything.
+const WORK_AFTER_MS = 60 * 60_000;
+// A !link code lasts this long.
+const LINK_MS = 10 * 60_000;
+// Where new players get the game, in the "server is up" post.
+const LUANTI_URL = 'https://www.luanti.org/en/';
+
+const DISCORD = 'https://discord.com';
+const BODY_MAX = 64 * 1024;
+// The mod's sync carries every item name once, at start.
+const SYNC_MAX = 2 * 1024 * 1024;
+// An admin stays signed in this long.
+const SESSION_DAYS = 30;
+// Models the admin page offers; any other id may be typed in.
+const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'];
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/**
+ * deps (each optional, for the tests): game, bot, discord, luanti (server/luanti.mjs), fetchImpl, now.
+ * bridgeKey: the secret the mod sends, written into its config by server/luanti.mjs.
+ */
+export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetch, now = () => Date.now(),
+  game = createGame({ now }), discord = null, bot = null, log = console, daily = false }) {
+  const sessionSecret = config.sessionSecret || db.secret('session');
+  const redirectUri = `${config.publicUrl}/auth/discord/callback`;
+  const relay = () => ({ chat: true, news: true, ...db.json('relay', {}) });
+  // The characters in the world now, and the one who speaks for the server (the first).
+  const characters = () => activeCast(db, config, now());
+  const host = () => characters()[0] ?? { id: 'blocky', name: 'Blocky', chatColor: '#f2b84b' };
+  // What the game needs of each character for its body and its name in chat.
+  const bodies = () => characters().map((c) => ({ id: c.id, name: c.name, chat: c.chatColor, dress: c.dressColor, hair: c.hairColor }));
+  // How each character feels about each player online, for the meter a player sees when looking at one.
+  const meters = () => Object.fromEntries(game.players.map((p) => [p.name, Object.fromEntries(characters().map((c) => {
+    const b = db.bond(c.id, personId('game', p.name));
+    return [c.id, { a: b.affinity, t: b.trust, w: affinityWord(b.affinity), tw: trustWord(b.trust) }];
+  }))]));
+  const joinAt = () => `${config.gameAddress || new URL(config.publicUrl).hostname}:${config.gamePort}`;
+
+  const chat = discord ?? createDiscord({
+    token: config.discordBotToken, webhookUrls: config.discordWebhookUrls, fetchImpl, log, botName: () => host().name,
+    // DISCORD_CHANNEL_ID wins; otherwise the channels last picked on /admin.
+    channelIds: config.discordChannelIds.length ? config.discordChannelIds : (db.setting('discord.channels') ?? '').split(',')
+      .filter(Boolean),
+    onMessage: (m) => fromDiscord(m),
+  });
+  const brain = bot ?? createBot({ db, game, config, now, log });
+
+  // ---- Chat, between the game, Discord and the bot ----
+
+  /**
+   * A character's line: into the game (in its colour, its body walking to `near`), the log, and Discord (always,
+   * when the question came from there). Characters it names may answer it, a few in a row at most.
+   */
+  async function botSays(text, ch = host(), { toDiscord = false, near, depth = 0 } = {}) {
+    db.addChat('bot', ch.name, text, now());
+    db.meet(characterPersonId(ch.id), ch.name, { at: now() });
+    const [r] = await Promise.all([game.act({ type: 'say', text, from: ch.name, by: ch.id, color: ch.chatColor,
+      ...(near ? { near } : {}) }), relay().chat || toDiscord ? chat.post({ text, as: ch.name }) : null]);
+    for (const other of brain.answerers?.(text, ch, depth) ?? []) {
+      brain.hear({ source: 'character', name: ch.name, text, personId: characterPersonId(ch.id), only: other.id, depth: depth + 1 },
+        (t, who) => botSays(t, who, { toDiscord, depth: depth + 1 })).catch((err) => log.error(err));
+    }
+    return r;
+  }
+  /** An admin's or the server's announcement: the same, under the server's name. */
+  async function announce(text) {
+    const t = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 400);
+    if (!t) return { ok: false, message: 'Nothing to say.' };
+    db.addChat('admin', 'Server', t, now());
+    const [r] = await Promise.all([game.act({ type: 'say', text: t, from: 'Server' }),
+      relay().chat ? chat.post({ text: t, as: 'Server' }) : null]);
+    return r;
+  }
+
+  // When a person last did anything (chat in game or on Discord, joined, gave an order): the characters keep working
+  // on their own while a player is online, and for WORK_AFTER_MS after the last of this.
+  let lastActivity = now();
+  game.onEvent((e) => {
+    if (e.type === 'chat' || e.type === 'join' || e.type === 'order') lastActivity = now();
+    if (e.type === 'chat' && typeof e.name === 'string' && typeof e.text === 'string') {
+      // Everyone who chats is someone the bot knows, whether or not it answers.
+      db.meet(personId('game', e.name), e.name, { at: now() });
+      if (/^!link\s*$/i.test(e.text.trim())) return linkCode(e.name);
+      db.addChat('game', e.name, e.text, now());
+      if (relay().chat) chat.post({ text: e.text, as: e.name });
+      const admin = game.player(e.name)?.privs.includes('server') ?? false;
+      // target: the character they were looking at, or stood next to, when they said it (the mod works it out).
+      brain.hear({ source: 'game', name: e.name, text: e.text, admin, personId: personId('game', e.name),
+        target: typeof e.target === 'string' ? e.target : undefined },
+        (t, ch) => botSays(t, ch, { near: e.name }))
+        .catch((err) => log.error(err));
+    } else if (e.type === 'order' && typeof e.name === 'string' && typeof e.target === 'string') {
+      // /follow, /come, /stay: done in game at once; the character remembers being asked.
+      db.meet(personId('game', e.name), e.name, { at: now() });
+      const ch = characters().find((c) => c.id === e.target);
+      if (ch) db.addChat('game', '*', `${e.name} asked ${ch.name} to ${e.order === 'stay' ? 'stay put' : e.order === 'come' ? 'come over' : 'follow them'}`, now());
+    } else if (e.type === 'join' || e.type === 'leave') {
+      db.meet(personId('game', e.name), e.name, { at: now(), talked: false });
+      const line = `${e.name} ${e.type === 'join' ? 'joined' : 'left'} the game`;
+      db.addChat('game', '*', line, now());
+      if (relay().news) chat.news(e.type, `**${e.name}** ${e.type === 'join' ? 'joined' : 'left'} the game.`);
+      // Listening to everything, the bot may greet whoever arrives.
+      if (e.type === 'join' && botSettings(db, config).listen === 'all') {
+        setTimeout(() => brain.hear({ source: 'game', name: e.name, text: '(just joined the game)', admin: false,
+          personId: personId('game', e.name) },
+          (t, ch) => botSays(t, ch, { near: e.name })).catch((err) => log.error(err)), 3000);
+      }
+    } else if (e.type === 'start') {
+      db.addChat('game', '*', 'The server started', now());
+      if (relay().news) {
+        chat.news('up', `**${config.serverName}** is up. Join at \`${joinAt()}\`. `
+          + `New here? Get Luanti free at ${LUANTI_URL}, then Join Game with that address.`);
+      }
+    }
+  });
+
+  // The work clock: while a player is online, or within WORK_AFTER_MS of anyone's last word, the characters take
+  // turns of their own (server/bot.mjs idle: their projects), one at a time, each when she has not been asked
+  // anything for the idle spell (owner, 2026-10-27: "if they are on their own they should build whatever they want,
+  // at least for an hour or so").
+  let idling = false;
+  async function idleTick() {
+    const s = botSettings(db, config);
+    if (idling || !s.idle.enabled || !game.connected) return;
+    if (!game.players.length && now() - lastActivity > WORK_AFTER_MS) return;
+    idling = true;
+    try {
+      await brain.idle?.((t, ch) => botSays(t, ch));
+    } finally {
+      idling = false;
+    }
+  }
+  if (daily) setInterval(() => { idleTick().catch((err) => log.error('idle turn failed:', err)); }, 5000).unref();
+
+  // ---- One person in two places: !link in game gives a private code; !link <code> in Discord joins them ----
+  const linkCodes = new Map(); // code -> { gameId, name, at }
+
+  function linkCode(name) {
+    for (const [code, v] of linkCodes) if (now() - v.at > LINK_MS) linkCodes.delete(code);
+    const code = randomBytes(4).toString('hex').slice(0, 6).toUpperCase();
+    linkCodes.set(code, { gameId: personId('game', name), name, at: now() });
+    // Whispered: only the player sees it, so nobody else can claim their name on Discord.
+    game.act({ type: 'say', to: name, from: host().name, color: host().chatColor, text: `Type  !link ${code}  in the Discord channel within 10 minutes `
+      + 'and I will know you are the same person there.' });
+  }
+
+  function linkDiscord(m, code) {
+    const entry = linkCodes.get(code.toUpperCase());
+    if (!entry || now() - entry.at > LINK_MS) {
+      chat.post({ text: 'That code is not one I gave out (or it ran out). Type !link in game for a new one.', as: host().name });
+      return;
+    }
+    linkCodes.delete(code.toUpperCase());
+    const discordId = personId('discord', m.userId);
+    db.meet(discordId, m.name, { at: now(), talked: false });
+    db.link(entry.gameId, discordId);
+    for (const c of characters()) db.remember(c.id, entry.gameId, `Learned that ${m.name} on Discord is ${entry.name} in game.`, 2, now());
+    chat.post({ text: `Got it, ${m.name}: you and ${entry.name} in game are one and the same to us now.`, as: host().name });
+  }
+
+  function fromDiscord(m) {
+    lastActivity = now();
+    if (m.userId) db.meet(personId('discord', m.userId), m.name, { at: now() });
+    const linking = /^!link\s+([0-9a-f]{6})\s*$/i.exec(m.text.trim());
+    if (linking && m.userId) return linkDiscord(m, linking[1]);
+    db.addChat('discord', m.name, m.text, now());
+    if (relay().chat) game.act({ type: 'say', text: m.text, from: `[Discord] ${m.name}` });
+    // An admin on Discord is known by their Discord id, which Discord vouches for; a name anyone can type.
+    const admin = Boolean(m.userId) && config.adminIds.includes(m.userId);
+    brain.hear({ source: 'discord', name: m.name, text: m.text, admin,
+      personId: m.userId ? personId('discord', m.userId) : undefined }, (t, ch) => botSays(t, ch, { toDiscord: true }))
+      .catch((err) => log.error(err));
+  }
+
+  // ---- The daily summary: once a day at the bot's summary hour (UTC), to Discord and the game ----
+
+  async function dailySummary({ force = false } = {}) {
+    const s = botSettings(db, config);
+    const t = new Date(now());
+    const day = t.toISOString().slice(0, 10);
+    if (!force && (s.summaryHour < 0 || t.getUTCHours() < s.summaryHour || db.setting('summary.last') === day)) return null;
+    db.putSetting('summary.last', day);
+    const text = await brain.summary(now() - 24 * 3600_000);
+    if (!text) return null;
+    const teller = host();
+    db.addChat('bot', teller.name, text, now());
+    await Promise.all([chat.post({ text: `📋 Daily summary: ${text}`, as: teller.name }),
+      game.act({ type: 'say', text: `Daily summary: ${text}`, from: teller.name, by: teller.id, color: teller.chatColor })]);
+    return text;
+  }
+  if (daily) setInterval(() => { dailySummary().catch((err) => log.error('daily summary failed:', err)); }, 10 * 60_000).unref();
+
+  // ---- Plumbing ----
+
+  const hits = new Map();
+  const limited = (ip) => {
+    const t = now();
+    const h = hits.get(ip) ?? { n: 0, since: t };
+    if (t - h.since > 10_000) { h.n = 0; h.since = t; }
+    h.n++;
+    hits.set(ip, h);
+    if (hits.size > 10_000) hits.clear();
+    return h.n > 60;
+  };
+  const send = (res, status, body, headers = {}) => {
+    const json = typeof body !== 'string';
+    res.writeHead(status, { 'content-type': json ? 'application/json' : 'text/plain; charset=utf-8', ...headers });
+    res.end(json ? JSON.stringify(body) : body);
+  };
+  const redirect = (res, location) => { res.writeHead(302, { location, 'cache-control': 'no-store' }); res.end(); };
+  const readBody = (req, max = BODY_MAX) => new Promise((resolve) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => { size += c.length; if (size <= max) chunks.push(c); });
+    req.on('end', () => {
+      if (size > max) return resolve(null);
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { resolve(null); }
+    });
+  });
+  const session = (req) => {
+    const m = /^Bearer (.+)$/.exec(req.headers.authorization ?? '');
+    const p = m ? verify(m[1], sessionSecret, now()) : null;
+    return p?.kind === 'session' ? p : null;
+  };
+  const sameKey = (a, b) => {
+    const x = Buffer.from(String(a ?? ''));
+    const y = Buffer.from(String(b ?? ''));
+    return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
+  };
+  // The mod calls from this machine: loopback, or the address Luanti is bound to (server/luanti.mjs).
+  const fromHere = (req) => {
+    const ip = String(req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
+    return ip === '127.0.0.1' || ip === '::1' || (luanti !== null && ip === luanti.status().bindAddress);
+  };
+
+  function status() {
+    const s = botSettings(db, config);
+    return {
+      server: { name: config.serverName, address: joinAt(),
+        connected: game.connected, seenAt: game.seenAt || null, items: game.items.length,
+        timeOfDay: game.time === null ? null : Math.round(game.time * 240) / 10, process: luanti?.status() ?? null },
+      players: game.players,
+      bot: { ready: brain.ready, name: characters().map((c) => c.name).join(', '), model: s.model, enabled: s.enabled },
+      discord: { mode: chat.mode, problem: chat.problem, listening: chat.listening, channelIds: chat.channelIds,
+        hasBot: chat.hasBot, invite: inviteUrl() },
+    };
+  }
+
+  // The link that adds the bot to a Discord server: View Channels, Send Messages, Embed Links and Read Message
+  // History, nothing more. The bot is the same Discord application as the sign-in.
+  const inviteUrl = () => (config.discordClientId
+    ? `${DISCORD}/oauth2/authorize?client_id=${encodeURIComponent(config.discordClientId)}&scope=bot&permissions=84992` : null);
+
+  // ---- Discord sign-in (the admin page) ----
+
+  const ownPage = (url) => { try { return new URL(url).origin === new URL(config.publicUrl).origin; } catch { return false; } };
+
+  function login(req, res, url) {
+    const back = url.searchParams.get('return') || `${config.publicUrl}/admin`;
+    if (!ownPage(back)) return send(res, 400, 'That return address is not this server.');
+    if (config.missing.signIn.length) {
+      return send(res, 503, `Sign-in is not set up yet (missing ${config.missing.signIn.join(', ')}).`);
+    }
+    const state = sign({ kind: 'state', back, n: nonce(), exp: Math.floor(now() / 1000) + 600 }, sessionSecret);
+    const q = new URLSearchParams({ client_id: config.discordClientId, redirect_uri: redirectUri, response_type: 'code',
+      scope: 'identify', state, prompt: 'none' });
+    redirect(res, `${DISCORD}/oauth2/authorize?${q}`);
+  }
+
+  async function callback(req, res, url) {
+    const state = verify(url.searchParams.get('state') ?? '', sessionSecret, now());
+    const back = new URL(state?.kind === 'state' && ownPage(state.back) ? state.back : `${config.publicUrl}/admin`);
+    const fail = (why) => { back.hash = `blocky_error=${encodeURIComponent(why)}`; redirect(res, back.toString()); };
+    if (state?.kind !== 'state') return fail('That sign-in did not go through: try again.');
+    if (url.searchParams.get('error')) return fail('Sign-in was canceled.');
+    const code = url.searchParams.get('code');
+    if (!code) return fail('Discord sent no code.');
+    try {
+      const tokenRes = await fetchImpl(`${DISCORD}/api/oauth2/token`, {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirectUri,
+          client_id: config.discordClientId, client_secret: config.discordClientSecret }),
+      });
+      if (!tokenRes.ok) return fail('Discord refused the sign-in.');
+      const { access_token: accessToken } = await tokenRes.json();
+      const meRes = await fetchImpl(`${DISCORD}/api/users/@me`, { headers: { authorization: `Bearer ${accessToken}` } });
+      if (!meRes.ok) return fail('Discord did not say who you are.');
+      const u = await meRes.json();
+      const token = sign({
+        kind: 'session', sub: String(u.id), name: String(u.global_name || u.username || 'Admin').slice(0, 40),
+        avatar: u.avatar ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.png?size=64` : null,
+        exp: Math.floor(now() / 1000) + SESSION_DAYS * 86400,
+      }, sessionSecret);
+      back.hash = `blocky_token=${token}`;
+      redirect(res, back.toString());
+    } catch {
+      fail('Could not reach Discord.');
+    }
+  }
+
+  // ---- The admin API ----
+
+  // The signed-in admin, or null with the answer already sent (401 signed out, 403 not an admin).
+  function adminOf(req, res) {
+    const s = session(req);
+    if (!s) { send(res, 401, { error: 'Not signed in.' }); return null; }
+    if (!config.adminIds.includes(s.sub)) {
+      send(res, 403, { error: 'Not an admin.', you: { id: s.sub, name: s.name } });
+      return null;
+    }
+    return { id: s.sub, name: s.name, avatar: s.avatar };
+  }
+
+  async function admin(req, res, route) {
+    const you = adminOf(req, res);
+    if (!you) return undefined;
+    if (route === 'GET /api/admin') {
+      return send(res, 200, {
+        you, ...status(), settings: botSettings(db, config), relay: relay(), models: MODELS, efforts: EFFORTS,
+        characters: castOf(db, config, now()), people: db.people(100), memories: db.allMemories(80),
+        activity: brain.activity?.() ?? [],
+        policyTools: TOOLS.filter((t) => t.permission && t.permission !== 'admin').map((t) => ({ name: t.name, permission: t.permission })),
+        missing: config.missing, chat: db.chat(80), usage: db.usage(14),
+        mcp: { url: `${config.publicUrl}/mcp`, hasToken: Boolean(config.mcpToken || db.setting('mcp.token')) },
+        log: luanti?.log(80) ?? [],
+      });
+    }
+    const body = req.method === 'POST' ? (await readBody(req)) ?? {} : {};
+    if (route === 'POST /api/admin/bot') {
+      const cur = db.json('bot', {});
+      const next = { ...cur };
+      if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
+      if (typeof body.name === 'string' && /^[\w-]{2,20}$/.test(body.name.trim())) next.name = body.name.trim();
+      if (typeof body.model === 'string' && /^[a-z0-9.-]{3,60}$/.test(body.model)) next.model = body.model;
+      if (EFFORTS.includes(body.effort)) next.effort = body.effort;
+      if (typeof body.persona === 'string') next.persona = body.persona.slice(0, 2000);
+      for (const k of ['cooldown', 'perHour', 'perDay']) {
+        if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
+      }
+      if (body.listen === 'all' || body.listen === 'mentions') next.listen = body.listen;
+      if (body.idle && typeof body.idle === 'object') {
+        const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.floor(Number(v)))) : d);
+        next.idle = { enabled: body.idle.enabled !== false, after: num(body.idle.after, 15, 3600, 60),
+          perHour: num(body.idle.perHour, 0, 120, 20) };
+      }
+      if (Number.isInteger(Number(body.summaryHour)) && Number(body.summaryHour) >= -1 && Number(body.summaryHour) <= 23) {
+        next.summaryHour = Number(body.summaryHour);
+      }
+      if (body.policy && typeof body.policy === 'object') {
+        next.policy = Object.fromEntries(Object.entries(body.policy).filter(([, v]) => typeof v === 'boolean'));
+      }
+      db.putJson('bot', next);
+      return send(res, 200, { settings: botSettings(db, config) });
+    }
+    if (route === 'POST /api/admin/relay') {
+      db.putJson('relay', { chat: body.chat !== false, news: body.news !== false });
+      return send(res, 200, { relay: relay() });
+    }
+    if (route === 'POST /api/admin/announce') return send(res, 200, await announce(body.text));
+    // The players table's buttons: one action, as server/game.mjs takes it.
+    if (route === 'POST /api/admin/action') {
+      if (!['kick', 'teleport', 'heal', 'give', 'time'].includes(body.type)) return send(res, 400, { error: 'Not an admin action.' });
+      return send(res, 200, await game.act(body));
+    }
+    if (route === 'POST /api/admin/restart') {
+      if (!luanti) return send(res, 400, { error: 'This server does not run Luanti itself (LUANTI_MANAGED=false).' });
+      luanti.restart().catch((err) => log.error('restart failed:', err));
+      return send(res, 200, { ok: true });
+    }
+    if (route === 'GET /api/admin/channels') {
+      try { return send(res, 200, { channels: await chat.channels() }); } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (route === 'POST /api/admin/channels') {
+      const ids = Array.isArray(body.ids) ? body.ids : [];
+      if (!chat.setChannels(ids)) return send(res, 400, { error: 'Those are not channel ids.' });
+      db.putSetting('discord.channels', chat.channelIds.join(','));
+      return send(res, 200, { channelIds: chat.channelIds });
+    }
+    if (route === 'POST /api/admin/discord-test') {
+      if (!chat.mode) return send(res, 400, { error: chat.problem });
+      return send(res, 200, await chat.news('bot', `Radio check from the admin page, by ${you.name}. This channel is wired up.`));
+    }
+    // A character's sheet: { id, ...fields } changes one (a new id adds it), { id, remove: true } removes it.
+    if (route === 'POST /api/admin/character') {
+      if (body.remove) {
+        return removeCharacter(db, String(body.id), config) ? send(res, 200, { removed: true })
+          : send(res, 400, { error: 'The last character cannot be removed.' });
+      }
+      const c = saveCharacter(db, String(body.id ?? ''), body, config);
+      return c ? send(res, 200, { character: c }) : send(res, 400, { error: 'A new character needs a name (2 to 20 letters).' });
+    }
+    // Set how a character feels about someone, or forget them: { id, character, affinity?, trust?, nickname?, forget? }.
+    if (route === 'POST /api/admin/person') {
+      const p = typeof body.id === 'string' ? db.person(body.id) : null;
+      if (!p) return send(res, 404, { error: 'No such person.' });
+      if (body.forget) return send(res, 200, { forgotten: db.forget(p.id) });
+      const ch = String(body.character ?? host().id);
+      const b = db.bond(ch, p.id);
+      db.feel(ch, p.id, Number.isFinite(Number(body.affinity)) ? Number(body.affinity) : b.affinity,
+        Number.isFinite(Number(body.trust)) ? Number(body.trust) : b.trust);
+      if (typeof body.nickname === 'string') db.nickname(ch, p.id, body.nickname.trim() || null);
+      return send(res, 200, { bond: db.bond(ch, p.id) });
+    }
+    // Join two people into one, as !link does: { keep, other } (ids); `other` becomes an alias of `keep`.
+    if (route === 'POST /api/admin/link') {
+      const a = typeof body.keep === 'string' ? db.person(body.keep) : null;
+      const b = typeof body.other === 'string' ? db.person(body.other) : null;
+      if (!a || !b) return send(res, 404, { error: 'No such person.' });
+      if (!db.link(a.id, b.id)) return send(res, 400, { error: 'They are already one person.' });
+      for (const c of characters()) db.remember(c.id, a.id, `Learned that ${b.name} is also ${a.name}.`, 2, now());
+      return send(res, 200, { person: db.person(a.id) });
+    }
+    if (route === 'POST /api/admin/forget-memory') {
+      return send(res, 200, { forgotten: db.dropMemory(Number(body.id)) });
+    }
+    if (route === 'POST /api/admin/summary') {
+      const text = await dailySummary({ force: true });
+      return send(res, text ? 200 : 400, text ? { ok: true, text } : { error: 'Nothing happened in the last day, or the bot is off.' });
+    }
+    if (route === 'POST /api/admin/mcp-token') {
+      const token = `blk_${randomBytes(24).toString('base64url')}`;
+      storeMcpToken(db, token);
+      return send(res, 200, { token, url: `${config.publicUrl}/mcp` });
+    }
+    return send(res, 404, { error: 'Not found.' });
+  }
+
+  // ---- Routes ----
+
+  async function handle(req, res) {
+    const url = new URL(req.url, config.publicUrl);
+    const route = `${req.method} ${url.pathname}`;
+    if (route === 'GET /health') return send(res, 200, 'ok');
+
+    if (route === 'POST /bridge/sync') {
+      if (!sameKey(req.headers['x-bridge-key'], bridgeKey) || (config.luantiManaged && !fromHere(req))) {
+        return send(res, 403, { error: 'Not the game.' });
+      }
+      const body = await readBody(req, SYNC_MAX);
+      if (!body) return send(res, 400, { error: 'Not JSON.' });
+      return send(res, 200, { ...game.sync(body), bot: host().name, characters: bodies(), meters: meters() });
+    }
+
+    const ip = req.headers['fly-client-ip'] ?? req.socket.remoteAddress ?? '';
+    if (/^\/(api|auth|mcp)/.test(url.pathname) && limited(ip)) return send(res, 429, 'Slow down.');
+
+    if (url.pathname === '/mcp') {
+      if (!mcpAuthorized(req, { config, db })) {
+        return send(res, 401, { error: 'Send Authorization: Bearer <token>; make one on /admin.' },
+          { 'www-authenticate': 'Bearer' });
+      }
+      if (req.method !== 'POST') return send(res, 405, { error: 'POST JSON-RPC here.' }, { allow: 'POST' });
+      const msg = await readBody(req);
+      if (!msg) return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Not JSON.' } });
+      const ctx = { game, db, status, announce };
+      if (Array.isArray(msg)) {
+        const out = (await Promise.all(msg.map((m) => mcpCall(m, ctx)))).filter(Boolean);
+        return out.length ? send(res, 200, out) : (res.writeHead(202), res.end());
+      }
+      const out = await mcpCall(msg, ctx);
+      if (!out) { res.writeHead(202); return res.end(); }
+      return send(res, 200, out);
+    }
+
+    if (route === 'GET /' || route === 'GET /admin') {
+      if (route === 'GET /') return redirect(res, '/admin');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(ADMIN_PAGE);
+    }
+    if (url.pathname.startsWith('/api/admin')) return admin(req, res, route);
+    if (route === 'GET /auth/discord/login') return login(req, res, url);
+    if (route === 'GET /auth/discord/callback') return callback(req, res, url);
+    if (route === 'GET /api/info') {
+      return send(res, 200, { game: game.connected, players: game.players.length, bot: brain.ready, discord: chat.mode,
+        signIn: !config.missing.signIn.length, missing: config.missing });
+    }
+    return send(res, 404, { error: 'Not found.' });
+  }
+
+  const server = createServer((req, res) => {
+    handle(req, res).catch((err) => {
+      log.error('request failed:', err);
+      if (!res.headersSent) send(res, 500, { error: 'Server error.' });
+    });
+  });
+  server.game = game;
+  server.discord = chat;
+  server.announce = announce;
+  server.dailySummary = dailySummary;
+  server.idleTick = idleTick;
+  server.fromDiscord = fromDiscord;
+  return server;
+}
