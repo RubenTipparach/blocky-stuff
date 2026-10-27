@@ -128,7 +128,7 @@ export function drawLabel(put, x, y, text, rgb, s = 2) {
  * frame of fixed height (ymin to ymax), so pictures of neighbouring areas line up into one map; `transparent` leaves
  * the background clear for that. Returns { png, width, height }.
  */
-export function renderIso(scan, { markColors = {}, markNames = {}, scale, fixed = null, transparent = false } = {}) {
+export function renderIso(scan, { markColors = {}, markNames = {}, scale, fixed = null, transparent = false, focus = null } = {}) {
   const { x1, z1, w, d, y1 } = scan;
   const names = Array.isArray(scan.names) ? scan.names : [];
   const cols = Array.isArray(scan.cols) ? scan.cols : [];
@@ -207,7 +207,20 @@ export function renderIso(scan, { markColors = {}, markNames = {}, scale, fixed 
   }
   // Marks: a pin of the character's colour (players white) over where they stand, and the name beside it.
   const put = (tx, ty, rgb) => { if (tx >= 0 && ty >= 0 && tx < width && ty < height) px.set([...rgb, 255], (ty * width + tx) * 4); };
-  for (const m of Array.isArray(scan.marks) ? scan.marks : []) {
+  // The one the picture is of (focus) goes last, on top of the rest (owner, 2026-10-27: "howcome the blocky image
+  // doesnt show blockys nametag": Moss, a few blocks away, was drawn over her); names never cover one another.
+  const marks = (Array.isArray(scan.marks) ? scan.marks : []).slice()
+    .sort((p, q) => (p.id === focus ? 1 : 0) - (q.id === focus ? 1 : 0));
+  const taken = [];
+  const labelAt = (x, y, text) => {
+    const w = String(text).slice(0, 24).length * 12 + 6;
+    const h = 22;
+    let yy = y;
+    for (let tries = 0; tries < 8 && taken.some((b) => x < b.x + b.w && b.x < x + w && yy < b.y + b.h && b.y < yy + h); tries++) yy += h + 2;
+    taken.push({ x, y: yy, w, h });
+    return yy;
+  };
+  for (const m of marks) {
     const hex = markColors[m.id ?? m.player] ?? (m.player ? '#ffffff' : '#f2b84b');
     const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) || 255);
     const [sx, sy] = at(m.x, m.y + 2, m.z);
@@ -222,7 +235,7 @@ export function renderIso(scan, { markColors = {}, markNames = {}, scale, fixed 
       }
     }
     const name = m.player ?? markNames[m.id] ?? m.id;
-    if (name) drawLabel(put, cx + r + 4, cy - r - 2, name, m.player ? [255, 255, 255] : rgb.map((v) => Math.min(255, v + 60)));
+    if (name) drawLabel(put, cx + r + 4, labelAt(cx + r + 4, cy - r - 2, name), name, m.player ? [255, 255, 255] : rgb.map((v) => Math.min(255, v + 60)));
   }
   return { png: encodePng(px, width, height, 4), width, height };
 }
