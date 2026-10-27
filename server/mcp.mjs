@@ -142,6 +142,20 @@ const OPERATOR_TOOLS = [
     input_schema: { type: 'object', properties: { sha: { type: 'string' } }, required: ['sha'], additionalProperties: false },
     run: (ctx, args) => deployBotCode(args),
   },
+  {
+    name: 'restart_game',
+    description: 'Restart the Luanti game server (the bot stays up). Refused while anyone is playing, unless force.',
+    input_schema: { type: 'object', properties: { force: { type: 'boolean' } }, additionalProperties: false },
+    run: ({ restartGame }, args) => restartGame(args),
+  },
+  {
+    name: 'talk_to_character',
+    description: 'Say something to one character, as the server\'s builders (an admin), and get her answer; she answers '
+      + 'in the game and on Discord as usual. For news ("doors work now"), instructions or questions.',
+    input_schema: { type: 'object', properties: { name: { type: 'string' }, text: { type: 'string', maxLength: 600 } },
+      required: ['name', 'text'], additionalProperties: false },
+    run: async ({ talk }, { name, text }) => talk(name, text),
+  },
   // ---- The map (owner, 2026-10-27: "Check the mcp server, does it have map controls?") ----
   {
     name: 'map_status',

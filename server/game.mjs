@@ -58,6 +58,9 @@ export function createGame({ now = () => Date.now() } = {}) {
     get seenAt() { return seenAt; },
     get players() { return players; },
     get bodies() { return bodies; },
+    /** Every item the game has. The mod sends them when Luanti starts; a restarted bot gets them back from storage. */
+    get items() { return items; },
+    set items(list) { if (Array.isArray(list)) items = list.filter((s) => typeof s === 'string'); },
     /** fn(action) for every action sent to the game. */
     onAct(fn) { actListeners.push(fn); },
     get time() { return time; },

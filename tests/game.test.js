@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGame, checkAction } from '../server/game.mjs';
-import { toolsFor, runTool, boxNodes, roofNodes, DEFAULT_POLICY } from '../server/tools.mjs';
+import { toolsFor, runTool, boxNodes, roofNodes, withDoors, DEFAULT_POLICY } from '../server/tools.mjs';
 
 const alice = { name: 'alice', pos: { x: 1.4, y: 2.6, z: -3 }, hp: 20, privs: ['interact', 'shout'] };
 const boss = { name: 'Boss', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: ['server'] };
@@ -162,4 +162,12 @@ test('every roof shape: steep courses stand on full blocks, a cone and a dome ar
   assert.ok(dome.every((b) => b.item === 'default:sandstonebrick'));
   const castle = roofNodes({ ...base, style: 'castle' });
   assert.deepEqual([!!at(castle, 0, 7, 0), !!at(castle, 1, 7, 0), !!at(castle, 2, 7, 0)], [true, false, true]); // merlons
+});
+
+test('a door item hangs as the door and a hidden block above it, facing the way asked', () => {
+  assert.deepEqual(withDoors([{ x: 1, y: 2, z: 3, item: 'doors:door_wood', facing: 'south' }, { x: 0, y: 0, z: 0, item: 'default:wood' }]), [
+    { x: 1, y: 2, z: 3, item: 'doors:door_wood_a', facing: 'south' },
+    { x: 1, y: 3, z: 3, item: 'doors:hidden', facing: 'south' },
+    { x: 0, y: 0, z: 0, item: 'default:wood' }]);
+  assert.equal(withDoors([{ x: 0, y: 0, z: 0, item: 'doors:door_wood_a' }]).length, 1); // already a block
 });

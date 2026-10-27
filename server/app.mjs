@@ -117,7 +117,12 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   // Kept in the database, so a bot restart does not count as someone being around.
   let lastActivity = Number(db.setting('activity.last')) || now();
   const active = () => { lastActivity = now(); db.putSetting('activity.last', String(lastActivity)); };
+  // The game's items come once, when Luanti starts; a bot restarted on its own (a hot update) gets them back from here.
+  // Without this, find_items found nothing after every hot update, and the characters believed there were no doors,
+  // seeds or hoes (owner, 2026-10-27: "Bot says no door", "Need to give bots all items").
+  if (!game.items.length) game.items = db.json('game.items', []);
   game.onEvent((e) => {
+    if (e.type === 'start' && Array.isArray(e.items) && e.items.length) db.putJson('game.items', e.items);
     if (e.type === 'chat' || e.type === 'join' || e.type === 'order') active();
     if (e.type === 'chat' && typeof e.name === 'string' && typeof e.text === 'string') {
       // Everyone who chats is someone the bot knows, whether or not it answers.
@@ -648,7 +653,24 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (req.method !== 'POST') return send(res, 405, { error: 'POST JSON-RPC here.' }, { allow: 'POST' });
       const msg = await readBody(req);
       if (!msg) return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Not JSON.' } });
-      const ctx = { game, db, status, announce, maps };
+      // talk(name, text): a word to one character from the builders (an admin), her answer back (owner, 2026-10-27:
+      // "Tell bot via mcp that doors are available").
+      const talk = async (name, text) => {
+        const ch = characters().find((c) => c.name.toLowerCase() === String(name).toLowerCase());
+        if (!ch) return { ok: false, message: `No character called ${name}.` };
+        db.addChat('admin', 'Builders', `${ch.name}, ${text}`, now());
+        const answer = await brain.hear({ source: 'game', name: 'Builders', text: `${ch.name}, ${text}`, admin: true, only: ch.id,
+          personId: 'admin:builders' }, (t, who) => botSays(t, who, { toDiscord: true }));
+        return { ok: true, message: answer ? `${ch.name}: ${answer}` : `${ch.name} did not answer.` };
+      };
+      // Restart the Luanti server (not the bot), only while nobody is playing unless forced.
+      const restartGame = ({ force = false } = {}) => {
+        if (!luanti) return { ok: false, message: 'This server does not run Luanti itself.' };
+        if (game.players.length && !force) return { ok: false, message: `${game.players.length} playing now: not restarting (force to do it anyway).` };
+        luanti.restart().catch((err) => log.error('restart failed:', err));
+        return { ok: true, message: 'Restarting the game; back in about 20 seconds.' };
+      };
+      const ctx = { game, db, status, announce, maps, talk, restartGame };
       if (Array.isArray(msg)) {
         const out = (await Promise.all(msg.map((m) => mcpCall(m, ctx)))).filter(Boolean);
         return out.length ? send(res, 200, out) : (res.writeHead(202), res.end());

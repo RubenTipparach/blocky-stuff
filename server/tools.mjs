@@ -193,7 +193,7 @@ export const TOOLS = [
       },
       required: ['blocks'], additionalProperties: false,
     },
-    run: ({ game }, { blocks }) => game.act({ type: 'place', nodes: blocks.slice(0, BUILD_MAX) }),
+    run: ({ game }, { blocks }) => game.act({ type: 'place', nodes: withDoors(blocks.slice(0, BUILD_MAX)) }),
   },
   {
     name: 'build_roof',
@@ -469,6 +469,19 @@ export function roofNodes({ x1, z1, x2, z2, y, style = 'gable', stairs = 'stairs
     }
   }
   return nodes;
+}
+
+/**
+ * A door is an item (doors:door_wood) that hangs as two blocks: the door (doors:door_wood_a, facing the way given)
+ * and a hidden block above it. The game takes only blocks, so a door item becomes those two (owner, 2026-10-27: "Bot
+ * says no door").
+ */
+export function withDoors(blocks) {
+  return blocks.flatMap((b) => {
+    if (!/^doors:(door|gate)_[a-z0-9_]+$/.test(b.item ?? '') || /_[abcd]$|_(open|closed)$/.test(b.item)) return [b];
+    if (b.item.startsWith('doors:gate_')) return [{ ...b, item: `${b.item}_closed` }];
+    return [{ ...b, item: `${b.item}_a` }, { x: b.x, y: b.y + 1, z: b.z, item: 'doors:hidden', ...(b.facing ? { facing: b.facing } : {}) }];
+  });
 }
 
 /** How many blocks a fill_box sets. */
