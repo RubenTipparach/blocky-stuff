@@ -59,6 +59,8 @@ export function openDb(path) {
   if (!bondCols.includes('status')) db.exec("ALTER TABLE bonds ADD COLUMN status TEXT NOT NULL DEFAULT 'none'");
   if (!bondCols.includes('pranked_at')) db.exec('ALTER TABLE bonds ADD COLUMN pranked_at INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(people)').all().some((c) => c.name === 'color')) db.exec('ALTER TABLE people ADD COLUMN color TEXT');
+  // Memories once made by every build step ("Did place blocks for them: ..."): noise, cleared once.
+  db.exec("DELETE FROM memories WHERE text LIKE 'Did % for them: %'");
   const q = {
     setting: db.prepare('SELECT value FROM settings WHERE name = ?'),
     addSetting: db.prepare('INSERT OR IGNORE INTO settings (name, value) VALUES (?, ?)'),

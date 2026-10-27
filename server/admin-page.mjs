@@ -1,7 +1,9 @@
 // The admin page, served at /admin, after RubenTipparach/rubens-solitare-collection's: one self-contained
-// page. Sign in with Discord (back to this page with the link in the address's fragment), then the server's
-// state, who is online with a few buttons each, the chat with a box to announce, the bot's settings, Discord's
-// channels, the MCP token, what the LLM has cost, and the game's log. It talks to /api/admin with the link as a
+// page. Sign in with Discord (back to this page with the link in the address's fragment), then tabs (owner,
+// 2026-10-27: "a nicer ui, instead of just adding more panels, tab categories"): Overview (the server, who is
+// online, the chat), Characters (each one's sheet and memories), Relationships (how each character feels about
+// each person, as meters with sliders to change and save), Activity (what they heard and did, the game's log) and
+// Settings (the bot, Discord, MCP, what the LLM has cost). It talks to /api/admin with the link as a
 // bearer token; the server checks the Discord id against ADMIN_DISCORD_ID on every call. The live parts refresh
 // every few seconds; the forms are filled once, so a refresh never eats what you are typing.
 
@@ -48,7 +50,32 @@ export const ADMIN_PAGE = `<!doctype html>
   code.copy { display: block; background: #0c0f0a; padding: 8px 10px; border-radius: 8px; overflow-wrap: anywhere; font-size: 13px; margin: 6px 0; }
   .note { margin: 6px 0 0; font-size: 13px; }
   img.av { width: 24px; height: 24px; border-radius: 50%; vertical-align: middle; }
-  @media (max-width: 560px) { .two, .three { grid-template-columns: 1fr; } }
+  nav.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 14px; border-bottom: 1px solid var(--line); }
+  nav.tabs button { background: none; color: var(--muted); border-radius: 8px 8px 0 0; padding: 10px 16px; font-weight: 600; }
+  nav.tabs button.on { background: var(--panel); color: var(--accent); }
+  .tab { display: none; } .tab.on { display: block; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; }
+  .pills button { background: #2e3829; color: var(--text); border: 2px solid transparent; }
+  .pills button.on { border-color: var(--accent); background: #34432c; }
+  .pills .dot, .rel .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .rels { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
+  .rel { background: #1b2217; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; }
+  .rel.dirty { border-color: var(--warn); }
+  .rel-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .rel-head b { font-size: 16px; }
+  .badge { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; padding: 2px 8px; border-radius: 999px; background: #3a4636; color: var(--muted); }
+  .badge.dating { background: #5a2a44; color: #ffb3d9; } .badge.ex { background: #3a3a3a; }
+  .meter { display: grid; grid-template-columns: 54px 1fr 116px; gap: 8px; align-items: center; font-size: 13px; }
+  .meter .lab { color: var(--muted); } .meter output { text-align: right; font-weight: 600; }
+  input[type=range] { -webkit-appearance: none; appearance: none; height: 10px; border-radius: 999px; padding: 0; min-height: 0; border: 0; }
+  input[type=range].aff { background: linear-gradient(to right, #c0392b, #e67e22 30%, #7f8c7a 50%, #8fd16a 75%, #2ecc71); }
+  input[type=range].tru { background: linear-gradient(to right, #4a4f46, #4aa3df); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid #12150f; cursor: pointer; }
+  input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2px solid #12150f; cursor: pointer; }
+  .rel .facts { font-size: 12px; color: var(--muted); }
+  .rel details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .rel details[open] { display: grid; gap: 8px; }
+  @media (max-width: 560px) { .two, .three { grid-template-columns: 1fr; } .meter { grid-template-columns: 52px 1fr 96px; } }
 </style></head>
 <body><main>
 <h1>Blocky Stuff admin <span class="who" id="who"></span></h1>
@@ -87,7 +114,60 @@ function signIn(message) {
 }
 
 let state = null;
-let picked = ''; // the character shown on the Characters card and in People
+let picked = ''; // the character shown on Characters and Relationships
+let pickCharacter = () => {};
+const feelsWord = (a) => a <= -60 ? 'hostile' : a <= -25 ? 'dislike' : a < -5 ? 'wary' : a < 15 ? 'neutral' : a < 35 ? 'friendly' : a < 60 ? 'fond' : a < 85 ? 'close friend' : 'best friend';
+const trustWordOf = (t) => t < 15 ? 'none' : t < 35 ? 'low' : t < 60 ? 'some' : t < 80 ? 'high' : 'complete';
+const signed = (n) => (Number(n) > 0 ? '+' : '') + Number(n);
+const agoOf = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
+
+// The Relationships tab: the character's pills, then a card per person she knows, meters as sliders. Drawn when
+// asked (tab opened, character picked, after a save), and by the refresh only while no card has unsaved changes and
+// nothing in it has focus, so a slider being dragged or a picker being opened is never wiped.
+function renderRelationships(force) {
+  if (!state || !$('rel')) return;
+  const box = $('rel');
+  if (!force && (box.querySelector('.rel.dirty') || box.contains(document.activeElement))) return;
+  const list = state.characters;
+  const me = list.find((c) => c.id === picked) || list[0];
+  if (!me) { box.innerHTML = '<p class="muted">No characters.</p>'; return; }
+  $('relPick').innerHTML = list.map((c) => '<button data-pick="' + esc(c.id) + '" class="' + (c.id === me.id ? 'on' : '') + '"><span class="dot" style="background:'
+    + esc(c.chatColor) + '"></span>' + esc(c.name) + (c.enabled === false ? ' (away)' : '') + '</button>').join('');
+  const partner = state.people.find((p) => p.bonds && p.bonds[me.id] && p.bonds[me.id].status === 'dating');
+  $('relHead').innerHTML = 'How <b>' + esc(me.name) + '</b> feels about everyone she knows. Mood: ' + esc(me.mood.label)
+    + (partner ? ' · Dating <b>' + esc(partner.name) + '</b>' : '') + (me.project ? ' · Building ' + esc(me.project.title) : '');
+  const kind = (id) => (id.startsWith('discord:') ? 'Discord' : id.startsWith('char:') ? 'Character' : 'Game');
+  const people = state.people.filter((p) => p.id !== 'char:' + me.id);
+  const strangers = people.filter((p) => !p.id.startsWith('char:'));
+  box.innerHTML = people.length ? people.map((p) => {
+    const b = (p.bonds && p.bonds[me.id]) || { affinity: 0, trust: 20, nickname: null, facts: [], status: 'none' };
+    const char = p.id.startsWith('char:');
+    const where = [p, ...(p.aliases || [])].map((x) => kind(x.id) + ': ' + esc(x.name)).join(' · ');
+    const pool = strangers.filter((o) => o.id !== p.id);
+    return '<div class="rel" data-id="' + esc(p.id) + '" data-name="' + esc(p.name) + '">'
+      + '<div class="rel-head"><span class="dot" style="background:' + esc(p.color || '#9aa8ff') + '"></span><b>' + esc(p.name) + '</b>'
+      + (b.status === 'dating' ? '<span class="badge dating">dating</span>' : b.status === 'ex' ? '<span class="badge ex">ex</span>' : '')
+      + '<span class="muted note" style="margin:0">' + where + '</span></div>'
+      + '<div class="muted note" style="margin:0">' + p.talks + ' talks · last seen ' + agoOf(p.last_at) + '</div>'
+      + '<div class="meter"><span class="lab">Affinity</span><input type="range" class="aff" min="-100" max="100" value="' + b.affinity + '">'
+      + '<output class="affOut">' + feelsWord(b.affinity) + ' (' + signed(b.affinity) + ')</output></div>'
+      + '<div class="meter"><span class="lab">Trust</span><input type="range" class="tru" min="0" max="100" value="' + b.trust + '">'
+      + '<output class="truOut">' + trustWordOf(b.trust) + ' (' + b.trust + ')</output></div>'
+      + '<div class="two"><label class="field" style="margin:0">Nickname<input class="nick" maxlength="32" value="' + esc(b.nickname || '') + '"></label>'
+      + '<label class="field" style="margin:0">Status<select class="status">' + ['none', 'dating', 'ex'].map((s) => '<option'
+        + (b.status === s ? ' selected' : '') + '>' + s + '</option>').join('') + '</select></label></div>'
+      + (b.facts.length ? '<div class="facts">' + b.facts.map(esc).join(' · ') + '</div>' : '')
+      + '<div class="row"><button data-save disabled>Save</button><span class="relNote note muted" style="margin:0"></span></div>'
+      + (char ? '' : '<details><summary>Manage person</summary>'
+        + '<div class="row"><input type="color" class="color" style="width:52px;padding:2px" value="' + esc(p.color || '#9aa8ff') + '">'
+        + '<button class="quiet" data-color>Save colour</button><span class="muted note" style="margin:0">their name colour on Discord</span></div>'
+        + '<div class="row"><select class="linkWith" style="flex:1 1 160px"' + (pool.length ? '' : ' disabled') + '><option value="">'
+        + (pool.length ? 'Join with...' : 'Nobody else to join with yet') + '</option>' + pool.map((o) => '<option value="' + esc(o.id) + '">'
+        + kind(o.id) + ': ' + esc(o.name) + '</option>').join('') + '</select><button class="quiet" data-link' + (pool.length ? '' : ' disabled') + '>Link</button></div>'
+        + '<div class="row"><button class="danger" data-forget>Forget this person</button></div></details>')
+      + '</div>';
+  }).join('') : '<p class="muted">Nobody yet: the characters meet people as they chat.</p>';
+}
 let built = false;
 
 async function load() {
@@ -118,6 +198,12 @@ function build() {
     + esc(state.you.name) + ' <button class="quiet" id="out">Sign out</button>';
   $('out').onclick = () => { store.set(null); location.reload(); };
   app.innerHTML = \`
+<nav class="tabs" id="tabs">
+  <button data-tab="overview">Overview</button><button data-tab="characters">Characters</button>
+  <button data-tab="relationships">Relationships</button><button data-tab="activity">Activity</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+<div class="tab" data-panel="overview">
 <div class="grid">
   <section><h2>Server</h2><dl class="status" id="status"></dl>
     <div class="row" style="margin-top:12px"><button class="quiet" id="restart">Restart Luanti</button><span id="restartNote" class="muted note"></span></div></section>
@@ -127,6 +213,8 @@ function build() {
 <section style="margin-top:14px"><h2>Chat</h2><div class="chat" id="chat"></div>
   <form class="row" id="announce"><input id="announceText" maxlength="400" placeholder="Say something to everyone, as the server">
   <button>Send</button></form></section>
+</div>
+<div class="tab" data-panel="settings">
 <div class="grid">
   <section><h2>The bot</h2><form id="bot">
     <label class="check"><input type="checkbox" id="b_enabled"> The characters answer in chat</label>
@@ -167,7 +255,9 @@ function build() {
   <section><h2>LLM use</h2><div class="scroll"><table><thead><tr><th>Day (UTC)</th><th>Calls</th><th>Input</th><th>Output</th></tr></thead>
     <tbody id="usage"></tbody></table></div></section>
 </div>
-<section style="margin-top:14px"><h2>Characters</h2>
+</div>
+<div class="tab" data-panel="characters">
+<section><h2>Characters</h2>
   <div class="row" style="margin-bottom:10px"><select id="c_pick" style="width:auto"></select>
     <button type="button" class="quiet" id="c_new">Add a character</button></div>
   <p class="muted note" id="moodLine"></p>
@@ -186,18 +276,36 @@ function build() {
     <div class="row"><button>Save character</button><button type="button" class="quiet" id="resetMood">Calm her mood</button>
       <button type="button" class="danger" id="c_remove">Remove</button><span id="charNote" class="note muted"></span></div>
   </form></section>
-<section style="margin-top:14px"><h2>People they know</h2>
-  <p class="muted note">How <b id="peopleFor"></b> feels about each person (pick another character above to see hers). Affinity runs from -100 (hostile) to 100 (best friend), trust from 0 to 100. Characters move them a little at a time; you can set them here.
-  Players join their game and Discord selves by typing <code>!link</code> in game, or with Link with... here.</p>
-  <div class="scroll"><table><thead><tr><th>Person</th><th>Colour</th><th>Feels</th><th>Affinity</th><th>Trust</th><th>Nickname</th><th>Talks</th><th>Last seen</th><th></th></tr></thead>
-  <tbody id="people"></tbody></table></div></section>
-<section style="margin-top:14px"><h2>Activity</h2>
+<section style="margin-top:14px"><h2>Her memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
+  <tbody id="memories"></tbody></table></div></section>
+</div>
+<div class="tab" data-panel="relationships">
+<section><h2>Relationships</h2>
+  <div class="pills" id="relPick"></div>
+  <p class="muted note" id="relHead" style="margin:0 0 12px"></p>
+  <div class="rels" id="rel"></div>
+  <p class="muted note">Characters move these a little at a time as people treat them well or badly. Drag a slider and press Save to set one yourself.
+  Players join their game and Discord selves with <code>!link</code> in game, or under Manage on a card.</p>
+</section>
+</div>
+<div class="tab" data-panel="activity">
+<section><h2>Activity</h2>
   <p class="muted note">What the characters heard and did lately, newest first: who answered, who stayed quiet and why, their own turns, errors.</p>
   <div class="scroll"><table><thead><tr><th>When</th><th>What</th><th>Who</th><th>From</th><th></th></tr></thead>
   <tbody id="activity"></tbody></table></div></section>
-<section style="margin-top:14px"><h2>Her memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
-  <tbody id="memories"></tbody></table></div></section>
-<section style="margin-top:14px"><h2>Luanti log</h2><pre id="log"></pre></section>\`;
+<section style="margin-top:14px"><h2>Luanti log</h2><pre id="log"></pre></section>
+</div>\`;
+  // Tabs: the last one open is remembered on this device.
+  const show = (name) => {
+    for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.tab === name);
+    for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.panel === name);
+    try { localStorage.setItem('blocky.tab', name); } catch {}
+    if (name === 'relationships') renderRelationships(true);
+  };
+  $('tabs').onclick = (ev) => { const b = ev.target.closest('button[data-tab]'); if (b) show(b.dataset.tab); };
+  let first = hash.get('tab') || 'overview';
+  try { first = hash.get('tab') || localStorage.getItem('blocky.tab') || 'overview'; } catch {}
+  show(document.querySelector('[data-panel="' + first + '"]') ? first : 'overview');
   const FIELDS = ['name', 'pronouns', 'chatColor', 'dressColor', 'hairColor', 'backstory', 'personality', 'speech', 'goals'];
   const fillCharacter = () => {
     const list = state.characters;
@@ -209,10 +317,11 @@ function build() {
     for (const f of FIELDS) $('c_' + f).value = c[f] || '';
     $('c_enabled').checked = c.enabled !== false;
     $('c_goal').value = c.goal || '';
-    $('peopleFor').textContent = c.name;
   };
+  pickCharacter = (id) => { picked = id; fillCharacter(); refresh(); renderRelationships(true); };
   fillCharacter();
-  $('c_pick').onchange = () => { picked = $('c_pick').value; fillCharacter(); refresh(); };
+  $('c_pick').onchange = () => pickCharacter($('c_pick').value);
+  $('relPick').onclick = (ev) => { const b = ev.target.closest('button[data-pick]'); if (b) pickCharacter(b.dataset.pick); };
   $('c_new').onclick = async () => {
     const name = prompt('Her name (2 to 20 letters):');
     if (!name) return;
@@ -232,17 +341,43 @@ function build() {
     catch (e) { $('charNote').textContent = e.message; }
   };
   $('resetMood').onclick = async () => { await api('/api/admin/character', { id: picked, resetMood: true }).catch(() => {}); refreshSoon(); };
-  document.addEventListener('change', async (ev) => {
-    const link = ev.target.closest('[data-link]');
-    if (link && link.value) {
-      const other = link.options[link.selectedIndex].text;
-      if (!confirm('Make ' + other + ' the same person as this row? The feelings of this row stay; talks, facts and memories join.')) { link.value = ''; return; }
-      try { await api('/api/admin/link', { keep: link.dataset.link, other: link.value }); } catch (e) { alert(e.message); }
-      return refreshSoon();
+  // Relationship cards: a slider moved marks its card unsaved (and holds off the refresh) until Save.
+  $('rel').addEventListener('input', (ev) => {
+    const card = ev.target.closest('.rel');
+    if (!card) return;
+    card.classList.add('dirty');
+    card.querySelector('[data-save]').disabled = false;
+    if (ev.target.classList.contains('aff')) card.querySelector('.affOut').textContent = feelsWord(Number(ev.target.value)) + ' (' + signed(ev.target.value) + ')';
+    if (ev.target.classList.contains('tru')) card.querySelector('.truOut').textContent = trustWordOf(Number(ev.target.value)) + ' (' + ev.target.value + ')';
+  });
+  $('rel').addEventListener('change', (ev) => { const card = ev.target.closest('.rel'); if (card && ev.target.matches('select.status, input.nick')) { card.classList.add('dirty'); card.querySelector('[data-save]').disabled = false; } });
+  $('rel').addEventListener('click', async (ev) => {
+    const card = ev.target.closest('.rel');
+    if (!card) return;
+    const id = card.dataset.id;
+    const note = card.querySelector('.relNote');
+    if (ev.target.closest('[data-save]')) {
+      try {
+        await api('/api/admin/person', { id, character: picked, affinity: Number(card.querySelector('.aff').value),
+          trust: Number(card.querySelector('.tru').value), nickname: card.querySelector('.nick').value,
+          status: card.querySelector('.status').value });
+        card.classList.remove('dirty');
+        note.textContent = 'Saved.';
+        await load();
+        renderRelationships(true);
+      } catch (e) { note.textContent = e.message; }
+    } else if (ev.target.closest('[data-color]')) {
+      try { await api('/api/admin/person', { id, character: picked, color: card.querySelector('.color').value }); note.textContent = 'Colour saved.'; await load(); }
+      catch (e) { note.textContent = e.message; }
+    } else if (ev.target.closest('[data-link]')) {
+      const sel = card.querySelector('.linkWith');
+      if (!sel.value) { note.textContent = 'Pick who to join with first.'; return; }
+      if (!confirm('Make ' + sel.options[sel.selectedIndex].text + ' the same person as ' + card.dataset.name + '? The feelings on this card stay; talks, facts and memories join.')) return;
+      try { await api('/api/admin/link', { keep: id, other: sel.value }); await load(); renderRelationships(true); } catch (e) { note.textContent = e.message; }
+    } else if (ev.target.closest('[data-forget]')) {
+      if (!confirm('Forget ' + card.dataset.name + ' completely, for every character: feelings, facts and memories?')) return;
+      try { await api('/api/admin/person', { id, forget: true }); await load(); renderRelationships(true); } catch (e) { note.textContent = e.message; }
     }
-    const el = ev.target.closest('[data-person]');
-    if (!el) return;
-    try { await api('/api/admin/person', { id: el.dataset.person, character: picked, [el.dataset.field]: el.value }); refreshSoon(); } catch (e) { alert(e.message); }
   });
 
   $('b_enabled').checked = s.enabled; $('b_model').value = s.model; $('b_effort').value = s.effort;
@@ -302,12 +437,6 @@ function build() {
     } catch (e) { $('mcpOut').textContent = e.message; }
   };
   document.addEventListener('click', async (ev) => {
-    const f = ev.target.closest('[data-forget]');
-    if (f) {
-      if (!confirm('Forget ' + f.dataset.name + ' completely: feelings, facts and memories?')) return;
-      await api('/api/admin/person', { id: f.dataset.forget, forget: true }).catch((e) => alert(e.message));
-      return refreshSoon();
-    }
     const m = ev.target.closest('[data-memory]');
     if (m) { await api('/api/admin/forget-memory', { id: Number(m.dataset.memory) }).catch(() => {}); return refreshSoon(); }
     const b = ev.target.closest('[data-act]');
@@ -340,7 +469,6 @@ async function loadChannels() {
 
 function refresh() {
   const st = state;
-  const typing = document.activeElement && document.activeElement.closest && document.activeElement.closest('#people');
   const me = st.characters.find((c) => c.id === picked) || st.characters[0];
   if (me) $('moodLine').textContent = 'Mood: ' + me.mood.label + (me.mood.reason ? ' (' + me.mood.reason + ')' : '')
     + (me.project ? ' · Project: ' + me.project.title + ' at ' + me.project.site.x + ', ' + me.project.site.y + ', ' + me.project.site.z
@@ -349,26 +477,8 @@ function refresh() {
   $('activity').innerHTML = (st.activity || []).length ? st.activity.map((e) => '<tr><td class="muted">' + clock(e.at) + '</td><td class="'
     + (kinds[e.kind] || '') + '">' + esc(e.kind) + '</td><td>' + esc(e.character || '') + '</td><td>' + esc(e.who || '') + '</td><td>'
     + esc(e.text) + '</td></tr>').join('') : '<tr><td colspan="5" class="muted">Nothing yet.</td></tr>';
-  const bondOf = (p) => (me && p.bonds && p.bonds[me.id]) || { affinity: 0, trust: 20, nickname: null, facts: [] };
-  const feels = (a) => a <= -60 ? 'hostile' : a <= -25 ? 'dislike' : a < -5 ? 'wary' : a < 15 ? 'neutral' : a < 35 ? 'friendly' : a < 60 ? 'fond' : a < 85 ? 'close friend' : 'best friend';
-  const kind = (id) => (id.startsWith('discord:') ? 'Discord: ' : id.startsWith('char:') ? 'Character: ' : 'Game: ');
-  const where = (p) => [p, ...(p.aliases || [])].map((x) => kind(x.id) + esc(x.name)).join('<br>');
-  const others = st.people.filter((p) => !me || p.id !== 'char:' + me.id);
-  const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
-  if (!typing) $('people').innerHTML = others.length ? others.map((p) => { const b = bondOf(p); return '<tr><td>' + where(p)
-    + (b.facts.length ? '<div class="note muted">' + b.facts.map(esc).join(' · ') + '</div>' : '') + '</td><td><input type="color" style="width:44px;min-height:32px;padding:2px" data-person="' + esc(p.id) + '" data-field="color" value="' + esc(p.color || '#9aa8ff') + '" title="Name colour on Discord"></td><td>' + feels(b.affinity) + (b.status === 'dating' ? ' <span class="warn">dating</span>' : b.status === 'ex' ? ' <span class="muted">ex</span>' : '') + '</td>'
-    + '<td><input type="number" min="-100" max="100" style="width:80px" data-person="' + esc(p.id) + '" data-field="affinity" value="' + b.affinity + '"></td>'
-    + '<td><input type="number" min="0" max="100" style="width:72px" data-person="' + esc(p.id) + '" data-field="trust" value="' + b.trust + '"></td>'
-    + '<td><input style="width:110px" data-person="' + esc(p.id) + '" data-field="nickname" value="' + esc(b.nickname || '') + '"></td>'
-    + '<td>' + p.talks + '</td><td class="muted">' + ago(p.last_at) + '</td>'
-    + '<td class="row">' + (p.id.startsWith('char:') ? '' : (() => {
-      const pool = others.filter((o) => o.id !== p.id && !o.id.startsWith('char:'));
-      return '<select data-link="' + esc(p.id) + '" style="width:auto"' + (pool.length ? '' : ' disabled') + '><option value="">'
-        + (pool.length ? 'Link with...' : 'Nobody else to link yet') + '</option>'
-        + pool.map((o) => '<option value="' + esc(o.id) + '">' + kind(o.id) + esc(o.name) + '</option>').join('') + '</select>'
-        + '<button class="danger" data-forget="' + esc(p.id) + '" data-name="' + esc(p.name) + '">Forget</button>';
-    })()) + '</td></tr>'; }).join('')
-    : '<tr><td colspan="9" class="muted">Nobody yet: the characters meet people as they chat.</td></tr>';
+  const ago = agoOf;
+  renderRelationships(false);
   const nameOf = (id) => { const p = st.people.find((x) => x.id === id || (x.aliases || []).some((a) => a.id === id)); return p ? p.name : ''; };
   const mems = st.memories.filter((m) => !me || m.character === me.id);
   $('memories').innerHTML = mems.length ? mems.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'

@@ -427,6 +427,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         Number.isFinite(Number(body.trust)) ? Number(body.trust) : b.trust);
       if (typeof body.nickname === 'string') db.nickname(ch, p.id, body.nickname.trim() || null);
       if (typeof body.color === 'string') db.setColor(p.id, body.color || null);
+      if (['none', 'dating', 'ex'].includes(body.status)) db.setStatus(ch, p.id, body.status);
       return send(res, 200, { bond: db.bond(ch, p.id) });
     }
     // Join two people into one, as !link does: { keep, other } (ids); `other` becomes an alias of `keep`.

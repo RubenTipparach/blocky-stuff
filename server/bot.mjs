@@ -243,11 +243,10 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
           : use.name === 'prank' ? await prank(ch, use.input, msg.personId, s)
             : await runTool(use.name, use.input, { game: g, asker, policy: s.policy });
         log.log(`${ch.name} ${use.name} for ${asker.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
-        if (r.ok && ACTS.has(use.name)) {
-          db.addDeed(`${asker.name} (by ${ch.name})`, use.name, use.input, r.message, now());
-          // What a character did for someone is part of their story together.
-          db.remember(ch.id, msg.personId, `Did ${use.name.replace(/_/g, ' ')} for them: ${r.message}`, 2, now());
-        }
+        // Kept as a deed (the daily summary, the Activity log), not as a memory: a character remembers only what she
+        // judges worth it, with `remember` (owner, 2026-10-27: "they dont need to remember every block placed, only
+        // ones deemed important to conversation").
+        if (r.ok && ACTS.has(use.name)) db.addDeed(`${asker.name} (by ${ch.name})`, use.name, use.input, r.message, now());
         return { type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'),
           ...(r.ok ? {} : { is_error: true }) };
       }));
