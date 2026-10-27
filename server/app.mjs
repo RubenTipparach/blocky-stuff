@@ -392,6 +392,15 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (typeof body.nickname === 'string') db.nickname(p.id, body.nickname.trim() || null);
       return send(res, 200, { person: db.person(p.id) });
     }
+    // Join two people into one, as !link does: { keep, other } (ids); `other` becomes an alias of `keep`.
+    if (route === 'POST /api/admin/link') {
+      const a = typeof body.keep === 'string' ? db.person(body.keep) : null;
+      const b = typeof body.other === 'string' ? db.person(body.other) : null;
+      if (!a || !b) return send(res, 404, { error: 'No such person.' });
+      if (!db.link(a.id, b.id)) return send(res, 400, { error: 'They are already one person.' });
+      db.remember(a.id, `Learned that ${b.name} is also ${a.name}.`, 2, now());
+      return send(res, 200, { person: db.person(a.id) });
+    }
     if (route === 'POST /api/admin/forget-memory') {
       return send(res, 200, { forgotten: db.dropMemory(Number(body.id)) });
     }

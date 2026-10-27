@@ -177,3 +177,15 @@ test('!link in game whispers a code; !link <code> in Discord joins the two peopl
   assert.match(posts.at(-1).text, /one and the same/);
   assert.equal(db.person('discord:42').id, 'game:ruben');
 });
+
+test('an admin can link two people on the admin page', async () => {
+  const s = await start();
+  s.db.meet('game:ruben', 'Ruben');
+  s.db.meet('discord:42', 'PscifieX');
+  const r = await s.call('/api/admin/link', { method: 'POST', headers: s.as('111'), body: { keep: 'game:ruben', other: 'discord:42' } });
+  assert.equal(r.json.person.id, 'game:ruben');
+  assert.equal(s.db.person('discord:42').id, 'game:ruben');
+  assert.equal((await s.call('/api/admin/link', { method: 'POST', headers: s.as('111'), body: { keep: 'game:ruben', other: 'discord:42' } })).status, 400);
+  assert.equal((await s.call('/api/admin/link', { method: 'POST', headers: s.as('222'), body: { keep: 'a', other: 'b' } })).status, 403);
+  await s.close();
+});

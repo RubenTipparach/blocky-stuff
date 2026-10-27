@@ -197,6 +197,13 @@ function build() {
   };
   $('resetMood').onclick = async () => { await api('/api/admin/character', { resetMood: true }).catch(() => {}); refreshSoon(); };
   document.addEventListener('change', async (ev) => {
+    const link = ev.target.closest('[data-link]');
+    if (link && link.value) {
+      const other = link.options[link.selectedIndex].text;
+      if (!confirm('Make ' + other + ' the same person as this row? The feelings of this row stay; talks, facts and memories join.')) { link.value = ''; return; }
+      try { await api('/api/admin/link', { keep: link.dataset.link, other: link.value }); } catch (e) { alert(e.message); }
+      return refreshSoon();
+    }
     const el = ev.target.closest('[data-person]');
     if (!el) return;
     try { await api('/api/admin/person', { id: el.dataset.person, [el.dataset.field]: el.value }); refreshSoon(); } catch (e) { alert(e.message); }
@@ -308,7 +315,9 @@ function refresh() {
     + '<td><input type="number" min="0" max="100" style="width:72px" data-person="' + esc(p.id) + '" data-field="trust" value="' + p.trust + '"></td>'
     + '<td><input style="width:110px" data-person="' + esc(p.id) + '" data-field="nickname" value="' + esc(p.nickname || '') + '"></td>'
     + '<td>' + p.talks + '</td><td class="muted">' + ago(p.last_at) + '</td>'
-    + '<td><button class="danger" data-forget="' + esc(p.id) + '" data-name="' + esc(p.name) + '">Forget</button></td></tr>').join('')
+    + '<td class="row"><select data-link="' + esc(p.id) + '" style="width:auto"><option value="">Link with...</option>'
+    + st.people.filter((o) => o.id !== p.id).map((o) => '<option value="' + esc(o.id) + '">' + (o.id.startsWith('discord:') ? 'Discord: ' : 'Game: ') + esc(o.name) + '</option>').join('')
+    + '</select><button class="danger" data-forget="' + esc(p.id) + '" data-name="' + esc(p.name) + '">Forget</button></td></tr>').join('')
     : '<tr><td colspan="8" class="muted">Nobody yet: it meets people as they chat.</td></tr>';
   const nameOf = (id) => { const p = st.people.find((x) => x.id === id || (x.aliases || []).some((a) => a.id === id)); return p ? p.name : ''; };
   $('memories').innerHTML = st.memories.length ? st.memories.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'
