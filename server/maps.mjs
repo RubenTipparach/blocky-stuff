@@ -24,11 +24,17 @@ const MAP_COMMAND_GAP_MS = 30_000; // !map at most this often
 const TILE = 64; // blocks a side, per tile
 const TILE_KEEP_MS = 30 * 60_000; // a drawn tile is good for this long
 const TILE_AT_ONCE = 4; // tiles scanned at once, so the game never stalls on a map
+// Bump when tiles are drawn differently: kept tiles of an older drawing are drawn again.
+const TILE_VERSION = 2;
 // Every post ends with this (owner: "have the discord bot tell players to check out this site for more maps").
 const MORE = (url) => `More maps: ${url}/map`;
 
 export function createMaps({ db, game, config, characters, chat, now = () => Date.now(), log = console }) {
   const dir = join(config.dataDir, 'maps');
+  if (db.json('maps.tiles.version', 0) !== TILE_VERSION) {
+    db.putJson('maps.tiles', {});
+    db.putJson('maps.tiles.version', TILE_VERSION);
+  }
   const lastAsk = new Map(); // address -> when it last rendered on request
   let lastMapCommand = 0;
   let busy = false;
@@ -152,7 +158,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
       try {
         // Rows of the tile run north to south: z from -ty*64 down to -ty*64-63. The scan runs z upward, so flip it.
         const z1 = -ty * TILE - (TILE - 1);
-        const r1 = await game.act({ type: 'scan', tops: true, x1: tx * TILE, z1, w: TILE, d: TILE, y1: -16, y2: 95 });
+        const r1 = await game.act({ type: 'scan', tops: true, x1: tx * TILE, z1, w: TILE, d: TILE, y1: -32, y2: 127 });
         if (!r1.ok) return null;
         const scan = JSON.parse(r1.message);
         const rows = [];

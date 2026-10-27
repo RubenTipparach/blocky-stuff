@@ -32,10 +32,12 @@ const lift = ([r, g, b, a]) => [Math.min(255, r * 0.9 + 26), Math.min(255, g * 0
 export function colorOf(name) {
   colors ??= loadColors();
   const c = colors.get(name);
-  if (c) return lift(c);
+  // Foliage is drawn see-through, so what is under a canopy shows (owner: "so were not just seeing the tops").
+  if (c) return /leaves|needles|foliage/.test(name) ? [...lift(c).slice(0, 3), 80] : lift(c);
   if (/water/.test(name)) return [39, 66, 106, 160];
   if (/lava/.test(name)) return [220, 90, 20, 255];
-  if (/leaves|grass|bush|fern|moss/.test(name)) return [52, 104, 38, 255];
+  if (/leaves|needles|foliage/.test(name)) return [70, 120, 50, 80];
+  if (/grass|bush|fern|moss/.test(name)) return [52, 104, 38, 255];
   if (/glass/.test(name)) return [190, 220, 230, 110];
   if (/wood|tree|plank|fence/.test(name)) return [150, 112, 70, 255];
   if (/torch|lamp|light/.test(name)) return [250, 210, 120, 255];
@@ -236,7 +238,13 @@ export function renderTile(scan, { px = 4 } = {}) {
     for (let x = 0; x < w; x++) {
       const col = cols[z * w + x];
       if (!col) continue;
-      const [r, g, b, a] = colorOf(names[col[1]] ?? '');
+      let [r, g, b, a] = colorOf(names[col[1]] ?? '');
+      // Under a canopy: the ground, tinted with the leaves over it.
+      if (col[2] !== undefined && col[2] !== null) {
+        const [lr, lg, lb] = colorOf(names[col[2]] ?? '');
+        [r, g, b] = [r * 0.55 + lr * 0.45, g * 0.55 + lg * 0.45, b * 0.55 + lb * 0.45];
+        a = 255;
+      }
       // North (smaller z) and west: a rise toward them is in shade, a fall is lit.
       const ref = top(x - 1, z) ?? top(x, z - 1) ?? col[0];
       const k = Math.max(0.7, Math.min(1.25, 1 + (col[0] - ref) * 0.08));

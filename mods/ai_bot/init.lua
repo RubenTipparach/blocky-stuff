@@ -503,7 +503,7 @@ end
 -- The blocks of an area as a picture needs them: for each column (x, then z) its top block's height and the blocks
 -- from there down as far as its sides show (to the lower of the two neighbours the camera sees past), as indexes
 -- into a list of names. VoxelManip reads the whole box at once, from memory or disk; ungenerated ground is left out.
-local SCAN_MAX, SCAN_HIGH, SIDE_MAX = 128, 112, 24
+local SCAN_MAX, SCAN_HIGH, SIDE_MAX = 128, 160, 24
 function actions.scan(a)
 	local x1, z1 = math.floor(tonumber(a.x1) or 0), math.floor(tonumber(a.z1) or 0)
 	local w, d = math.floor(tonumber(a.w) or 0), math.floor(tonumber(a.d) or 0)
@@ -517,16 +517,29 @@ function actions.scan(a)
 	local area = VoxelArea:new({ MinEdge = emin, MaxEdge = emax })
 	local data = vm:get_data()
 	local AIR, IGNORE = core.CONTENT_AIR, core.CONTENT_IGNORE
-	-- Tops first (one extra row and column, for the neighbours of the last ones).
-	local top = {}
+	-- Leaves (and other foliage) are see-through on the map: the ground under a canopy counts as the ground.
+	local foliage = {}
+	local function leafy(c)
+		if foliage[c] == nil then
+			local n = core.get_name_from_content_id(c)
+			foliage[c] = core.get_item_group(n, "leaves") > 0 or (core.registered_nodes[n] or {}).walkable == false
+		end
+		return foliage[c]
+	end
+	-- Tops first, and the ground under any canopy (one extra row and column, for the neighbours of the last ones).
+	local top, ground = {}, {}
 	for z = z1, z1 + d do
 		for x = x1, x1 + w do
-			local h = nil
+			local h, g = nil, nil
 			for y = y2, y1, -1 do
 				local c = data[area:index(x, y, z)]
-				if c ~= AIR and c ~= IGNORE then h = y break end
+				if c ~= AIR and c ~= IGNORE then
+					h = h or y
+					if not leafy(c) then g = y break end
+				end
 			end
 			top[(z - z1) * (w + 1) + (x - x1)] = h
+			ground[(z - z1) * (w + 1) + (x - x1)] = g or h
 		end
 	end
 	local names, index, cols = {}, {}, {}
@@ -541,12 +554,16 @@ function actions.scan(a)
 			if not h then
 				cols[#cols + 1] = false
 			elseif a.tops then
-				-- A flat map wants only each column's top (the tile map of server/maps.mjs).
-				cols[#cols + 1] = { h, id(data[area:index(x, h, z)]) }
+				-- A flat map wants each column's ground, and its canopy if a tree stands over it (server/maps.mjs).
+				local g = ground[(z - z1) * (w + 1) + (x - x1)]
+				local over = g < h and id(data[area:index(x, h, z)]) or nil
+				cols[#cols + 1] = { g, id(data[area:index(x, g, z)]), over }
 			else
-				local south = top[(z + 1 - z1) * (w + 1) + (x - x1)] or y1
-				local east = top[(z - z1) * (w + 1) + (x + 1 - x1)] or y1
-				local low = math.min(h, math.max(math.min(south, east) + 1, h - SIDE_MAX, y1)) -- always its top block
+				-- Everything from the top down to the ground under it, then down its sides as far as they show.
+				local g = ground[(z - z1) * (w + 1) + (x - x1)]
+				local south = ground[(z + 1 - z1) * (w + 1) + (x - x1)] or y1
+				local east = ground[(z - z1) * (w + 1) + (x + 1 - x1)] or y1
+				local low = math.min(g, math.max(math.min(south, east) + 1, g - SIDE_MAX, y1)) -- always its ground block
 				local col = { h }
 				for y = h, low, -1 do
 					local c = data[area:index(x, y, z)]
