@@ -144,3 +144,17 @@ test('Discord: the bot wins over webhooks, posts never ping, and bad channel ids
   assert.equal(d.setChannels(['nope']), false);
   assert.equal(createDiscord({ log: quiet }).mode, null);
 });
+
+test('the bot answers any chat by default, and its body walks to whoever it answers', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', ANTHROPIC_API_KEY: '' });
+  const db = openDb(':memory:');
+  const heard = [];
+  const bot = { ready: true, hear: async (msg, reply) => { heard.push(msg); await reply('Hi there!'); return 'Hi there!'; } };
+  const discord = createDiscord({ log: quiet });
+  const server = makeApp({ config, db, bridgeKey: 'key', discord, bot, log: quiet });
+  server.game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  // The stand-in answers at once, so the answer rides out on the very sync that brought the chat.
+  const { actions } = server.game.sync({ events: [{ type: 'chat', name: 'alice', text: 'hello' }] });
+  assert.equal(heard[0].text, 'hello');
+  assert.deepEqual([actions[0].type, actions[0].near, actions[0].text], ['say', 'alice', 'Hi there!']);
+});

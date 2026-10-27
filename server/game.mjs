@@ -12,7 +12,7 @@
 
 // What the mod knows how to do, with the fields each takes.
 export const ACTIONS = {
-  say: ['text', 'to?', 'from?'],
+  say: ['text', 'to?', 'from?', 'near?'],
   give: ['player', 'item', 'count?'],
   teleport: ['player', 'x', 'y', 'z'],
   time: ['value'],

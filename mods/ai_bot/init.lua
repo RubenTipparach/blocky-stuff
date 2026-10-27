@@ -172,6 +172,141 @@ function actions.kick(a)
 	return true, "Kicked " .. a.player .. "."
 end
 
+-- ---- The bot's body ----
+-- A character with the bot's name over its head, in the world whenever a player is online or it has work to
+-- do: it walks after whoever it is talking to, and goes to what it builds. It is never saved with the map
+-- (static_save off), so a world never fills with stale copies: when its area unloads it is gone, and the
+-- next sync puts it back by a player.
+
+local npc_name = "Blocky"
+local npc = nil -- the ObjectRef while it exists
+local follow = nil -- the player it walks after
+local work_pos, work_until = nil, 0 -- a build site, and when it is done there
+local has_model = core.get_modpath("player_api") ~= nil
+local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 } }
+local WALK_SPEED, NEAR, FAR = 4, 3, 40
+
+local function npc_alive() return npc ~= nil and npc:get_pos() ~= nil end
+
+local function npc_anim(self, which)
+	if not has_model or self._anim == which then return end
+	self._anim = which
+	self.object:set_animation(ANIM[which], which == "walk" and 30 or 20, 0)
+end
+
+core.register_entity("ai_bot:npc", {
+	initial_properties = {
+		physical = true,
+		collide_with_objects = false,
+		collisionbox = { -0.3, 0.0, -0.3, 0.3, 1.7, 0.3 },
+		selectionbox = { -0.3, 0.0, -0.3, 0.3, 1.7, 0.3 },
+		visual = has_model and "mesh" or "cube",
+		mesh = has_model and "character.b3d" or nil,
+		textures = has_model and { "character.png^[colorize:#2f7fd0:90" } or { "default_wood.png" },
+		visual_size = has_model and { x = 1, y = 1 } or { x = 0.6, y = 1.7 },
+		stepheight = 1.1,
+		nametag = npc_name,
+		nametag_color = BOT_COLOR,
+		static_save = false,
+	},
+	on_activate = function(self)
+		self.object:set_armor_groups({ immortal = 1 })
+		self.object:set_acceleration({ x = 0, y = -9.81, z = 0 })
+		self._stuck = 0
+		npc_anim(self, "stand")
+	end,
+	on_rightclick = function(_, clicker)
+		core.chat_send_player(clicker:get_player_name(),
+			core.colorize(BOT_COLOR, "<" .. npc_name .. "> ") .. "Say @" .. npc_name .. " in chat and tell me what you need!")
+	end,
+	on_step = function(self, dtime)
+		local obj = self.object
+		local pos = obj:get_pos()
+		local goal
+		if work_pos and core.get_us_time() < work_until then
+			goal = work_pos
+		else
+			work_pos = nil
+			local p = follow and core.get_player_by_name(follow)
+			goal = p and p:get_pos()
+		end
+		local vel = obj:get_velocity()
+		if not goal then
+			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
+			npc_anim(self, "stand")
+			return
+		end
+		local to = vector.subtract(goal, pos)
+		local flat = math.sqrt(to.x * to.x + to.z * to.z)
+		if flat > FAR or math.abs(to.y) > 12 then
+			obj:set_pos(vector.add(goal, { x = 2, y = 0.5, z = 2 }))
+			self._stuck = 0
+			return
+		end
+		if flat > 0.01 then obj:set_yaw(core.dir_to_yaw({ x = to.x, y = 0, z = to.z })) end
+		if flat > NEAR then
+			obj:set_velocity({ x = to.x / flat * WALK_SPEED, y = vel.y, z = to.z / flat * WALK_SPEED })
+			npc_anim(self, "walk")
+			-- Walking into a wall it cannot step over: hop to the goal after a couple of seconds.
+			if math.abs(vel.x) + math.abs(vel.z) < 0.5 then self._stuck = self._stuck + dtime else self._stuck = 0 end
+			if self._stuck > 2 then
+				obj:set_pos(vector.add(goal, { x = 2, y = 0.5, z = 2 }))
+				self._stuck = 0
+			end
+		else
+			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
+			npc_anim(self, work_pos and "mine" or "stand")
+		end
+	end,
+})
+
+local function npc_spawn(near)
+	npc = core.add_entity(vector.add(near, { x = 2, y = 0.5, z = 2 }), "ai_bot:npc")
+	if npc then npc:set_properties({ nametag = npc_name }) end
+end
+
+-- Walk after a player (and appear by them when it is not in the world).
+local function npc_follow(name)
+	local p = name and core.get_player_by_name(name)
+	if not p then return end
+	follow = name
+	if not npc_alive() then npc_spawn(p:get_pos()) end
+end
+
+-- Go to a build site and work there a while, appearing there if need be.
+local function npc_work(pos)
+	work_pos, work_until = pos, core.get_us_time() + 10 * 1000000
+	if not npc_alive() then npc_spawn(pos) end
+end
+
+-- Each sync: in the world while anyone is, by the player it last followed or the first one online.
+local function npc_tend(bot)
+	if bot and bot ~= npc_name then
+		npc_name = line(bot, 32)
+		if npc_alive() then npc:set_properties({ nametag = npc_name }) end
+	end
+	local players = core.get_connected_players()
+	if follow and not core.get_player_by_name(follow) then follow = nil end
+	if not follow and players[1] then follow = players[1]:get_player_name() end
+	if npc_alive() then
+		if not follow and not work_pos then npc:remove(); npc = nil end
+	elseif follow then
+		npc_follow(follow)
+	end
+end
+
+-- What each action does to the body.
+local function npc_after(a)
+	if (a.type == "give" or a.type == "heal" or a.type == "teleport") and a.player then
+		core.after(a.type == "teleport" and 0.5 or 0, npc_follow, a.player)
+	elseif a.type == "say" and a.near then
+		npc_follow(a.near)
+	elseif a.type == "place" and type(a.nodes) == "table" and a.nodes[1] then
+		local n = a.nodes[1]
+		npc_work(vector.new(n.x, n.y, n.z))
+	end
+end
+
 local function run(a)
 	local handler = actions[a.type]
 	local ok, message
@@ -180,6 +315,10 @@ local function run(a)
 	else
 		local fine, r1, r2 = pcall(handler, a)
 		if fine then ok, message = r1, r2 else ok, message = false, "Failed: " .. tostring(r1) end
+	end
+	if ok then
+		local moved, err = pcall(npc_after, a)
+		if not moved then core.log("warning", "[ai_bot] body: " .. tostring(err)) end
 	end
 	if a.id then results[#results + 1] = { id = a.id, ok = ok, message = message } end
 end
@@ -211,6 +350,10 @@ local function sync()
 			return
 		end
 		local answer = core.parse_json(res.data)
+		if type(answer) == "table" then
+			local tended, err = pcall(npc_tend, answer.bot)
+			if not tended then core.log("warning", "[ai_bot] body: " .. tostring(err)) end
+		end
 		if type(answer) == "table" and type(answer.actions) == "table" then
 			for _, a in ipairs(answer.actions) do
 				if type(a) == "table" then run(a) end

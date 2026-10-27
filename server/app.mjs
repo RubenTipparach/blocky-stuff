@@ -54,10 +54,11 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   // ---- Chat, between the game, Discord and the bot ----
 
   /** The bot's answer: into the game, the log, and Discord (always, when the question came from there). */
-  async function botSays(text, { toDiscord = false } = {}) {
+  async function botSays(text, { toDiscord = false, near } = {}) {
     const name = botName();
     db.addChat('bot', name, text, now());
-    const [r] = await Promise.all([game.act({ type: 'say', text, from: name }),
+    // near: the player it answers, whom its body in the world walks over to.
+    const [r] = await Promise.all([game.act({ type: 'say', text, from: name, ...(near ? { near } : {}) }),
       relay().chat || toDiscord ? chat.post({ text, as: name }) : null]);
     return r;
   }
@@ -76,11 +77,17 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       db.addChat('game', e.name, e.text, now());
       if (relay().chat) chat.post({ text: e.text, as: e.name });
       const admin = game.player(e.name)?.privs.includes('server') ?? false;
-      brain.hear({ source: 'game', name: e.name, text: e.text, admin }, botSays).catch((err) => log.error(err));
+      brain.hear({ source: 'game', name: e.name, text: e.text, admin }, (t) => botSays(t, { near: e.name }))
+        .catch((err) => log.error(err));
     } else if (e.type === 'join' || e.type === 'leave') {
       const line = `${e.name} ${e.type === 'join' ? 'joined' : 'left'} the game`;
       db.addChat('game', '*', line, now());
       if (relay().news) chat.news(e.type, `**${e.name}** ${e.type === 'join' ? 'joined' : 'left'} the game.`);
+      // Listening to everything, the bot may greet whoever arrives.
+      if (e.type === 'join' && botSettings(db, config).listen === 'all') {
+        setTimeout(() => brain.hear({ source: 'game', name: e.name, text: '(just joined the game)', admin: false },
+          (t) => botSays(t, { near: e.name })).catch((err) => log.error(err)), 3000);
+      }
     } else if (e.type === 'start') {
       db.addChat('game', '*', 'The server started', now());
       if (relay().news) chat.news('up', `**${config.serverName}** is up. Join at \`${joinAt()}\`.`);
