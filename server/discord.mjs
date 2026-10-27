@@ -35,6 +35,9 @@ export function createDiscord(opts = {}) {
   const {
     api = 'https://discord.com/api/v10', fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket, log = console,
     onMessage = () => {}, botName = () => 'Blocky', onCommand = () => {},
+    // The last message seen in each channel, kept across restarts (the app keeps it in its database), so a restart
+    // catches up on what was said while the bot was down.
+    lastSeen = { get: () => null, set: () => {} }, now = () => Date.now(),
   } = opts;
   const token = opts.token?.trim() ?? '';
   const webhooks = (opts.webhookUrls ?? []).filter((u) => WEBHOOK_URL.test(u));
@@ -166,6 +169,7 @@ export function createDiscord(opts = {}) {
         connectedAt = Date.now();
         log.log(`Discord bot connected as ${m.d.user.username}.`);
         registerCommands((m.d.guilds ?? []).map((g) => g.id)).catch((err) => log.error('slash commands:', err.message));
+        catchUp().catch((err) => log.error('discord catch-up:', err.message));
       } else if (m.op === 0 && m.t === 'GUILD_CREATE') {
         registerCommands([m.d.id]).catch((err) => log.error('slash commands:', err.message));
       } else if (m.op === 0 && m.t === 'MESSAGE_CREATE') {
@@ -240,8 +244,24 @@ export function createDiscord(opts = {}) {
     });
   }
 
+  // Messages said in the bot's channels while it was down (a restart, a reconnect), from the last 5 minutes: heard now.
+  const CATCH_UP_MS = 5 * 60_000;
+  async function catchUp() {
+    for (const ch of channelIds) {
+      const after = lastSeen.get(ch);
+      if (!after) continue;
+      const missed = await asBot(`/channels/${ch}/messages?after=${after}&limit=20`);
+      for (const msg of (Array.isArray(missed) ? missed : []).reverse()) {
+        if (now() - Date.parse(msg.timestamp) < CATCH_UP_MS) heard({ ...msg, channel_id: ch });
+        else lastSeen.set(ch, msg.id);
+      }
+    }
+  }
+
   function heard(d) {
-    if (!channelIds.includes(String(d.channel_id)) || d.author?.bot || d.webhook_id) return;
+    if (!channelIds.includes(String(d.channel_id))) return;
+    if (d.id) lastSeen.set(String(d.channel_id), String(d.id));
+    if (d.author?.bot || d.webhook_id) return;
     const name = d.member?.nick ?? d.author?.global_name ?? d.author?.username ?? 'someone';
     // A mention of the bot reads as its name, so "@Blocky" works from Discord as in game.
     const text = String(d.content ?? '').replace(new RegExp(`<@!?${selfId}>`, 'g'), `@${botName()}`)

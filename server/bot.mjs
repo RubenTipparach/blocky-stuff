@@ -649,7 +649,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   const answerers = (text, ch, depth = 0) => (depth >= CHAIN_MAX ? [] : named(text, cast()).filter((c) => c.id !== ch.id));
 
   return { hear, addressed, answerers, summary, idle, work, cast, tasksOf, saveTasks, activity: () => [...events].reverse(),
-    get ready() { return llm !== null; } };
+    get ready() { return llm !== null; },
+    /** Answers and turns in progress: a restart waits for these to finish. */
+    get busy() { return busy; } };
 }
 
 /** The reply's text, flattened to one chat-sized line. */

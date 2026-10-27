@@ -287,3 +287,27 @@ test('/help is a guide: how to join, the characters, every command, seen only by
   for (const want of ['luanti.org', '1.2.3.4', '30000', 'Blocky', 'Moss', '/picture', '/link', '/talk', '/rel', '/map']) assert.ok(text.includes(want), want);
   await s.close();
 });
+
+test('Discord: plain messages are heard, and on reconnecting the bot catches up on what was said while it was down', async () => {
+  const CH = '1553044846057361581';
+  class FakeWS { constructor() { FakeWS.last = this; setTimeout(() => this.emit({ op: 10, d: { heartbeat_interval: 40000 } }), 2); }
+    emit(m) { this.onmessage?.({ data: JSON.stringify(m) }); } send() {} close() {} }
+  const seen = new Map([[CH, '100']]);
+  const heard = [];
+  const t0 = Date.parse('2026-10-27T08:20:00Z');
+  const d = createDiscord({ token: 'T', channelIds: [CH], log: quiet, WebSocketImpl: FakeWS, onMessage: (m) => heard.push(m.text), now: () => t0,
+    lastSeen: { get: (c) => seen.get(c), set: (c, id) => seen.set(c, id) },
+    fetchImpl: async (url) => ({ ok: true, status: 200, json: async () => (String(url).includes(`/channels/${CH}/messages?after=100`)
+      // Newest first, as Discord sends them: one from during the restart, one from long ago.
+      ? [{ id: '102', author: { id: '42', username: 'r' }, content: 'are you there?', timestamp: '2026-10-27T08:19:30Z' },
+        { id: '101', author: { id: '42', username: 'r' }, content: 'old news', timestamp: '2026-10-27T07:00:00Z' }]
+      : String(url).includes('/gateway/bot') ? { url: 'wss://x' } : []) }) });
+  d.start();
+  await new Promise((r) => setTimeout(r, 20));
+  FakeWS.last.emit({ op: 0, s: 1, t: 'READY', d: { user: { id: '999', username: 'luni-bot' }, guilds: [] } });
+  await new Promise((r) => setTimeout(r, 20));
+  FakeWS.last.emit({ op: 0, s: 2, t: 'MESSAGE_CREATE', d: { id: '103', channel_id: CH, author: { id: '42', username: 'r' }, content: 'Test. can you guys hear me?' } });
+  d.stop();
+  assert.deepEqual(heard, ['are you there?', 'Test. can you guys hear me?']);
+  assert.equal(seen.get(CH), '103');
+});

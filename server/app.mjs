@@ -69,6 +69,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     channelIds: config.discordChannelIds.length ? config.discordChannelIds : (db.setting('discord.channels') ?? '').split(',')
       .filter(Boolean),
     onMessage: (m) => fromDiscord(m),
+    lastSeen: { get: (ch) => db.setting(`discord.seen.${ch}`), set: (ch, id) => db.putSetting(`discord.seen.${ch}`, id) },
     onCommand: (c) => { slash(c).catch((err) => log.error(`/${c.name} failed:`, err)); },
   });
   const brain = bot ?? createBot({ db, game, config, now, log });
@@ -667,5 +668,6 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   server.fromDiscord = fromDiscord;
   server.maps = maps;
   server.slash = slash;
+  server.brain = brain;
   return server;
 }

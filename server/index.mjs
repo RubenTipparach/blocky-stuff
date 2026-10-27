@@ -46,6 +46,9 @@ async function stop() {
   if (stopping) return;
   stopping = true;
   console.log(supervised ? 'Stopping the bot (the game keeps running).' : 'Stopping: saving the world.');
+  // Answers in progress are finished first (up to 25 s), so a restart never cuts one off.
+  const until = Date.now() + 25_000;
+  while ((server.brain?.busy ?? 0) > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
   server.discord.stop();
   if (!supervised) await luanti?.stop();
   server.close(() => { db.close(); process.exit(0); });
