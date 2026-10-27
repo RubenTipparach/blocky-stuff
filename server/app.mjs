@@ -450,11 +450,17 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'POST /api/admin/forget-memory') {
       return send(res, 200, { forgotten: db.dropMemory(Number(body.id)) });
     }
-    // How often a working character's picture goes to Discord, in hours (0: only finished projects).
+    // How often the characters' pictures go to Discord while someone is online, in minutes (0: never by themselves).
     if (route === 'POST /api/admin/maps') {
-      const every = Math.max(0, Math.min(48, Number(body.every)));
-      if (Number.isFinite(every)) db.putJson('maps.settings', { ...db.json('maps.settings', {}), every });
+      const minutes = Math.max(0, Math.min(1440, Math.round(Number(body.every))));
+      if (Number.isFinite(minutes)) db.putJson('maps.settings', { ...db.json('maps.settings', {}), minutes });
       return send(res, 200, { maps: maps.settings() });
+    }
+    // Post the characters' pictures to Discord now: { id } for one, nothing for all of them.
+    if (route === 'POST /api/admin/map-post') {
+      try { return send(res, 200, { posted: await maps.postNow(body.id ? String(body.id) : null) }); } catch (e) {
+        return send(res, 400, { error: e.message });
+      }
     }
     if (route === 'POST /api/admin/map-now') {
       const ch = characters().find((c) => c.id === body.id);

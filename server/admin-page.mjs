@@ -246,9 +246,10 @@ function build() {
     <label class="check"><input type="checkbox" id="r_chat"> Chat both ways (game, Discord, bot)</label>
     <label class="check"><input type="checkbox" id="r_news"> Joins, leaves and server start</label>
     <h2 style="margin-top:16px">Map pictures</h2>
-    <p class="muted note" style="margin:0 0 8px">A picture of a character's project goes to Discord when she finishes it, and every so often while she builds. Anyone in the channel can ask with <code>!map</code>, <code>!map Moss</code> or <code>!map 120 -40</code>.</p>
-    <div class="row"><label class="field" style="margin:0;flex:1 1 200px">While building, every (hours, 0 = only when finished)<input id="m_every" type="number" min="0" max="48"></label>
-      <button type="button" class="quiet" id="m_save" style="align-self:end">Save</button><span id="m_note" class="note muted"></span></div>
+    <p class="muted note" style="margin:0 0 8px">A picture of each character, aimed at where she is, goes to Discord every so often while someone is in the game (a finished project gets a mention). Anyone in the channel can ask with <code>!map</code>, <code>!map Moss</code> or <code>!map 120 -40</code>.</p>
+    <div class="row"><label class="field" style="margin:0;flex:1 1 200px">Every (minutes, while someone is online; 0 = never by themselves)<input id="m_every" type="number" min="0" max="1440"></label>
+      <button type="button" class="quiet" id="m_save" style="align-self:end">Save</button>
+      <button type="button" class="quiet" id="m_post" style="align-self:end">Post everyone's picture now</button><span id="m_note" class="note muted"></span></div>
   </section>
 </div>
 <div class="grid" style="margin-top:14px">
@@ -279,6 +280,7 @@ function build() {
     <label class="field">Working on now (she changes this herself)<input id="c_goal" maxlength="200"></label>
     <div class="row"><button>Save character</button><button type="button" class="quiet" id="resetMood">Calm her mood</button>
       <button type="button" class="quiet" id="c_picture">Take a picture now</button>
+      <button type="button" class="quiet" id="c_post">Post her picture to Discord</button>
       <button type="button" class="danger" id="c_remove">Remove</button><span id="charNote" class="note muted"></span></div>
   </form></section>
 <section style="margin-top:14px"><h2>Her memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
@@ -399,6 +401,13 @@ function build() {
   $('m_save').onclick = async () => {
     try { await api('/api/admin/maps', { every: Number($('m_every').value) }); $('m_note').textContent = 'Saved.'; } catch (e) { $('m_note').textContent = e.message; }
   };
+  const postMap = async (id, note) => {
+    note.textContent = 'Drawing and posting...';
+    try { const r = await api('/api/admin/map-post', id ? { id } : {}); note.textContent = r.posted ? 'Posted ' + r.posted + ' picture' + (r.posted === 1 ? '' : 's') + '.' : 'Nothing posted: is she in the world?'; }
+    catch (e) { note.textContent = e.message; }
+  };
+  $('m_post').onclick = () => postMap(null, $('m_note'));
+  $('c_post').onclick = () => postMap(picked, $('charNote'));
   $('c_picture').onclick = async () => {
     $('charNote').textContent = 'Drawing...';
     try { await api('/api/admin/map-now', { id: picked }); $('charNote').innerHTML = 'Done: <a href="' + esc(state.maps.url) + '" target="_blank" rel="noopener">see the map</a>'; }

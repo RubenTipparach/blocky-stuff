@@ -66,6 +66,12 @@ jobs:
             exit 1
           fi
           echo "Map render: $(wc -c < /tmp/map.png) bytes"
+          if ! curl -fsS -m 30 "http://localhost:8080/map/tiles/0/0.png" -o /tmp/tile.png \
+            || [ "$(head -c 4 /tmp/tile.png | od -An -tx1 | tr -d ' ')" != "89504e47" ]; then
+            echo "::error::A map tile did not render; nothing was deployed."
+            docker logs blocky-check 2>&1 | tail -n 80
+            exit 1
+          fi
           docker logs blocky-check 2>&1 | grep -E '\[ai_bot\]|Starting Luanti|Sidecar' || true
           docker rm -f blocky-check > /dev/null
 

@@ -8,7 +8,8 @@ import { readFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 
 const COLORS_FILE = new URL('./map/colors.txt', import.meta.url);
-const BG = [27, 34, 23];
+// A pale sky behind the picture: the darkest blocks (leaves, in shade) stand out from it.
+const BG = [168, 199, 214];
 // How much light each face gets: the top, the face toward the viewer's left (south) and right (east).
 const SHADE = { top: 1, left: 0.8, right: 0.64 };
 
@@ -25,11 +26,13 @@ export function loadColors(text = readFileSync(COLORS_FILE, 'utf8')) {
 }
 
 let colors = null;
+// minetestmapper's colours are a texture's average, often dark: lift them a little so a canopy reads as one.
+const lift = ([r, g, b, a]) => [Math.min(255, r * 0.9 + 26), Math.min(255, g * 0.9 + 26), Math.min(255, b * 0.9 + 22), a];
 /** A node's colour: from the table, else a guess from its name, else a steady grey of its own. */
 export function colorOf(name) {
   colors ??= loadColors();
   const c = colors.get(name);
-  if (c) return c;
+  if (c) return lift(c);
   if (/water/.test(name)) return [39, 66, 106, 160];
   if (/lava/.test(name)) return [220, 90, 20, 255];
   if (/leaves|grass|bush|fern|moss/.test(name)) return [52, 104, 38, 255];
@@ -80,11 +83,58 @@ function sprite(a) {
   return { w, face, edge };
 }
 
+// A 5 by 7 pixel font for names on the pictures: capitals, digits and a few marks (others print as a space).
+const GLYPHS = {
+  A: '01110100011000111111100011000110001', B: '11110100011000111110100011000111110', C: '01110100011000010000100001000101110',
+  D: '11110100011000110001100011000111110', E: '11111100001000011110100001000011111', F: '11111100001000011110100001000010000',
+  G: '01110100011000010111100011000101111', H: '10001100011000111111100011000110001', I: '01110001000010000100001000010001110',
+  J: '00111000100001000010000101001001100', K: '10001100101010011000101001001010001', L: '10000100001000010000100001000011111',
+  M: '10001110111010110101100011000110001', N: '10001100011100110101100111000110001', O: '01110100011000110001100011000101110',
+  P: '11110100011000111110100001000010000', Q: '01110100011000110001101011001001101', R: '11110100011000111110101001001010001',
+  S: '01111100001000001110000010000111110', T: '11111001000010000100001000010000100', U: '10001100011000110001100011000101110',
+  V: '10001100011000110001100010101000100', W: '10001100011000110101101011010101010', X: '10001100010101000100010101000110001',
+  Y: '10001100010101000100001000010000100', Z: '11111000010001000100010001000011111', 0: '01110100011001110101110011000101110',
+  1: '00100011000010000100001000010001110', 2: '01110100010000100010001000100011111', 3: '11110000010000101110000010000111110',
+  4: '00010001100101010010111110001000010', 5: '11111100001111000001000011000101110', 6: '00110010001000011110100011000101110',
+  7: '11111000010001000100010000100001000', 8: '01110100011000101110100011000101110', 9: '01110100011000101111000010001001100',
+  '-': '00000000000000011111000000000000000', '.': '00000000000000000000000000110001100', '_': '00000000000000000000000000000011111',
+};
+
+/** Write `text` (in capitals) onto an RGB picture at (x, y), each font pixel `s` by `s`, on a dark plate. */
+export function drawLabel(px, width, height, x, y, text, rgb, s = 2) {
+  const t = String(text).toUpperCase().slice(0, 24);
+  const w = t.length * 6 * s + 3 * s;
+  const h = 7 * s + 4 * s;
+  for (let yy = 0; yy < h; yy++) {
+    for (let xx = 0; xx < w; xx++) {
+      const tx = x + xx;
+      const ty = y + yy;
+      if (tx >= 0 && ty >= 0 && tx < width && ty < height) px.set([20, 24, 18], (ty * width + tx) * 3);
+    }
+  }
+  [...t].forEach((ch, i) => {
+    const g = GLYPHS[ch];
+    if (!g) return;
+    for (let row = 0; row < 7; row++) {
+      for (let col = 0; col < 5; col++) {
+        if (g[row * 5 + col] !== '1') continue;
+        for (let dy = 0; dy < s; dy++) {
+          for (let dx = 0; dx < s; dx++) {
+            const tx = x + 2 * s + i * 6 * s + col * s + dx;
+            const ty = y + 2 * s + row * s + dy;
+            if (tx >= 0 && ty >= 0 && tx < width && ty < height) px.set(rgb, (ty * width + tx) * 3);
+          }
+        }
+      }
+    }
+  });
+}
+
 /**
  * Draw a scan (the mod's `scan` result) as an isometric picture. marks: { color: "#rrggbb" } per mark, by id or
  * player. Returns { png, width, height }.
  */
-export function renderIso(scan, { markColors = {}, scale } = {}) {
+export function renderIso(scan, { markColors = {}, markNames = {}, scale } = {}) {
   const { x1, z1, w, d, y1 } = scan;
   const names = Array.isArray(scan.names) ? scan.names : [];
   const cols = Array.isArray(scan.cols) ? scan.cols : [];
@@ -164,8 +214,45 @@ export function renderIso(scan, { markColors = {}, scale } = {}) {
         px.set(inPin ? rgb : [16, 18, 14], (ty * width + tx) * 3);
       }
     }
+    const name = m.player ?? markNames[m.id] ?? m.id;
+    if (name) drawLabel(px, width, height, cx + r + 4, cy - r - 2, name, m.player ? [255, 255, 255] : rgb.map((v) => Math.min(255, v + 60)));
   }
   return { png: encodePng(px, width, height), width, height };
+}
+
+/**
+ * A top-down tile for the web map: `scan` of size×size columns (tops only), each `px` pixels square, shaded by the
+ * slope to its north-west neighbour so hills read. Ungenerated ground stays clear. Returns a PNG (RGBA).
+ */
+export function renderTile(scan, { px = 4 } = {}) {
+  const { w, d } = scan;
+  const names = Array.isArray(scan.names) ? scan.names : [];
+  const cols = Array.isArray(scan.cols) ? scan.cols : [];
+  const W = w * px;
+  const H = d * px;
+  const out = new Uint8Array(W * H * 4);
+  const top = (x, z) => (x < 0 || z < 0 || x >= w || z >= d || !cols[z * w + x] ? null : cols[z * w + x][0]);
+  for (let z = 0; z < d; z++) {
+    for (let x = 0; x < w; x++) {
+      const col = cols[z * w + x];
+      if (!col) continue;
+      const [r, g, b, a] = colorOf(names[col[1]] ?? '');
+      // North (smaller z) and west: a rise toward them is in shade, a fall is lit.
+      const ref = top(x - 1, z) ?? top(x, z - 1) ?? col[0];
+      const k = Math.max(0.7, Math.min(1.25, 1 + (col[0] - ref) * 0.08));
+      // Rows run north to south down the tile: the scan's z grows south, so row = z.
+      for (let yy = 0; yy < px; yy++) {
+        for (let xx = 0; xx < px; xx++) {
+          const o = ((z * px + yy) * W + (x * px + xx)) * 4;
+          out[o] = Math.min(255, r * k);
+          out[o + 1] = Math.min(255, g * k);
+          out[o + 2] = Math.min(255, b * k);
+          out[o + 3] = Math.max(140, a ?? 255);
+        }
+      }
+    }
+  }
+  return encodePng(out, W, H, 4);
 }
 
 // ---- PNG ----
@@ -189,17 +276,18 @@ const chunk = (type, data) => {
   return Buffer.concat([len, t, data, crc]);
 };
 
-/** An RGB picture as a PNG. */
-export function encodePng(rgb, width, height) {
-  const raw = Buffer.alloc((width * 3 + 1) * height);
+/** An RGB (channels 3) or RGBA (4) picture as a PNG. */
+export function encodePng(rgb, width, height, channels = 3) {
+  const row = width * channels;
+  const raw = Buffer.alloc((row + 1) * height);
   for (let y = 0; y < height; y++) {
-    raw[y * (width * 3 + 1)] = 0;
-    Buffer.from(rgb.buffer, rgb.byteOffset + y * width * 3, width * 3).copy(raw, y * (width * 3 + 1) + 1);
+    raw[y * (row + 1)] = 0;
+    Buffer.from(rgb.buffer, rgb.byteOffset + y * row, row).copy(raw, y * (row + 1) + 1);
   }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
-  ihdr.set([8, 2, 0, 0, 0], 8);
+  ihdr.set([8, channels === 4 ? 6 : 2, 0, 0, 0], 8);
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr),
     chunk('IDAT', deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
 }

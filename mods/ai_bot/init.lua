@@ -540,6 +540,9 @@ function actions.scan(a)
 			local h = top[(z - z1) * (w + 1) + (x - x1)]
 			if not h then
 				cols[#cols + 1] = false
+			elseif a.tops then
+				-- A flat map wants only each column's top (the tile map of server/maps.mjs).
+				cols[#cols + 1] = { h, id(data[area:index(x, h, z)]) }
 			else
 				local south = top[(z + 1 - z1) * (w + 1) + (x - x1)] or y1
 				local east = top[(z - z1) * (w + 1) + (x + 1 - x1)] or y1
