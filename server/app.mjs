@@ -15,7 +15,7 @@ import { timingSafeEqual, randomBytes } from 'node:crypto';
 import { sign, verify, nonce } from './tokens.mjs';
 import { createGame } from './game.mjs';
 import { createBot, botSettings } from './bot.mjs';
-import { createDiscord } from './discord.mjs';
+import { createDiscord, codeCoords } from './discord.mjs';
 import { mcpAuthorized, mcpCall, storeMcpToken } from './mcp.mjs';
 import { ADMIN_PAGE } from './admin-page.mjs';
 import { createMaps } from './maps.mjs';
@@ -245,13 +245,21 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     const day = t.toISOString().slice(0, 10);
     if (!force && (s.summaryHour < 0 || t.getUTCHours() < s.summaryHour || db.setting('summary.last') === day)) return null;
     db.putSetting('summary.last', day);
-    const text = await brain.summary(now() - 24 * 3600_000);
-    if (!text) return null;
-    const teller = host();
-    db.addChat('bot', teller.name, text, now());
-    await Promise.all([chat.post({ text: `📋 Daily summary: ${text}`, as: teller.name }),
-      game.act({ type: 'say', text: `Daily summary: ${text}`, from: teller.name, by: teller.id, color: teller.chatColor })]);
-    return text;
+    const sum = await brain.summary(now() - 24 * 3600_000);
+    if (!sum) return null;
+    const teller = sum.teller ?? host();
+    // On Discord: an embed in the teller's colour, the day's title, a short scene, emoji bullets, a closing line.
+    const date = t.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+    const body = [sum.opening, sum.bullets.length ? sum.bullets.map((b) => `${b.emoji} ${b.text}`).join('\n') : '',
+      sum.closing ? `*${sum.closing}*` : ''].filter(Boolean).join('\n\n');
+    await chat.post({ embed: { color: parseInt(String(teller.chatColor ?? '#f2b84b').slice(1), 16) || 0xf2b84b,
+      author: { name: `${teller.name}'s daily tale` }, title: `📜 ${sum.title}`, description: codeCoords(body).slice(0, 3800),
+      url: `${config.publicUrl}/map`, footer: { text: `${date} · more maps: ${config.publicUrl}/map` } } });
+    // In the game: just the scene, and where to read the rest.
+    const short = `${sum.title}: ${sum.opening}`.slice(0, 400);
+    db.addChat('bot', teller.name, `${sum.title}. ${sum.opening} ${sum.bullets.map((b) => b.text).join(' ')} ${sum.closing}`, now());
+    await game.act({ type: 'say', text: `${short} (the whole tale is on Discord)`, from: teller.name, by: teller.id, color: teller.chatColor });
+    return body;
   }
   if (daily) setInterval(() => { dailySummary().catch((err) => log.error('daily summary failed:', err)); }, 10 * 60_000).unref();
 

@@ -136,6 +136,7 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
   const { db, game, bot, client } = setup([
     () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 't1', name: 'heal_player', input: { player: 'alice' } }] }),
     text('Healed!'),
+    text('{"title": "A Day of Bandages", "opening": "The sun rose on a battered alice.", "bullets": [{"emoji": "🩹", "text": "I patched alice right up."}], "closing": "Fewer cacti tomorrow, please."}'),
     text('Today I patched up alice.'),
   ], { t: 1000 });
   game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 3, privs: [] }] });
@@ -145,7 +146,13 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
   game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Healed alice.' }] });
   await pending;
   assert.equal(db.deeds(0)[0].tool, 'heal_player');
-  assert.equal(await bot.summary(0), 'Today I patched up alice.');
+  const sum = await bot.summary(0);
+  assert.deepEqual([sum.title, sum.bullets[0].emoji, sum.bullets[0].text, sum.teller.name],
+    ['A Day of Bandages', '🩹', 'I patched alice right up.', 'Blocky']);
+  assert.doesNotMatch(client.calls[2].messages[0].content, /Here is the last day/);
+  assert.match(client.calls[2].messages[0].content, /not an ending/);
+  // An answer that is not JSON still makes a summary, as one short story.
+  assert.equal((await bot.summary(0)).opening, 'Today I patched up alice.');
   assert.match(client.calls[2].messages[0].content, /heal_player/);
   assert.equal(await setup([]).bot.summary(0), null);
 });

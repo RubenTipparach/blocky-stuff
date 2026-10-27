@@ -66,7 +66,7 @@ export function createDiscord(opts = {}) {
       allowed_mentions: { parse: [] },
       ...(message.embed ? { embeds: [message.embed] }
         : message.color && message.as ? { embeds: [{ color: parseInt(String(message.color).slice(1), 16) || 0x9aa8ff,
-          author: { name: clean(message.as, 64) }, description: clean(message.text, 1900) }] }
+          author: { name: clean(message.as, 64) }, description: codeCoords(clean(message.text, 1900)) }] }
           : { content: mode === 'bot' && message.as ? `**${clean(message.as, 64)}**: ${clean(message.text, 1800)}`
             : clean(message.text, 1900) }),
     };
@@ -102,7 +102,7 @@ export function createDiscord(opts = {}) {
     const name = String(filename).replace(/[^\w.-]/g, '') || 'map.png';
     const payload = {
       allowed_mentions: { parse: [] },
-      embeds: [{ color: parseInt(String(color ?? '#8fd16a').slice(1), 16) || 0x8fd16a, description: clean(text, 1900),
+      embeds: [{ color: parseInt(String(color ?? '#8fd16a').slice(1), 16) || 0x8fd16a, description: codeCoords(clean(text, 1900)),
         ...(as ? { author: { name: clean(as, 64) } } : {}), ...(link ? { url: link, title: 'See the map' } : {}),
         image: { url: `attachment://${name}` } }],
       attachments: [{ id: 0, filename: name }],
@@ -217,7 +217,7 @@ export function createDiscord(opts = {}) {
       const payload = { allowed_mentions: { parse: [] }, ...(ephemeral ? { flags: 64 } : {}) };
       if (png) {
         const name = String(filename).replace(/[^\w.-]/g, '') || 'picture.png';
-        payload.embeds = [{ color: parseInt(String(color ?? '#8fd16a').slice(1), 16) || 0x8fd16a, description: clean(text ?? '', 1900),
+        payload.embeds = [{ color: parseInt(String(color ?? '#8fd16a').slice(1), 16) || 0x8fd16a, description: codeCoords(clean(text ?? '', 1900)),
           ...(as ? { author: { name: clean(as, 64) } } : {}), ...(link ? { url: link, title: 'See the map' } : {}), image: { url: `attachment://${name}` } }];
         payload.attachments = [{ id: 0, filename: name }];
         const form = new FormData();
@@ -280,6 +280,14 @@ export function createDiscord(opts = {}) {
     stop() { stopped = true; clearInterval(beat); try { ws?.close(1000); } catch { /* already closed */ } },
   };
 }
+
+/**
+ * Coordinates as code, so they stand out and copy cleanly (owner, 2026-10-27: "cordinats like `this`"): three numbers
+ * ("30, 5, -38"), or two or three in brackets ("(-45, -26)"), become `30, 5, -38`.
+ */
+export const codeCoords = (s) => String(s ?? '')
+  .replace(/\((-?\d{1,5}),\s*(-?\d{1,5})(?:,\s*(-?\d{1,5}))?\)/g, (_, a, b, c) => `\`${[a, b, c].filter((v) => v !== undefined).join(', ')}\``)
+  .replace(/(?<![\w.`-])(-?\d{1,5}),\s*(-?\d{1,5}),\s*(-?\d{1,5})(?![\w.`])/g, (_, a, b, c) => `\`${a}, ${b}, ${c}\``);
 
 /** One line of player text: no newlines, code or markdown links, bounded. */
 export const clean = (s, max) => String(s ?? '').replace(/[\r\n`|]+/g, ' ').replace(/\]\(/g, '] (').replace(/\s+/g, ' ')

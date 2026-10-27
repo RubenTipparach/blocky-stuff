@@ -523,16 +523,34 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     if (!deeds.length && !lines.length) return null;
     const did = deeds.map((d) => `${new Date(d.at).toISOString().slice(11, 16)} for ${d.who}: ${d.tool} ${d.input} -> ${d.result}`);
     const said = lines.map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.name}: ${c.text}`);
+    const finished = cast().flatMap((c) => (c.tasks ?? []).filter((t) => t.done && t.done >= since)
+      .map((t) => `${c.name} ${t.status === 'done' ? 'finished' : 'set aside'} a job for ${t.by}: ${t.goal}`));
+    // (owner, 2026-10-27: "Daily summary should look nice, with bullet points emojis. It should tell a story. Not be
+    // too distracting, and should be pleasant to read and well thought out and properly narrated with some light humor")
     const response = await call(s, `You are a character on a Luanti server.\n\n${characterSystem(teller, cast(), s)}`, null,
-      [{ role: 'user', content: `Here is the last day on the server.\n\nWhat the characters did in the world `
-        + `(${deeds.length}):\n${did.join('\n') || '(nothing)'}\n\nChat (${lines.length} lines):\n${said.join('\n') || '(none)'}\n\n`
-        + 'Write the daily summary for the server\'s Discord channel: what you and the others built and did, for whom '
-        + 'and where (coordinates help people find things), a line on what players got up to, and how you feel about '
-        + 'the day. Plain text, at most six short sentences, no markdown, in your own voice.' }]);
+      [{ role: 'user', content: `What happened on the server over the past 24 hours (the server carries on; this is an `
+        + `ordinary day, not an ending).\n\nWhat the characters did in the world (${deeds.length} actions):\n${did.join('\n') || '(nothing)'}\n\n`
+        + `Jobs finished or set aside:\n${finished.join('\n') || '(none)'}\n\nChat (${lines.length} lines):\n${said.join('\n') || '(none)'}\n\n`
+        + 'Write today\'s summary for the Discord channel, as the storyteller of this little world, in your own voice. Tell '
+        + 'it as a short story with light, warm humour, pleasant to read in a minute. Pick the highlights; do not list '
+        + 'everything. Give coordinates only for one or two places worth visiting. Name the players who took part.\n\n'
+        + 'Answer with only this JSON: {"title": a title for the day, at most 8 words; "opening": one or two sentences '
+        + 'setting the scene; "bullets": 4 to 6 items, each {"emoji": one emoji that fits it, "text": one sentence, at '
+        + 'most 140 characters}; "closing": one short sentence to end on}.' }]);
     if (response.stop_reason === 'refusal') return null;
-    const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ')
-      .replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim();
-    return text ? text.slice(0, 1500) : null;
+    const raw = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ');
+    const flat = (t, max) => String(t ?? '').replace(/[`#>]+/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+    try {
+      const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+      const bullets = (Array.isArray(j.bullets) ? j.bullets : []).slice(0, 6)
+        .map((b) => ({ emoji: flat(b?.emoji, 8) || '•', text: flat(b?.text, 160) })).filter((b) => b.text);
+      if (!j.title || !bullets.length) throw new Error('missing parts');
+      return { title: flat(j.title, 80), opening: flat(j.opening, 300), bullets, closing: flat(j.closing, 200), teller };
+    } catch {
+      // Not the JSON asked for: the words as they came, as one short story.
+      const text = flat(raw, 1200);
+      return text ? { title: 'Today in the world', opening: text, bullets: [], closing: '', teller } : null;
+    }
   }
 
   /**
