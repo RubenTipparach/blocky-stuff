@@ -9,7 +9,7 @@
 // (botSettings below lists them); the API key is the ANTHROPIC_API_KEY secret.
 
 import Anthropic from '@anthropic-ai/sdk';
-import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxNodes } from './tools.mjs';
+import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxCount } from './tools.mjs';
 import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, activeCast, characterSystem, characterContext, runCharacterTool,
   personId, characterPersonId, setState, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
 import { randomBytes } from 'node:crypto';
@@ -68,7 +68,7 @@ const TASK_TOOLS = [
 ];
 const TASK_DEFS = TASK_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
 const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
-const BUILDS = new Set(['fill_box', 'place_blocks', 'farm']);
+const BUILDS = new Set(['fill_box', 'place_blocks', 'farm', 'clear_area']);
 const TASK_ROUNDS_MAX = 60; // tool rounds one task may take in all, so a stuck one cannot run up the bill
 const NUDGES = 3; // times a turn is sent back to an open task before it goes on in the background
 
@@ -89,9 +89,9 @@ const REPLY_MAX = 450;
 // What a character answers to stay out of a conversation (only between characters, and on its own turns).
 const QUIET = 'QUIET';
 // What a character may use on its own: look, build, walk. Never anything done to a player.
-const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'fill_box', 'place_blocks', 'farm', 'harvest', 'walk_to']);
+const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'fill_box', 'place_blocks', 'clear_area', 'farm', 'harvest', 'walk_to']);
 // Most blocks one idle turn may place, all its tool calls together.
-export const IDLE_BLOCKS = 400;
+export const IDLE_BLOCKS = 20_000; // blocks a character may set in one turn of her own
 // A person keeps talking to the character they last talked with for this long, without naming it.
 const STICKY_MS = 15 * 60_000;
 // Characters answering characters: at most this many in a row, so two of them cannot talk forever.
@@ -516,6 +516,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       + 'player to build near if it is not clear), check the ground there with find_ground, then build with '
       + 'fill_box (floors, walls, roofs; hollow for rooms, air to cut doors and windows) and place_blocks for '
       + 'details. Build a few blocks away from players, never on top of them. Say what you built and where.\n'
+      + '- Big jobs are fine: fill_box sets up to 100,000 blocks at once, and clear_area takes the trees off an area or '
+      + 'levels it flat (up to about 316 by 316, without cutting into builds). Clear and level a site before a large '
+      + 'build instead of saying it cannot be done; for a huge area, work through it in parts.\n'
       + '- This game has farming (wheat and cotton): farm makes a sown field (with water channels), harvest gathers what '
       + 'is ripe and sows again. Crops take about half an hour to ripen.\n'
       + '- When someone asks you to do something in the world and you will do it, call start_task first (the goal, and how '
@@ -680,7 +683,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         const results = [];
         for (const use of uses) {
           let r;
-          const size = use.name === 'fill_box' ? (boxNodes(use.input ?? {})?.length ?? Infinity)
+          const size = use.name === 'fill_box' ? boxCount(use.input ?? {})
             : use.name === 'place_blocks' ? (use.input?.blocks?.length ?? 0) : 0;
           if (CHARACTER_TOOL_NAMES.has(use.name) && use.name !== 'pressed') r = runCharacterTool(db, ch, use.name, use.input, turn, now());
           else if (use.name === 'prank' && s.pranks) r = await prank(ch, use.input, null, s);

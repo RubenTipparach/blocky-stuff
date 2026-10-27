@@ -184,6 +184,170 @@ function actions.ground(a)
 	return true, core.write_json(found)
 end
 
+-- ---- Big work: boxes, clearing, levelling (owner, 2026-10-27: "characters need tools to clear stuff") ----
+-- One VoxelManip read and write each, so a big job is quick and never stalls the server.
+
+-- (owner, 2026-10-27: "expand it to something like 100,000")
+local BOX_MAX = 100000
+local CLEAR_COLUMNS, CLEAR_HIGH, LEVEL_DEPTH = 100000, 140, 16
+
+local function vm_box(p1, p2)
+	local vm = core.get_voxel_manip()
+	local emin, emax = vm:read_from_map(p1, p2)
+	return vm, VoxelArea:new({ MinEdge = emin, MaxEdge = emax }), vm:get_data()
+end
+
+local function finish(vm, data)
+	vm:set_data(data)
+	vm:write_to_map(true)
+	vm:update_liquids()
+end
+
+-- A box of one block (air empties it), solid or a hollow shell.
+function actions.box(a)
+	local item = a.item
+	if item ~= "air" and not core.registered_nodes[item] then return false, tostring(item) .. " is not a block that can be placed." end
+	if not (in_world(a.x1, a.y1, a.z1) and in_world(a.x2, a.y2, a.z2)) then return false, "The box is outside the world." end
+	local p1 = vector.new(math.min(a.x1, a.x2), math.min(a.y1, a.y2), math.min(a.z1, a.z2))
+	local p2 = vector.new(math.max(a.x1, a.x2), math.max(a.y1, a.y2), math.max(a.z1, a.z2))
+	local n = (p2.x - p1.x + 1) * (p2.y - p1.y + 1) * (p2.z - p1.z + 1)
+	if n > BOX_MAX then return false, "At most " .. BOX_MAX .. " blocks in one box: build it in parts." end
+	if core.is_area_protected(p1, p2, "", 4) then return false, "Part of that box is protected." end
+	local vm, area, data = vm_box(p1, p2)
+	local c = core.get_content_id(item)
+	local count = 0
+	for z = p1.z, p2.z do for y = p1.y, p2.y do for x = p1.x, p2.x do
+		if not a.hollow or x == p1.x or x == p2.x or y == p1.y or y == p2.y or z == p1.z or z == p2.z then
+			data[area:index(x, y, z)] = c
+			count = count + 1
+		end
+	end end end
+	finish(vm, data)
+	return true, (item == "air" and "Emptied " or "Placed ") .. count .. " blocks."
+end
+
+-- Trees, leaves, grass, flowers, bushes, cactus, papyrus, snow cover: what grows, which clearing takes away.
+local growth = {}
+local function grows(c)
+	if growth[c] == nil then
+		local name = core.get_name_from_content_id(c)
+		local def = core.registered_nodes[name] or {}
+		local g = function(k) return core.get_item_group(name, k) > 0 end
+		growth[c] = g("tree") or g("leaves") or g("leafdecay") or g("flora") or g("sapling") or g("grass")
+			or g("dry_grass") or g("plant") or name == "default:snow" or name == "default:cactus"
+			or name == "default:papyrus" or name:find("bush") ~= nil or def.drawtype == "plantlike"
+	end
+	return growth[c]
+end
+
+-- The world as it was made: rock, soil, sand, water and what grows. Levelling refuses to cut into anything else (a build).
+local natural = {}
+local function made_by_nature(c)
+	if natural[c] == nil then
+		local name = core.get_name_from_content_id(c)
+		natural[c] = grows(c) or name:find("^default:stone") ~= nil or name:find("^default:desert_stone") ~= nil
+			or name:find("^default:dirt") ~= nil or name:find("sand") ~= nil or name:find("^default:gravel") ~= nil
+			or name:find("^default:clay") ~= nil or name:find("^default:snow") ~= nil or name:find("ice$") ~= nil
+			or name:find("^default:permafrost") ~= nil or name:find("water") ~= nil or name:find("lava") ~= nil
+			or name:find("^default:mossycobble") ~= nil or name:find("^default:dry_dirt") ~= nil
+	end
+	return natural[c]
+end
+
+-- One part of a clearing (at most 64 by 64): mode "trees" takes away what grows; "level" makes it flat at y. With
+-- check, only says which built blocks levelling would cut into (nothing is changed).
+local function clear_part(x1, z1, x2, z2, a, check)
+	local level = a.mode == "level"
+	local y = tonumber(a.y)
+	local lo = level and y - LEVEL_DEPTH or (y and y - 12 or GROUND_BOTTOM)
+	local hi = level and y + 60 or math.min(lo + CLEAR_HIGH, y and y + 60 or GROUND_TOP)
+	local p1, p2 = vector.new(x1, lo, z1), vector.new(x2, hi, z2)
+	local vm, area, data = vm_box(p1, p2)
+	local AIR, IGNORE = core.CONTENT_AIR, core.CONTENT_IGNORE
+	if check then
+		local built = {}
+		for i in area:iterp(vector.new(x1, y + 1, z1), p2) do
+			local c = data[i]
+			if c ~= AIR and c ~= IGNORE and not made_by_nature(c) then built[core.get_name_from_content_id(c)] = true end
+		end
+		return built
+	end
+	local cut, filled = 0, 0
+	if not level then
+		for i in area:iterp(p1, p2) do
+			local c = data[i]
+			if c ~= AIR and c ~= IGNORE and grows(c) then data[i] = AIR; cut = cut + 1 end
+		end
+	else
+		local S = core.get_content_id(a.surface or "default:dirt_with_grass")
+		local F = core.get_content_id(a.fill or "default:dirt")
+		for z = z1, z2 do for x = x1, x2 do
+			for yy = y + 1, hi do
+				local i = area:index(x, yy, z)
+				if data[i] ~= AIR and data[i] ~= IGNORE then data[i] = AIR; cut = cut + 1 end
+			end
+			-- The top, and the gap under it down to the ground (or LEVEL_DEPTH).
+			for yy = y, lo, -1 do
+				local i = area:index(x, yy, z)
+				local c = data[i]
+				local solid = c ~= AIR and c ~= IGNORE and not grows(c) and core.get_name_from_content_id(c):find("water") == nil
+				if yy == y then data[i] = S; filled = filled + 1
+				elseif solid then break
+				else data[i] = F; filled = filled + 1 end
+			end
+		end end
+	end
+	finish(vm, data)
+	return cut, filled
+end
+
+-- mode "trees": take away what grows in the area, leaving the ground as it is. mode "level": make the ground flat at
+-- height y (everything above goes, gaps below fill with `fill` up to 16 deep, the top becomes `surface`), refusing
+-- if it would cut into a build. Up to CLEAR_COLUMNS columns, done 64 by 64, a part every server step, so the game
+-- never stalls: the first part now, the rest just after.
+local CLEAR_PART = 64
+function actions.clear(a)
+	if not (in_world(a.x1, 0, a.z1) and in_world(a.x2, 0, a.z2)) then return false, "The area is outside the world." end
+	local x1, x2, z1, z2 = math.min(a.x1, a.x2), math.max(a.x1, a.x2), math.min(a.z1, a.z2), math.max(a.z1, a.z2)
+	local cols = (x2 - x1 + 1) * (z2 - z1 + 1)
+	if cols > CLEAR_COLUMNS then return false, "At most " .. CLEAR_COLUMNS .. " columns at once (say 316 by 316)." end
+	local level = a.mode == "level"
+	local y = tonumber(a.y)
+	if level and not y then return false, "Say the height (y) to level the ground at." end
+	if level then
+		for _, name in ipairs({ a.surface or "default:dirt_with_grass", a.fill or "default:dirt" }) do
+			if not core.registered_nodes[name] then return false, name .. " is not a block." end
+		end
+	end
+	if core.is_area_protected(vector.new(x1, (y or 0) - 16, z1), vector.new(x2, (y or 0) + 60, z2), "", 8) then
+		return false, "Part of that area is protected."
+	end
+	local parts = {}
+	for px = x1, x2, CLEAR_PART do for pz = z1, z2, CLEAR_PART do
+		parts[#parts + 1] = { px, pz, math.min(px + CLEAR_PART - 1, x2), math.min(pz + CLEAR_PART - 1, z2) }
+	end end
+	if level then
+		local built, names = {}, {}
+		for _, p in ipairs(parts) do for k in pairs(clear_part(p[1], p[2], p[3], p[4], a, true)) do built[k] = true end end
+		for k in pairs(built) do names[#names + 1] = k end
+		if #names > 0 then
+			return false, "Levelling there would cut into a build (" .. table.concat(names, ", ", 1, math.min(#names, 5))
+				.. "). Pick another spot, or a height above it."
+		end
+	end
+	local cut, filled = clear_part(parts[1][1], parts[1][2], parts[1][3], parts[1][4], a)
+	local function next_part(k)
+		if not parts[k] then return end
+		local ok, err = pcall(clear_part, parts[k][1], parts[k][2], parts[k][3], parts[k][4], a)
+		if not ok then core.log("warning", "[ai_bot] clearing: " .. tostring(err)) end
+		core.after(0, next_part, k + 1)
+	end
+	core.after(0, next_part, 2)
+	local more = #parts > 1 and (" The other " .. (#parts - 1) .. " parts follow over the next few seconds; check with inspect_area after.") or ""
+	if not level then return true, "Clearing trees and plants from " .. cols .. " columns; the ground stays as it was." .. more end
+	return true, "Levelling " .. (x2 - x1 + 1) .. " by " .. (z2 - z1 + 1) .. " at y " .. y .. ". Build from y " .. (y + 1) .. "." .. more
+end
+
 -- ---- Farming (owner, 2026-10-27: "the bot is complaining that theres no farming mechanics", there is: wheat and cotton) ----
 
 local CROPS = { wheat = "farming:seed_wheat", cotton = "farming:seed_cotton" }
@@ -609,7 +773,7 @@ local function after(a)
 		core.after(0.5, function() face(id, a.player) end)
 	elseif a.type == "say" and a.near then
 		face(id, a.near)
-	elseif (a.type == "farm" or a.type == "harvest") and a.x1 then
+	elseif (a.type == "farm" or a.type == "harvest" or a.type == "clear" or a.type == "box") and a.x1 then
 		go(id, vector.new(a.x1, a.y or select(1, surface(a.x1, a.z1)) or 0, a.z1), "mine")
 	elseif a.type == "place" and type(a.nodes) == "table" and a.nodes[1] then
 		local n = a.nodes[1]

@@ -7,6 +7,8 @@
 export const DEFAULT_POLICY = { give: true, teleport: true, time: true, heal: true, build: false };
 // Most blocks one request may place.
 const BUILD_MAX = 2048;
+// Most blocks one fill_box may set (done in one go in the game; owner, 2026-10-27: "expand it to something like 100,000").
+const BOX_MAX = 100_000;
 
 const pos = { type: 'integer' };
 const player = { type: 'string', description: 'Player name, exactly as listed by list_players.' };
@@ -108,7 +110,8 @@ export const TOOLS = [
   {
     name: 'fill_box',
     permission: 'build',
-    description: `Fill the box between two corners with one block (air removes blocks), solid or as hollow walls. At most ${BUILD_MAX} blocks.`,
+    description: `Fill the box between two corners with one block (air removes blocks), solid or as hollow walls. At most ${BOX_MAX} blocks `
+      + '(say 46 by 46 by 46). To take away trees or flatten ground, use clear_area instead.',
     input_schema: {
       type: 'object',
       properties: {
@@ -119,10 +122,27 @@ export const TOOLS = [
       required: ['item', 'x1', 'y1', 'z1', 'x2', 'y2', 'z2'], additionalProperties: false,
     },
     run: ({ game }, b) => {
-      const nodes = boxNodes(b);
-      if (!nodes) return { ok: false, message: `That box is more than ${BUILD_MAX} blocks: build it in parts.` };
-      return game.act({ type: 'place', nodes });
+      if (boxCount(b) > BOX_MAX) return { ok: false, message: `That box is more than ${BOX_MAX} blocks: build it in parts.` };
+      return game.act({ type: 'box', item: b.item, x1: b.x1, y1: b.y1, z1: b.z1, x2: b.x2, y2: b.y2, z2: b.z2, hollow: b.hollow === true });
     },
+  },
+  {
+    name: 'clear_area',
+    permission: 'build',
+    description: 'Big groundwork, up to 100,000 columns at once (say 316 by 316). mode "trees": take away the trees, leaves, grass, '
+      + 'flowers, bushes and snow cover of an area, leaving the ground as it is (give y, about the ground there, if you '
+      + 'know it). mode "level": make the ground flat at height y: everything above it goes (hills are cut down), the '
+      + 'gaps below are filled (up to 16 deep), and the top becomes `surface` (default dirt with grass). Levelling '
+      + 'refuses to cut into any build. Then build from y + 1.',
+    input_schema: {
+      type: 'object',
+      properties: { x1: pos, z1: pos, x2: pos, z2: pos, mode: { type: 'string', enum: ['trees', 'level'] }, y: pos,
+        surface: { type: 'string', description: 'Top block for "level", e.g. default:dirt_with_grass, default:stone.' },
+        fill: { type: 'string', description: 'What fills gaps under it, e.g. default:dirt.' } },
+      required: ['x1', 'z1', 'x2', 'z2', 'mode'], additionalProperties: false,
+    },
+    run: ({ game }, c) => game.act({ type: 'clear', x1: c.x1, z1: c.z1, x2: c.x2, z2: c.z2, mode: c.mode,
+      ...(Number.isFinite(c.y) ? { y: c.y } : {}), ...(c.surface ? { surface: c.surface } : {}), ...(c.fill ? { fill: c.fill } : {}) }),
   },
   // Farming (Minetest Game's: wheat and cotton). Seeds set with place_blocks grow too, on wet soil near water.
   {
@@ -263,6 +283,12 @@ export function describeArea(scan, { ax, ay, az, bx, by, bz }) {
 }
 
 /** The blocks of a box, or null when there are too many. */
+/** How many blocks a fill_box sets. */
+export function boxCount({ x1, y1, z1, x2, y2, z2, hollow = false }) {
+  const [a, b, c] = [Math.abs(x2 - x1) + 1, Math.abs(y2 - y1) + 1, Math.abs(z2 - z1) + 1];
+  return hollow ? a * b * c - Math.max(0, a - 2) * Math.max(0, b - 2) * Math.max(0, c - 2) : a * b * c;
+}
+
 export function boxNodes({ item, x1, y1, z1, x2, y2, z2, hollow = false }) {
   const [ax, bx] = [Math.min(x1, x2), Math.max(x1, x2)];
   const [ay, by] = [Math.min(y1, y2), Math.max(y1, y2)];

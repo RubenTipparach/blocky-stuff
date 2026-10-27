@@ -395,7 +395,11 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   const chunkOf = (x, z) => `${Math.floor(x / ISO.C)},${Math.floor(z / ISO.C)}`;
   game.onAct?.((a) => {
     if (a.type === 'place') for (const n of a.nodes ?? []) dirty.add(chunkOf(n.x, n.z));
-    if (a.type === 'farm' || a.type === 'harvest') {
+    if (['farm', 'harvest', 'clear', 'box'].includes(a.type)) {
+      // Every chunk the area touches.
+      for (let x = Math.min(a.x1, a.x2); x <= Math.max(a.x1, a.x2) + ISO.C - 1; x += ISO.C) {
+        for (let z = Math.min(a.z1, a.z2); z <= Math.max(a.z1, a.z2) + ISO.C - 1; z += ISO.C) dirty.add(chunkOf(Math.min(x, Math.max(a.x1, a.x2)), Math.min(z, Math.max(a.z1, a.z2))));
+      }
       for (const [x, z] of [[a.x1, a.z1], [a.x2, a.z2], [a.x1, a.z2], [a.x2, a.z1]]) dirty.add(chunkOf(x, z));
     }
   });

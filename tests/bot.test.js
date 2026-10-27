@@ -178,7 +178,7 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
 });
 
 test('an idle turn builds within its limits, says what it is up to, and is kept as its own idea', async () => {
-  const big = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 9, y2: 9, z2: 9 }; // 1000 blocks
+  const big = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 29, y2: 29, z2: 29 }; // 27000 blocks
   const small = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 1, y2: 1, z2: 1 };
   const { db, game, bot, client } = setup([
     () => ({ stop_reason: 'tool_use', usage: {}, content: [
@@ -193,11 +193,11 @@ test('an idle turn builds within its limits, says what it is up to, and is kept 
   await new Promise((r) => setTimeout(r, 10));
   const { actions } = game.sync({});
   assert.equal(actions.length, 1);
-  assert.equal(actions[0].nodes.length, 8);
+  assert.deepEqual([actions[0].type, actions[0].x2 - actions[0].x1 + 1], ['box', 2]);
   game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Placed 8 blocks.' }] });
   assert.equal(await turn, 'Building a little wooden cube!');
   const firstResults = client.calls[1].messages[2].content;
-  assert.match(firstResults[0].content, /400 blocks/);
+  assert.match(firstResults[0].content, /20000 blocks/);
   assert.match(firstResults[1].content, /not for your own turns/);
   assert.equal(db.deeds(0)[0].who, 'Blocky (own idea)');
   assert.deepEqual(said, ['Building a little wooden cube!']);

@@ -22,6 +22,8 @@ export const ACTIONS = {
   ground: ['columns'],
   scan: ['x1', 'z1', 'w', 'd'],
   farm: ['x1', 'z1', 'x2', 'z2', 'crop?', 'water?'],
+  box: ['item', 'x1', 'y1', 'z1', 'x2', 'y2', 'z2', 'hollow?'],
+  clear: ['x1', 'z1', 'x2', 'z2', 'mode', 'y?', 'surface?', 'fill?'],
   harvest: ['x1', 'z1', 'x2', 'z2', 'y', 'player?'],
   walk: ['x', 'y', 'z'],
   follow: ['player'],

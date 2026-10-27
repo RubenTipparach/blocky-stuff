@@ -109,3 +109,20 @@ test('farm and harvest go to the mod as actions, for those who may build', async
   game.sync({ results: [{ id: harvest.id, ok: true, message: 'Harvested 48.' }] });
   await reaping;
 });
+
+test('fill_box goes as one box action (up to 100,000 blocks), and clear_area clears or levels big ground', async () => {
+  const game = createGame();
+  game.sync({ players: [alice] });
+  const ctx = { game, asker: { name: 'Boss', admin: true }, policy: DEFAULT_POLICY };
+  assert.equal((await runTool('fill_box', { item: 'default:stone', x1: 0, y1: 0, z1: 0, x2: 100, y2: 100, z2: 100 }, ctx)).ok, false);
+  const filling = runTool('fill_box', { item: 'default:stone', x1: 0, y1: 0, z1: 0, x2: 39, y2: 39, z2: 39, hollow: true }, ctx);
+  const [box] = game.sync({}).actions;
+  assert.deepEqual([box.type, box.hollow, checkAction(box)], ['box', true, null]);
+  game.sync({ results: [{ id: box.id, ok: true, message: 'Placed 9128 blocks.' }] });
+  await filling;
+  const levelling = runTool('clear_area', { x1: 0, z1: 0, x2: 99, z2: 99, mode: 'level', y: 12 }, ctx);
+  const [clear] = game.sync({}).actions;
+  assert.deepEqual([clear.type, clear.mode, clear.y, checkAction(clear)], ['clear', 'level', 12, null]);
+  game.sync({ results: [{ id: clear.id, ok: true, message: 'Levelling 100 by 100 at y 12.' }] });
+  await levelling;
+});
