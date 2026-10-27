@@ -36,6 +36,19 @@ export const ADMIN_PAGE = `<!doctype html>
   th { color: var(--muted); font-weight: 600; }
   .scroll { overflow-x: auto; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  /* Activity: a feed of cards that reads well on a phone (owner, 2026-10-27: "It's hard to read on phone"). */
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; }
+  .chips button { background: #182015; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; min-height: 32px; padding: 4px 12px; font-size: 14px; }
+  .chips button.on { background: var(--accent); color: #12150f; border-color: var(--accent); }
+  .feed { display: flex; flex-direction: column; gap: 8px; }
+  .card { background: #1b2118; border: 1px solid var(--line); border-left: 4px solid var(--who, var(--line)); border-radius: 10px; padding: 10px 12px; }
+  .card .top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 14px; }
+  .card .name { font-weight: 700; color: var(--who, var(--text)); }
+  .card .when { margin-left: auto; color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: #2b3527; white-space: nowrap; }
+  .card .heard { color: var(--muted); font-size: 14px; margin-top: 6px; overflow-wrap: anywhere; }
+  .card .said { margin-top: 6px; line-height: 1.45; overflow-wrap: anywhere; }
+  .card .said.reply { border-left: 2px solid var(--line); padding-left: 10px; }
   .row > input { flex: 1 1 200px; width: auto; }
   dl.status { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0; }
   dl.status dt { color: var(--muted); } dl.status dd { margin: 0; overflow-wrap: anywhere; }
@@ -130,6 +143,41 @@ const agoOf = (t) => { const m = Math.round((Date.now() - t) / 60000); return m 
 // The Relationships tab: the character's pills, then a card per person she knows, meters as sliders. Drawn when
 // asked (tab opened, character picked, after a save), and by the refresh only while no card has unsaved changes and
 // nothing in it has focus, so a slider being dragged or a picker being opened is never wiped.
+// ---- Activity feed ----
+// Each event as a card: what happened (a badge), whose it is (her colour), from whom, when; what was heard above what
+// was said. A filter row on top, remembered on this device.
+const KIND = { answered: ['💬 answered', 'ok', 'talk'], quiet: ['🤐 stayed quiet', 'muted', 'talk'], skipped: ['⏭ skipped', 'muted', 'skipped'],
+  ignored: ['🚫 ignored', 'warn', 'skipped'], limited: ['⏳ limited', 'warn', 'problems'], error: ['⚠️ error', 'bad', 'problems'],
+  'own turn': ['🔨 own turn', 'muted', 'work'], task: ['📋 task', 'ok', 'work'], prank: ['😈 prank', 'warn', 'work'] };
+let feedFilter = 'all';
+try { feedFilter = localStorage.getItem('feedFilter') || 'all'; } catch { /* no storage */ }
+function renderFeed() {
+  const st = state;
+  if (!st || !st.activity) return;
+  for (const b of document.querySelectorAll('#feedFilter button')) b.classList.toggle('on', b.dataset.feed === feedFilter);
+  const colour = Object.fromEntries((st.characters || []).map((c) => [c.name, c.chatColor]));
+  const shown = st.activity.filter((e) => feedFilter === 'all' || (KIND[e.kind] || [])[2] === feedFilter);
+  $('activity').innerHTML = shown.length ? shown.map((e) => {
+    const [label, tone] = KIND[e.kind] || [e.kind, ''];
+    const cut = String(e.text || '').indexOf(' -> ');
+    const heard = cut >= 0 ? e.text.slice(0, cut) : (e.kind === 'own turn' || e.kind === 'task' ? '' : e.text);
+    const said = cut >= 0 ? e.text.slice(cut + 4) : (heard ? '' : e.text);
+    return '<div class="card"' + (colour[e.character] ? ' style="--who:' + esc(colour[e.character]) + '"' : '') + '><div class="top">'
+      + '<span class="pill ' + tone + '">' + esc(label) + '</span>'
+      + (e.character ? '<span class="name">' + esc(e.character) + '</span>' : '')
+      + (e.who ? '<span class="muted">' + (e.character ? 'with ' : 'from ') + esc(e.who) + '</span>' : '')
+      + '<span class="when">' + clock(e.at) + '</span></div>'
+      + (heard ? '<div class="heard">' + esc(heard) + '</div>' : '')
+      + (said ? '<div class="said' + (heard ? ' reply' : '') + '">' + esc(said) + '</div>' : '') + '</div>';
+  }).join('') : '<p class="muted">Nothing here yet.</p>';
+}
+document.addEventListener('click', (ev) => {
+  const b = ev.target.closest && ev.target.closest('#feedFilter button');
+  if (!b) return;
+  feedFilter = b.dataset.feed;
+  try { localStorage.setItem('feedFilter', feedFilter); } catch { /* no storage */ }
+  renderFeed();
+});
 function renderRelationships(force) {
   if (!state || !$('rel')) return;
   const box = $('rel');
@@ -351,8 +399,10 @@ function build() {
 <div class="tab" data-panel="activity">
 <section><h2>Activity</h2>
   <p class="muted note">What the characters heard and did lately, newest first: who answered, who stayed quiet and why, their own turns, errors.</p>
-  <div class="scroll"><table><thead><tr><th>When</th><th>What</th><th>Who</th><th>From</th><th></th></tr></thead>
-  <tbody id="activity"></tbody></table></div></section>
+  <div class="chips" id="feedFilter">
+    <button data-feed="all" class="on">All</button><button data-feed="talk">💬 Talk</button><button data-feed="work">🔨 Work</button>
+    <button data-feed="skipped">⏭ Skipped</button><button data-feed="problems">⚠️ Problems</button></div>
+  <div id="activity" class="feed"></div></section>
 <section style="margin-top:14px"><h2>Luanti log</h2><pre id="log"></pre></section>
 </div>\`;
   // Tabs: the last one open is remembered on this device.
@@ -601,10 +651,7 @@ function refresh() {
   if (me) $('moodLine').textContent = 'Mood: ' + me.mood.label + (me.mood.reason ? ' (' + me.mood.reason + ')' : '')
     + (me.project ? ' · Project: ' + me.project.title + ' at ' + me.project.site.x + ', ' + me.project.site.y + ', ' + me.project.site.z
       + ' (' + me.project.done + ' of ' + me.project.steps.length + ' steps)' : me.goal ? ' · Working on: ' + me.goal : '');
-  const kinds = { answered: 'ok', quiet: 'muted', skipped: 'muted', ignored: 'warn', limited: 'warn', error: 'bad', 'own turn': 'muted', prank: 'warn' };
-  $('activity').innerHTML = (st.activity || []).length ? st.activity.map((e) => '<tr><td class="muted">' + clock(e.at) + '</td><td class="'
-    + (kinds[e.kind] || '') + '">' + esc(e.kind) + '</td><td>' + esc(e.character || '') + '</td><td>' + esc(e.who || '') + '</td><td>'
-    + esc(e.text) + '</td></tr>').join('') : '<tr><td colspan="5" class="muted">Nothing yet.</td></tr>';
+  renderFeed();
   const ago = agoOf;
   renderRelationships(false);
   renderPlayers(false);

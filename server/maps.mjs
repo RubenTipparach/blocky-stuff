@@ -581,6 +581,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
 <title>Blocky Stuff map</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <style>
+  .copy { margin-left: 6px; font: inherit; font-size: 13px; padding: 3px 10px; border-radius: 999px; border: 0; background: #2f6d3a; color: #fff; cursor: pointer; }
 :root { color-scheme: dark; --bg: #12150f; --panel: #1b2217; --line: #344030; --text: #f4f7ef; --muted: #a9b89a; --accent: #8fd16a; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
 main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
@@ -621,6 +622,24 @@ ${view === 'iso' ? `<div class="cut"><label class="tog"><input type="checkbox" i
 <div class="grid">${cards || '<p>No pictures yet: they come once a character is in the world.</p>'}</div></main>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
+// Copy a spot's coordinates from its popup (owner, 2026-10-27: "Would be nice to just hit copy on the location popup").
+function copyButton(text) { return '<button class="copy" data-copy="' + text + '">Copy</button>'; }
+document.addEventListener('click', async (ev) => {
+  const b = ev.target.closest && ev.target.closest('button.copy');
+  if (!b) return;
+  ev.stopPropagation();
+  const text = b.dataset.copy;
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const t = document.createElement('textarea');
+    t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
+    document.body.appendChild(t); t.select();
+    try { document.execCommand('copy'); } catch { /* nothing more to try */ }
+    t.remove();
+  }
+  b.textContent = 'Copied!';
+  setTimeout(() => { b.textContent = 'Copy'; }, 1500);
+}, true);
 ${view === 'iso' ? isoScript(first) : flatScript(first)}
 </script></body></html>`;
   }
@@ -639,7 +658,8 @@ ${markersScript()}
 const Coords = L.Control.extend({ onAdd() { this.el = L.DomUtil.create('div', 'coords'); this.el.textContent = 'x, z'; return this.el; } });
 const coords = new Coords({ position: 'bottomleft' }).addTo(map);
 map.on('mousemove', (e) => { coords.el.textContent = 'x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat); });
-map.on('click', (e) => { L.popup().setLatLng(e.latlng).setContent('x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat)).openOn(map); });`;
+map.on('click', (e) => { const x = Math.floor(e.latlng.lng), z = Math.floor(e.latlng.lat);
+  L.popup().setLatLng(e.latlng).setContent('x ' + x + ', z ' + z + ' ' + copyButton(x + ', ' + z)).openOn(map); });`;
 }
 
 // The isometric map's script. The page draws the map itself (owner, 2026-10-27: "ship renderer on front end"): it
@@ -824,7 +844,8 @@ map.on('click', (e) => {
     const x = Math.round((u + v) / 2), z = Math.round((v - u) / 2);
     const name = blockAt(x, y, z);
     if (name) {
-      L.popup({ className: 'where' }).setLatLng(e.latlng).setContent('x ' + x + ', y ' + y + ', z ' + z + '<br><small>' + name + '</small>').openOn(map);
+      L.popup({ className: 'where' }).setLatLng(e.latlng).setContent('x ' + x + ', y ' + y + ', z ' + z + ' ' + copyButton(x + ', ' + y + ', ' + z)
+        + '<br><small>' + name + '</small>').openOn(map);
       return;
     }
   }
