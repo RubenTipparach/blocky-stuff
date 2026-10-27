@@ -6,7 +6,8 @@ import { makeApp } from '../server/app.mjs';
 import { sign } from '../server/tokens.mjs';
 import { createDiscord } from '../server/discord.mjs';
 import { managedConfig } from '../server/luanti.mjs';
-import { storeMcpToken } from '../server/mcp.mjs';
+import { storeMcpToken, mcpCall } from '../server/mcp.mjs';
+import { cast } from '../server/character.mjs';
 
 const quiet = { log() {}, error() {} };
 
@@ -51,8 +52,15 @@ test('the bridge takes the mod\'s key only, and relays chat to Discord', async (
   assert.deepEqual(r.json.characters.map((c) => c.name), ['Blocky', 'Moss']);
   assert.ok(s.db.chat(5).some((c) => c.source === 'game' && c.text === 'hello'));
   await new Promise((done) => setTimeout(done, 20));
+  // A player's line goes as a small embed: their name over a stripe of their own colour.
   assert.equal(s.posts[0].body.username, 'alice');
-  assert.equal(s.posts[0].body.content, 'hello');
+  assert.equal(s.posts[0].body.embeds[0].author.name, 'alice');
+  assert.equal(s.posts[0].body.embeds[0].description, 'hello');
+  const first = s.posts[0].body.embeds[0].color;
+  assert.equal(first, parseInt(s.db.colorOf('game:alice').slice(1), 16));
+  // The same person keeps the same colour; an admin's pick wins.
+  s.db.setColor('game:alice', '#123456');
+  assert.equal(s.db.colorOf('game:alice'), '#123456');
   await s.close();
 });
 
@@ -160,23 +168,27 @@ test('the bot answers any chat by default, and its body walks to whoever it answ
   assert.deepEqual([actions[0].type, actions[0].near, actions[0].text], ['say', 'alice', 'Hi there!']);
 });
 
-test('!link in game whispers a code; !link <code> in Discord joins the two people', async () => {
+test('/link in the game whispers a code; /link with it in Discord joins the two people', async () => {
   const config = loadConfig({ PUBLIC_URL: 'http://localhost', ANTHROPIC_API_KEY: '' });
   const db = openDb(':memory:');
-  const posts = [];
-  const discord = { post: async (m) => { posts.push(m); return { ok: true }; }, news: async () => ({}), mode: null,
+  const discord = { post: async () => ({ ok: true }), news: async () => ({}), mode: null,
     channelIds: [], setChannels: () => true, start() {}, stop() {} };
   const bot = { ready: true, hear: async () => null };
   const server = makeApp({ config, db, bridgeKey: 'key', discord, bot, log: quiet });
   server.game.sync({ players: [{ name: 'Ruben', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
-  const { actions } = server.game.sync({ events: [{ type: 'chat', name: 'Ruben', text: '!link' }] });
+  // The mod sends a linkcode event for /link in the game.
+  const { actions } = server.game.sync({ events: [{ type: 'linkcode', name: 'Ruben' }] });
   assert.equal(actions[0].to, 'Ruben');
-  const code = /!link (\w{6})/.exec(actions[0].text)[1];
+  const code = /\/link code:(\w{6})/.exec(actions[0].text)[1];
   assert.equal(db.chat(5).length, 0); // the code is never in the public log
-  server.discord.post({ text: 'x' });
-  await server.fromDiscord({ channelId: '1', userId: '42', name: 'PscifieX', text: `!link ${code.toLowerCase()}` });
-  assert.match(posts.at(-1).text, /one and the same/);
+  const replies = [];
+  await server.slash({ name: 'link', options: { code: code.toLowerCase() }, userId: '42', userName: 'PscifieX',
+    reply: async (t, o) => replies.push([t, o]) });
+  assert.match(replies[0][0], /one and the same/);
+  assert.equal(replies[0][1].ephemeral, true);
   assert.equal(db.person('discord:42').id, 'game:ruben');
+  await server.slash({ name: 'link', options: { code: 'ZZZZZZ' }, userId: '43', userName: 'x', reply: async (t) => replies.push([t]) });
+  assert.match(replies[1][0], /not one I gave out/);
 });
 
 test('an admin can link two people on the admin page', async () => {
@@ -207,4 +219,134 @@ test('characters are renamed, added and removed on the admin page; the last one 
   assert.equal((await post({ id: 'blocky', remove: true })).status, 400);
   assert.equal((await post({ id: '', name: '!' })).status, 400);
   await s.close();
+});
+
+test('an admin can link a Discord user to a game name typed in, before that player has joined', async () => {
+  const s = await start();
+  s.db.meet('discord:77', 'SudoStonk');
+  const r = await s.call('/api/admin/link', { method: 'POST', headers: s.as('111'), body: { keep: 'discord:77', gameName: 'sudo' } });
+  assert.equal(r.status, 200);
+  assert.equal(s.db.person('game:sudo').id, 'discord:77');
+  await s.close();
+});
+
+test('every game server account is listed, saying who on Discord it is linked to', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { mkdtempSync, mkdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dataDir = mkdtempSync(join(tmpdir(), 'blocky-auth-'));
+  mkdirSync(join(dataDir, 'world'));
+  const auth = new DatabaseSync(join(dataDir, 'world', 'auth.sqlite'));
+  auth.exec("CREATE TABLE auth (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, password TEXT NOT NULL, last_login INTEGER NOT NULL DEFAULT 0)");
+  for (const [n, t] of [['ruben', 200], ['sudo', 100], ['alice', 50]]) auth.prepare("INSERT INTO auth (name, password, last_login) VALUES (?, 'secret', ?)").run(n, t);
+  auth.close();
+  const s = await start({ DATA_DIR: dataDir });
+  s.db.meet('game:ruben', 'ruben');
+  s.db.meet('discord:42', 'PscifieX');
+  s.db.link('discord:42', 'game:ruben');
+  const r = await s.call('/api/admin', { headers: s.as('111') });
+  assert.deepEqual(r.json.gameAccounts.map((a) => [a.name, a.linkedTo]), [['ruben', 'PscifieX'], ['sudo', null], ['alice', null]]);
+  assert.ok(!JSON.stringify(r.json.gameAccounts).includes('secret'));
+  await s.close();
+});
+
+test('asleep once nobody has been around for the delay; switching sleep off, or a word on Discord, wakes them', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', ADMIN_DISCORD_ID: '111', ANTHROPIC_API_KEY: '' });
+  const db = openDb(':memory:');
+  db.putSetting('activity.last', '1'); // the last word from a player: long ago
+  let turns = 0;
+  const bot = { ready: true, hear: async () => null, idle: async () => { turns++; return null; } };
+  const discord = createDiscord({ log: quiet });
+  const server = makeApp({ config, db, bridgeKey: 'key', discord, bot, log: quiet });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const as = { authorization: `Bearer ${sign({ kind: 'session', sub: '111', name: 'n' }, db.secret('session'))}`, 'content-type': 'application/json' };
+  try {
+    const sync = async () => (await fetch(`${base}/bridge/sync`, { method: 'POST', headers: { 'x-bridge-key': 'key' },
+      body: JSON.stringify({ players: [] }) })).json();
+    db.putJson('bot', { sleep: true }); // off by default; on here
+    await sync();
+    await server.idleTick();
+    assert.equal(turns, 0); // asleep: nobody in the game
+    assert.equal((await sync()).characters.every((c) => c.asleep), true);
+    await fetch(`${base}/api/admin/bot`, { method: 'POST', headers: as, body: JSON.stringify({ sleep: false }) });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(turns, 1); // woken at once
+    assert.equal((await sync()).characters.some((c) => c.asleep), false);
+    // Sleep on again, with the default hour: a player's word on Discord keeps them up.
+    await fetch(`${base}/api/admin/bot`, { method: 'POST', headers: as, body: JSON.stringify({ sleep: true }) });
+    assert.equal((await sync()).characters.every((c) => c.asleep), true);
+    server.fromDiscord({ name: 'ruben', text: 'evening all' });
+    assert.equal((await sync()).characters.some((c) => c.asleep), false);
+    await fetch(`${base}/api/admin/bot`, { method: 'POST', headers: as, body: JSON.stringify({ sleepAfter: 1 }) });
+    assert.equal(db.json('bot', {}).sleepAfter, 5); // at least 5 minutes
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('/help is a guide: how to join, the characters, every command, seen only by the asker', async () => {
+  const s = await start({ GAME_ADDRESS: '1.2.3.4' });
+  const replies = [];
+  await s.server.slash({ name: 'help', options: {}, userId: '42', userName: 'x', reply: async (t, o) => replies.push(o) });
+  const { embed, ephemeral } = replies[0];
+  assert.equal(ephemeral, true);
+  const text = JSON.stringify(embed);
+  for (const want of ['luanti.org', '1.2.3.4', '30000', 'Blocky', 'Moss', '/picture', '/link', '/talk', '/rel', '/map']) assert.ok(text.includes(want), want);
+  await s.close();
+});
+
+test('Discord: plain messages are heard, and on reconnecting the bot catches up on what was said while it was down', async () => {
+  const CH = '1553044846057361581';
+  class FakeWS { constructor() { FakeWS.last = this; setTimeout(() => this.emit({ op: 10, d: { heartbeat_interval: 40000 } }), 2); }
+    emit(m) { this.onmessage?.({ data: JSON.stringify(m) }); } send() {} close() {} }
+  const seen = new Map([[CH, '100']]);
+  const heard = [];
+  const t0 = Date.parse('2026-10-27T08:20:00Z');
+  const d = createDiscord({ token: 'T', channelIds: [CH], log: quiet, WebSocketImpl: FakeWS, onMessage: (m) => heard.push(m.text), now: () => t0,
+    lastSeen: { get: (c) => seen.get(c), set: (c, id) => seen.set(c, id) },
+    fetchImpl: async (url) => ({ ok: true, status: 200, json: async () => (String(url).includes(`/channels/${CH}/messages?after=100`)
+      // Newest first, as Discord sends them: one from during the restart, one from long ago.
+      ? [{ id: '102', author: { id: '42', username: 'r' }, content: 'are you there?', timestamp: '2026-10-27T08:19:30Z' },
+        { id: '101', author: { id: '42', username: 'r' }, content: 'old news', timestamp: '2026-10-27T07:00:00Z' }]
+      : String(url).includes('/gateway/bot') ? { url: 'wss://x' } : []) }) });
+  d.start();
+  await new Promise((r) => setTimeout(r, 20));
+  FakeWS.last.emit({ op: 0, s: 1, t: 'READY', d: { user: { id: '999', username: 'luni-bot' }, guilds: [] } });
+  await new Promise((r) => setTimeout(r, 20));
+  FakeWS.last.emit({ op: 0, s: 2, t: 'MESSAGE_CREATE', d: { id: '103', channel_id: CH, author: { id: '42', username: 'r' }, content: 'Test. can you guys hear me?' } });
+  d.stop();
+  assert.deepEqual(heard, ['are you there?', 'Test. can you guys hear me?']);
+  assert.equal(seen.get(CH), '103');
+});
+
+test('once, an old "mentions only" setting becomes "every message"; after that the admin\'s choice stands', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost' });
+  const db = openDb(':memory:');
+  db.putJson('bot', { listen: 'mentions', cooldown: 5 });
+  makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
+  assert.deepEqual(db.json('bot', {}), { listen: 'all', cooldown: 5 });
+  db.putJson('bot', { listen: 'mentions' });
+  makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
+  assert.equal(db.json('bot', {}).listen, 'mentions');
+});
+
+test('activity is kept and pages back; MCP tools search it, the chat and a character', async () => {
+  const db = openDb(':memory:');
+  for (let i = 0; i < 120; i++) db.addActivity({ at: 1000 + i, kind: i % 3 ? 'answered' : 'skipped', character: i % 2 ? 'Moss' : 'Blocky', who: 'ruben', text: `"line ${i}" -> ok` });
+  const first = db.activity({ limit: 40 });
+  assert.equal(first[0].text, '"line 119" -> ok');
+  const next = db.activity({ before: first.at(-1).id, limit: 40 });
+  assert.equal(next[0].id, first.at(-1).id - 1);
+  assert.equal(db.activity({ kinds: ['skipped'], limit: 500 }).length, 40);
+  db.addChat('discord', 'ruben', 'Moss can you clear the pines?', 5);
+  db.addChat('bot', 'Moss', 'No axe, sorry.', 6);
+  const call = (name, args = {}) => mcpCall({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, { db, game: null });
+  assert.match((await call('search_chat', { words: 'clear pines' })).result.content[0].text, /Moss can you clear/);
+  assert.match((await call('activity_log', { kind: 'skipped', limit: 2 })).result.content[0].text, /\[skipped\]/);
+  const summary = JSON.parse((await call('activity_summary', { hours: 720 })).result.content[0].text);
+  assert.ok(summary.hours === 720 && 'characters' in summary);
+  cast(db);
+  assert.match((await call('character_state', { name: 'moss' })).result.content[0].text, /"name": "Moss"/);
 });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGame, checkAction } from '../server/game.mjs';
-import { toolsFor, runTool, boxNodes, DEFAULT_POLICY } from '../server/tools.mjs';
+import { toolsFor, runTool, boxNodes, roofNodes, DEFAULT_POLICY } from '../server/tools.mjs';
 
 const alice = { name: 'alice', pos: { x: 1.4, y: 2.6, z: -3 }, hp: 20, privs: ['interact', 'shout'] };
 const boss = { name: 'Boss', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: ['server'] };
@@ -90,4 +90,52 @@ test('a character follows, comes to and stays for players who ask, each only for
   assert.deepEqual(actions.map((a) => [a.type, a.by]), [['follow', 'moss'], ['stay', 'moss'], ['come', 'moss']]);
   game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: 'ok' })) });
   assert.ok((await Promise.all(pending)).every((r) => r.ok));
+});
+
+test('farm and harvest go to the mod as actions, for those who may build', async () => {
+  const game = createGame();
+  game.sync({ players: [alice] });
+  assert.ok(toolsFor({ name: 'alice', admin: false }, { ...DEFAULT_POLICY, build: true }).some((t) => t.name === 'farm'));
+  assert.ok(!toolsFor({ name: 'alice', admin: false }, DEFAULT_POLICY).some((t) => t.name === 'farm'));
+  const sowing = runTool('farm', { x1: 0, z1: 0, x2: 8, z2: 5 }, { game, asker: { name: 'Boss', admin: true }, policy: DEFAULT_POLICY });
+  const [farm] = game.sync({}).actions;
+  assert.deepEqual({ ...farm, id: undefined }, { id: undefined, type: 'farm', x1: 0, z1: 0, x2: 8, z2: 5, crop: 'wheat', water: true });
+  game.sync({ results: [{ id: farm.id, ok: true, message: 'Tilled 54, sowed 48 wheat.' }] });
+  assert.equal((await sowing).ok, true);
+  const reaping = runTool('harvest', { x1: 0, z1: 0, x2: 8, z2: 5, y: 3, player: 'alice' }, { game, asker: { name: 'Boss', admin: true }, policy: DEFAULT_POLICY });
+  const [harvest] = game.sync({}).actions;
+  assert.equal(checkAction(harvest), null);
+  assert.equal(harvest.player, 'alice');
+  game.sync({ results: [{ id: harvest.id, ok: true, message: 'Harvested 48.' }] });
+  await reaping;
+});
+
+test('fill_box goes as one box action (up to 100,000 blocks), and clear_area clears or levels big ground', async () => {
+  const game = createGame();
+  game.sync({ players: [alice] });
+  const ctx = { game, asker: { name: 'Boss', admin: true }, policy: DEFAULT_POLICY };
+  assert.equal((await runTool('fill_box', { item: 'default:stone', x1: 0, y1: 0, z1: 0, x2: 100, y2: 100, z2: 100 }, ctx)).ok, false);
+  const filling = runTool('fill_box', { item: 'default:stone', x1: 0, y1: 0, z1: 0, x2: 39, y2: 39, z2: 39, hollow: true }, ctx);
+  const [box] = game.sync({}).actions;
+  assert.deepEqual([box.type, box.hollow, checkAction(box)], ['box', true, null]);
+  game.sync({ results: [{ id: box.id, ok: true, message: 'Placed 9128 blocks.' }] });
+  await filling;
+  const levelling = runTool('clear_area', { x1: 0, z1: 0, x2: 99, z2: 99, mode: 'level', y: 12 }, ctx);
+  const [clear] = game.sync({}).actions;
+  assert.deepEqual([clear.type, clear.mode, clear.y, checkAction(clear)], ['clear', 'level', 12, null]);
+  game.sync({ results: [{ id: clear.id, ok: true, message: 'Levelling 100 by 100 at y 12.' }] });
+  await levelling;
+});
+
+test('a gable roof rises a course at a time from the eaves to a slab ridge, its ends closed; a hip has four slopes', () => {
+  const gable = roofNodes({ x1: 0, z1: 0, x2: 6, z2: 4, y: 5, stairs: 'stairs:stair_pine_wood' });
+  const at = (n, x, y, z) => n.find((b) => b.x === x && b.y === y && b.z === z);
+  assert.deepEqual([at(gable, 3, 5, -1).facing, at(gable, 3, 5, 5).facing], ['north', 'south']); // eaves, one out
+  assert.deepEqual([at(gable, 3, 6, 0).facing, at(gable, 3, 7, 1).facing], ['north', 'north']);
+  assert.equal(at(gable, 3, 8, 2).item, 'stairs:slab_pine_wood'); // the ridge
+  assert.equal(at(gable, 0, 6, 2).item, 'default:pine_wood'); // the gable end
+  assert.equal(at(gable, 3, 6, 2), undefined); // the attic stays open
+  const hip = roofNodes({ x1: 0, z1: 0, x2: 4, z2: 4, y: 5, style: 'hip', stairs: 'stairs:stair_wood', overhang: 0 });
+  assert.deepEqual([at(hip, 0, 5, 2).facing, at(hip, 4, 5, 2).facing], ['east', 'west']);
+  assert.equal(at(hip, 2, 7, 2).item, 'stairs:slab_wood'); // the point
 });

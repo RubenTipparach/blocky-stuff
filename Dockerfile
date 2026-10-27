@@ -24,8 +24,11 @@ RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY server ./server
 COPY luanti ./luanti
 
-ENV NODE_ENV=production PORT=8080 DATA_DIR=/data LUANTI_BIN=/usr/local/bin/luantiserver
+# The commit this image was built from (the deploy job passes it): the launcher and /api/version say which code runs.
+ARG GIT_SHA=unknown
+ENV NODE_ENV=production PORT=8080 DATA_DIR=/data LUANTI_BIN=/usr/local/bin/luantiserver GIT_SHA=$GIT_SHA
 EXPOSE 8080/tcp 30000/udp
 # A fresh Fly volume belongs to root: hand it to minetest, then run as minetest.
 ENTRYPOINT []
-CMD ["sh", "-c", "mkdir -p \"$DATA_DIR\" && chown -R minetest:minetest \"$DATA_DIR\" && exec su-exec minetest:minetest node --disable-warning=ExperimentalWarning server/index.mjs"]
+# The launcher runs Luanti and the bot side by side, so bot code can be updated without restarting the game.
+CMD ["sh", "-c", "mkdir -p \"$DATA_DIR\" && chown -R minetest:minetest \"$DATA_DIR\" && exec su-exec minetest:minetest node --disable-warning=ExperimentalWarning server/launcher.mjs"]

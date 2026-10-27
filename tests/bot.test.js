@@ -27,12 +27,12 @@ function setup(script, { t = 0 } = {}) {
   return { db, game, bot, client, tick: (ms) => { clock += ms; } };
 }
 
-test('the bot hears its name, @name and !ai, and nothing else', () => {
+test('a character hears her name and @name, and nothing else', () => {
   const { bot } = setup([]);
-  for (const t of ['@Blocky hi', 'blocky, how do I craft a pick?', 'hey Blocky', '!ai what time is it']) {
+  for (const t of ['@Blocky hi', 'blocky, how do I craft a pick?', 'hey Blocky']) {
     assert.equal(bot.addressed(t, 'Blocky'), true, t);
   }
-  for (const t of ['blockyness', 'hello all', 'ai is cool']) assert.equal(bot.addressed(t, 'Blocky'), false, t);
+  for (const t of ['blockyness', 'hello all', '!ai is not a command']) assert.equal(bot.addressed(t, 'Blocky'), false, t);
 });
 
 test('a question gets an answer, with the chat and who is online as context', async () => {
@@ -80,7 +80,7 @@ test('a quick second question waits its turn instead of being dropped, and the h
   const { db, bot } = setup([text('one'), text('two')]);
   db.putJson('bot', { perHour: 2, cooldown: 0.05 });
   const said = [];
-  const ask = () => bot.hear({ source: 'game', name: 'alice', text: '!ai hi' }, (t) => said.push(t));
+  const ask = () => bot.hear({ source: 'game', name: 'alice', text: 'Blocky, hi' }, (t) => said.push(t));
   assert.equal(await ask(), 'one');
   assert.equal(await ask(), 'two');
   assert.match(await ask(), /a lot this hour/);
@@ -89,16 +89,16 @@ test('a quick second question waits its turn instead of being dropped, and the h
 
 test('a refusal is answered kindly, and a switched-off bot stays quiet', async () => {
   const { db, bot } = setup([() => ({ stop_reason: 'refusal', content: [], usage: {} })]);
-  assert.match(await bot.hear({ source: 'game', name: 'a', text: '!ai x' }, () => {}), /can't help/);
+  assert.match(await bot.hear({ source: 'game', name: 'a', text: 'Blocky, x' }, () => {}), /can't help/);
   db.putJson('bot', { enabled: false });
-  assert.equal(await bot.hear({ source: 'game', name: 'b', text: '!ai x' }, () => {}), null);
+  assert.equal(await bot.hear({ source: 'game', name: 'b', text: 'Blocky, x' }, () => {}), null);
 });
 
 test('without an API key the bot says so instead of failing', async () => {
   const db = openDb(':memory:');
   const bot = createBot({ db, game: createGame(), config: loadConfig({}), log: quiet });
   assert.equal(bot.ready, false);
-  assert.match(await bot.hear({ source: 'game', name: 'a', text: '!ai hi' }, () => {}), /ANTHROPIC_API_KEY/);
+  assert.match(await bot.hear({ source: 'game', name: 'a', text: 'Blocky, hi' }, () => {}), /ANTHROPIC_API_KEY/);
 });
 
 test('the reply is one chat line, cut to length', () => {
@@ -109,7 +109,7 @@ test('the reply is one chat line, cut to length', () => {
 
 test('every line from a person gets an answer, from the character they talk with; characters may stay quiet', async () => {
   const { db, bot } = setup([text('Hi there!'), text('Aye.'), text('Still me.'), text('QUIET'), text('Hello!')]);
-  db.putJson('bot', { cooldown: 0 });
+  db.putJson('bot', { cooldown: 0, listen: 'every' });
   const who = [];
   const hear = (text, extra = {}) => bot.hear({ source: 'game', name: 'alice', text, ...extra }, (t, ch) => who.push([ch.name, t]));
   assert.equal(await hear('lol'), 'Hi there!'); // no name: the first character answers
@@ -124,6 +124,26 @@ test('every line from a person gets an answer, from the character they talk with
   assert.equal(await hear('@Blocky hello'), 'Hello!');
 });
 
+test('a line nobody addressed is weighed against the conversation: players\' own talk is skipped, a reply to a character is not', async () => {
+  const { db, bot, client } = setup([
+    text('{"answer": false, "why": "players talking among themselves"}'),
+    text('{"answer": true, "why": "answers what Moss asked"}'), text('Hello to you too!'),
+    text('Aye, what now?'),
+  ]);
+  db.putJson('bot', { cooldown: 0 });
+  const said = [];
+  const hear = (text, extra = {}) => bot.hear({ source: 'discord', name: 'ruben', text, ...extra }, (t) => said.push(t));
+  assert.equal(await hear('lol bob that was great'), null);
+  assert.match(bot.activity().find((a) => a.kind === 'skipped').text, /players talking among themselves/);
+  db.addChat('bot', 'Moss', 'What do you need from an old digger?', 1);
+  assert.equal(await hear('not much, just saying hi'), 'Hello to you too!');
+  // The judge saw the recent chat, with the character's question in it.
+  assert.match(client.calls[1].messages[0].content, /Moss \(character\): What do you need/);
+  // Said to her by name: no judging, she answers.
+  assert.equal(await hear('Moss, you there?'), 'Aye, what now?');
+  assert.equal(client.calls.length, 4);
+});
+
 test('a character naming another may get an answer, but not forever', () => {
   const { bot } = setup([]);
   const [blocky, moss] = bot.cast();
@@ -136,6 +156,7 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
   const { db, game, bot, client } = setup([
     () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 't1', name: 'heal_player', input: { player: 'alice' } }] }),
     text('Healed!'),
+    text('{"title": "A Day of Bandages", "opening": "The sun rose on a battered alice.", "bullets": [{"emoji": "🩹", "text": "I patched alice right up."}], "closing": "Fewer cacti tomorrow, please."}'),
     text('Today I patched up alice.'),
   ], { t: 1000 });
   game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 3, privs: [] }] });
@@ -145,13 +166,19 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
   game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Healed alice.' }] });
   await pending;
   assert.equal(db.deeds(0)[0].tool, 'heal_player');
-  assert.equal(await bot.summary(0), 'Today I patched up alice.');
+  const sum = await bot.summary(0);
+  assert.deepEqual([sum.title, sum.bullets[0].emoji, sum.bullets[0].text, sum.teller.name],
+    ['A Day of Bandages', '🩹', 'I patched alice right up.', 'Blocky']);
+  assert.doesNotMatch(client.calls[2].messages[0].content, /Here is the last day/);
+  assert.match(client.calls[2].messages[0].content, /not an ending/);
+  // An answer that is not JSON still makes a summary, as one short story.
+  assert.equal((await bot.summary(0)).opening, 'Today I patched up alice.');
   assert.match(client.calls[2].messages[0].content, /heal_player/);
   assert.equal(await setup([]).bot.summary(0), null);
 });
 
 test('an idle turn builds within its limits, says what it is up to, and is kept as its own idea', async () => {
-  const big = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 9, y2: 9, z2: 9 }; // 1000 blocks
+  const big = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 29, y2: 29, z2: 29 }; // 27000 blocks
   const small = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 1, y2: 1, z2: 1 };
   const { db, game, bot, client } = setup([
     () => ({ stop_reason: 'tool_use', usage: {}, content: [
@@ -166,11 +193,11 @@ test('an idle turn builds within its limits, says what it is up to, and is kept 
   await new Promise((r) => setTimeout(r, 10));
   const { actions } = game.sync({});
   assert.equal(actions.length, 1);
-  assert.equal(actions[0].nodes.length, 8);
+  assert.deepEqual([actions[0].type, actions[0].x2 - actions[0].x1 + 1], ['box', 2]);
   game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Placed 8 blocks.' }] });
   assert.equal(await turn, 'Building a little wooden cube!');
   const firstResults = client.calls[1].messages[2].content;
-  assert.match(firstResults[0].content, /400 blocks/);
+  assert.match(firstResults[0].content, /20000 blocks/);
   assert.match(firstResults[1].content, /not for your own turns/);
   assert.equal(db.deeds(0)[0].who, 'Blocky (own idea)');
   assert.deepEqual(said, ['Building a little wooden cube!']);
@@ -185,4 +212,104 @@ test('no idle turn with nobody online, when switched off, or past the hourly lim
   assert.equal(await bot.idle(() => {}), null); // the QUIET turn used the hour's one
   db.putJson('bot', { idle: { enabled: false } });
   assert.equal(await bot.idle(() => {}), null);
+});
+
+test('a prank needs real hostility, places only harmless blocks into air, and only once a day', async () => {
+  const blocks = [{ x: 1, y: 2, z: 3, item: 'default:gravel' }, { x: 1, y: 3, z: 3, item: 'default:mese' }];
+  const prankOnce = () => () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 'p', name: 'prank',
+    input: { person: 'alice', blocks } }] });
+  const { db, game, bot, client, tick } = setup([prankOnce(), text('Hmph.'), prankOnce(), text('Hmph!'), prankOnce(), text('Again!'),
+    text('Bah.')]);
+  tick(5 * 86_400_000);
+  db.putJson('bot', { cooldown: 0 });
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  db.meet('game:alice', 'alice');
+  const hear = () => bot.hear({ source: 'game', name: 'alice', text: 'Moss, you old rock', personId: 'game:alice' }, () => {});
+  await hear();
+  assert.match(client.calls[1].messages[2].content[0].content, /not angry enough/);
+  db.feel('moss', 'game:alice', -50, 10);
+  const pending = hear();
+  await new Promise((r) => setTimeout(r, 10));
+  const { actions } = game.sync({});
+  assert.deepEqual([actions[0].type, actions[0].soft, actions[0].nodes.length, actions[0].by], ['place', true, 1, 'moss']);
+  game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Placed 1 blocks.' }] });
+  await pending;
+  await hear();
+  assert.match(client.calls[5].messages[2].content[0].content, /already pranked alice today/);
+  // Switched off, the tool is not even offered.
+  db.putJson('bot', { cooldown: 0, pranks: false });
+  await hear();
+  assert.ok(!client.calls[6].tools.some((t) => t.name === 'prank'));
+});
+
+// Tool calls as the fake model's answers.
+const use = (name, input) => () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: `u${Math.random()}`, name, input }] });
+// Play the mod: answer each action (and scans with an empty area).
+function playMod(game) {
+  const timer = setInterval(() => {
+    const { actions } = game.sync({});
+    game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: a.type === 'scan'
+      ? JSON.stringify({ x1: a.x1, z1: a.z1, w: a.w, d: a.d, y1: a.y1, names: ['default:cobble'], cols: Array.from({ length: a.w * a.d }, () => [a.y1, 1, 0]) })
+      : 'Placed 9 blocks.' })) });
+  }, 2);
+  return () => clearInterval(timer);
+}
+
+test('a task is carried to the end: pushed back when left open, finished only after looking at the build', async () => {
+  const box = { item: 'default:cobble', x1: 0, y1: 0, z1: 0, x2: 2, y2: 0, z2: 2 };
+  const { db, game, bot, client } = setup([
+    use('start_task', { goal: 'a cobble floor 3 by 3 at 0, 0', check: 'inspect shows 9 cobble at y 0' }),
+    text('On it!'),                                                // tries to stop with the task open: sent back
+    use('fill_box', box),
+    use('finish_task', { evidence: 'looks fine' }),                // refused: has not looked
+    use('inspect_area', { x1: 0, y1: 0, z1: 0, x2: 2, y2: 0, z2: 2 }),
+    use('finish_task', { evidence: 'inspect shows 9 cobble at y 0' }),
+    text('Your floor is done, alice!'),
+  ]);
+  db.putJson('bot', { cooldown: 0 });
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: ['server'] }] });
+  const stop = playMod(game);
+  try {
+    const answer = await bot.hear({ source: 'game', name: 'alice', text: 'Blocky, make me a cobble floor', admin: true }, () => {});
+    assert.equal(answer, 'Your floor is done, alice!');
+    const sent = client.calls.map((c) => c.messages.at(-1).content);
+    assert.match(String(sent[2]), /\[Not finished\]/);
+    assert.match(JSON.stringify(sent[4]), /Not yet: look at what you built with inspect_area/);
+    const [task] = bot.tasksOf('blocky');
+    assert.deepEqual([task.status, task.built], ['done', true]);
+  } finally { stop(); }
+});
+
+test('an unfinished task goes on in its own turns and the asker hears when it is done', async () => {
+  const { db, game, bot } = setup([
+    use('inspect_area', { x1: 0, y1: 0, z1: 0, x2: 1, y2: 0, z2: 1 }),
+    use('finish_task', { evidence: 'all there' }),
+    text('All done, alice: your path is laid.'),
+  ]);
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  bot.saveTasks('blocky', [{ id: 't1', goal: 'a path', check: 'cobble from 0,0 to 1,1', by: 'alice', personId: 'game:alice', admin: false,
+    source: 'game', at: 0, rounds: 5, built: false, status: 'open' }]);
+  const stop = playMod(game);
+  try {
+    const heard = [];
+    const line = await bot.work((t, ch, task) => heard.push([t, ch.name, task.by]));
+    assert.equal(line, 'All done, alice: your path is laid.');
+    assert.deepEqual(heard, [['All done, alice: your path is laid.', 'Blocky', 'alice']]);
+    assert.equal(bot.tasksOf('blocky')[0].status, 'done');
+    assert.equal(await bot.work(() => {}), null); // nothing left to do
+  } finally { stop(); }
+});
+
+test('a promise with nothing done is sent back once: start it now or say no', async () => {
+  const { bot, client } = setup([
+    text("I'll clear the pines for your field after my workshop!"),
+    text('Fair enough: not today, Ruben, my workshop comes first.'),
+  ]);
+  const said = await bot.hear({ source: 'discord', name: 'ruben', text: 'Blocky, clear the trees for a farm' }, () => {});
+  assert.equal(said, 'Fair enough: not today, Ruben, my workshop comes first.');
+  assert.match(client.calls[1].messages.at(-1).content, /call start_task now/);
+  // The rules: a request comes first, decide details yourself, ask for missing tools, no axes needed.
+  assert.match(client.calls[0].system, /comes before your own project/);
+  assert.match(client.calls[0].system, /request_tool/);
+  assert.match(client.calls[0].system, /no axe/);
 });

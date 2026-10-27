@@ -7,8 +7,14 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
+// Colours for people's names on Discord, readable on a dark and a light theme, each person one of them for good.
+export const PALETTE = ['#e06c75', '#e5a046', '#d6c34a', '#7bc96f', '#45b5a0', '#4fa3e0', '#7d8cf0', '#b67be8',
+  '#e57bb5', '#c98a5b', '#8fb83f', '#5bc0de'];
+
 // Chat kept for the admin page and the bot's context; older lines are dropped.
-const CHAT_KEEP = 2000;
+const CHAT_KEEP = 20_000;
+// What the characters heard and did (the Activity log), kept this long.
+const ACTIVITY_KEEP_MS = 30 * 86_400_000;
 
 export function openDb(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -42,6 +48,10 @@ export function openDb(path) {
     CREATE TABLE IF NOT EXISTS usage (
       day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, character TEXT, who TEXT, text TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS activity_at ON activity (at);
   `);
   // Before several characters, memories and feelings were Blocky's alone: they become Blocky's.
   if (!db.prepare('PRAGMA table_info(memories)').all().some((c) => c.name === 'character')) {
@@ -50,6 +60,13 @@ export function openDb(path) {
     db.exec(`INSERT OR IGNORE INTO bonds (character, person, affinity, trust, nickname, facts, pressure, pressure_at)
       SELECT 'blocky', id, affinity, trust, nickname, facts, pressure, pressure_at FROM people WHERE link IS NULL`);
   }
+  // Relationship status (dating, ex) and the last prank, added after bonds first shipped.
+  const bondCols = db.prepare('PRAGMA table_info(bonds)').all().map((c) => c.name);
+  if (!bondCols.includes('status')) db.exec("ALTER TABLE bonds ADD COLUMN status TEXT NOT NULL DEFAULT 'none'");
+  if (!bondCols.includes('pranked_at')) db.exec('ALTER TABLE bonds ADD COLUMN pranked_at INTEGER NOT NULL DEFAULT 0');
+  if (!db.prepare('PRAGMA table_info(people)').all().some((c) => c.name === 'color')) db.exec('ALTER TABLE people ADD COLUMN color TEXT');
+  // Memories once made by every build step ("Did place blocks for them: ..."): noise, cleared once.
+  db.exec("DELETE FROM memories WHERE text LIKE 'Did % for them: %'");
   const q = {
     setting: db.prepare('SELECT value FROM settings WHERE name = ?'),
     addSetting: db.prepare('INSERT OR IGNORE INTO settings (name, value) VALUES (?, ?)'),
@@ -58,6 +75,8 @@ export function openDb(path) {
     dropSetting: db.prepare('DELETE FROM settings WHERE name = ?'),
     addChat: db.prepare('INSERT INTO chat (at, source, name, text) VALUES (?, ?, ?, ?)'),
     trimChat: db.prepare('DELETE FROM chat WHERE id <= (SELECT MAX(id) FROM chat) - ?'),
+    addActivity: db.prepare('INSERT INTO activity (at, kind, character, who, text) VALUES (?, ?, ?, ?, ?)'),
+    trimActivity: db.prepare('DELETE FROM activity WHERE at < ?'),
     chat: db.prepare('SELECT id, at, source, name, text FROM chat ORDER BY id DESC LIMIT ?'),
     addUsage: db.prepare(`INSERT INTO usage (day, calls, input, output) VALUES (?, 1, ?, ?)
       ON CONFLICT(day) DO UPDATE SET calls = calls + 1, input = input + excluded.input, output = output + excluded.output`),
@@ -65,7 +84,8 @@ export function openDb(path) {
     addDeed: db.prepare('INSERT INTO deeds (at, who, tool, input, result) VALUES (?, ?, ?, ?, ?)'),
     deeds: db.prepare('SELECT at, who, tool, input, result FROM deeds WHERE at >= ? ORDER BY id LIMIT 500'),
     chatSince: db.prepare('SELECT at, source, name, text FROM chat WHERE at >= ? ORDER BY id LIMIT 400'),
-    rawPerson: db.prepare('SELECT id, name, link, first_at, last_at, talks FROM people WHERE id = ?'),
+    rawPerson: db.prepare('SELECT id, name, link, first_at, last_at, talks, color FROM people WHERE id = ?'),
+    setColor: db.prepare('UPDATE people SET color = ? WHERE id = ?'),
     addPerson: db.prepare(`INSERT INTO people (id, name, first_at, last_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET name = excluded.name`),
     touchPerson: db.prepare('UPDATE people SET talks = talks + 1, last_at = ? WHERE id = ?'),
@@ -73,7 +93,7 @@ export function openDb(path) {
     setLink: db.prepare('UPDATE people SET link = ? WHERE id = ?'),
     mergeStats: db.prepare(`UPDATE people SET talks = talks + ?, first_at = MIN(first_at, ?), last_at = MAX(last_at, ?)
       WHERE id = ?`),
-    people: db.prepare('SELECT id, name, link, first_at, last_at, talks FROM people WHERE link IS NULL ORDER BY last_at DESC LIMIT ?'),
+    people: db.prepare('SELECT id, name, link, first_at, last_at, talks, color FROM people WHERE link IS NULL ORDER BY last_at DESC LIMIT ?'),
     aliases: db.prepare('SELECT id, name FROM people WHERE link = ?'),
     byName: db.prepare('SELECT id FROM people WHERE lower(name) = lower(?) ORDER BY last_at DESC'),
     byNickname: db.prepare('SELECT person AS id FROM bonds WHERE character = ? AND lower(nickname) = lower(?)'),
@@ -85,6 +105,9 @@ export function openDb(path) {
     setNick: db.prepare('UPDATE bonds SET nickname = ? WHERE character = ? AND person = ?'),
     setFacts: db.prepare('UPDATE bonds SET facts = ? WHERE character = ? AND person = ?'),
     setPressure: db.prepare('UPDATE bonds SET pressure = ?, pressure_at = ? WHERE character = ? AND person = ?'),
+    setStatus: db.prepare('UPDATE bonds SET status = ? WHERE character = ? AND person = ?'),
+    setPranked: db.prepare('UPDATE bonds SET pranked_at = ? WHERE character = ? AND person = ?'),
+    dating: db.prepare("SELECT person FROM bonds WHERE character = ? AND status = 'dating'"),
     moveBond: db.prepare('UPDATE bonds SET person = ? WHERE character = ? AND person = ?'),
     dropBonds: db.prepare('DELETE FROM bonds WHERE person = ?'),
     dropCharacterBonds: db.prepare('DELETE FROM bonds WHERE character = ? OR person = ?'),
@@ -105,7 +128,8 @@ export function openDb(path) {
   };
   const facts = (r) => { try { return JSON.parse(r.facts); } catch { return []; } };
   const bondOut = (r) => ({ affinity: r?.affinity ?? 0, trust: r?.trust ?? 20, nickname: r?.nickname ?? null,
-    facts: r ? facts(r) : [], pressure: r?.pressure ?? 0, pressure_at: r?.pressure_at ?? 0 });
+    facts: r ? facts(r) : [], pressure: r?.pressure ?? 0, pressure_at: r?.pressure_at ?? 0, status: r?.status ?? 'none',
+    pranked_at: r?.pranked_at ?? 0 });
   // A person's own row: an alias (a linked Discord or game identity) leads to the one it was linked to.
   const canonical = (id) => {
     const r = q.rawPerson.get(id);
@@ -133,6 +157,40 @@ export function openDb(path) {
     },
     /** The newest `n` lines, oldest first. */
     chat: (n = 50) => q.chat.all(n).reverse(),
+    /**
+     * Chat lines, newest first, a page at a time: before (an id), since/until (times), name, source, and words that
+     * must all appear (any case).
+     */
+    searchChat({ before = null, since = 0, until = null, name = null, source = null, words = '', limit = 50 } = {}) {
+      const where = ['at >= ?'];
+      const args = [since];
+      if (before) { where.push('id < ?'); args.push(before); }
+      if (until) { where.push('at <= ?'); args.push(until); }
+      if (name) { where.push('LOWER(name) = LOWER(?)'); args.push(name); }
+      if (source) { where.push('source = ?'); args.push(source); }
+      for (const w of String(words).split(/\s+/).filter(Boolean).slice(0, 6)) { where.push("LOWER(text) LIKE ? ESCAPE '\\'"); args.push(`%${w.toLowerCase().replace(/[%_\\]/g, (c) => `\\${c}`)}%`); }
+      args.push(Math.min(500, Math.max(1, limit)));
+      return db.prepare(`SELECT id, at, source, name, text FROM chat WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...args);
+    },
+
+    // ---- The Activity log: what the characters heard and did ----
+    addActivity({ at = Date.now(), kind, character = null, who = null, text = '' }) {
+      q.addActivity.run(at, String(kind).slice(0, 20), character, who ? String(who).slice(0, 64) : null, String(text).slice(0, 1000));
+      if (++added % 100 === 0) q.trimActivity.run(at - ACTIVITY_KEEP_MS);
+    },
+    /** Events newest first, a page at a time: before (an id), kinds, character, since, and words (all, any case). */
+    activity({ before = null, kinds = null, character = null, since = 0, words = '', limit = 50 } = {}) {
+      const where = ['at >= ?'];
+      const args = [since];
+      if (before) { where.push('id < ?'); args.push(before); }
+      if (kinds?.length) { where.push(`kind IN (${kinds.map(() => '?').join(', ')})`); args.push(...kinds); }
+      if (character) { where.push('LOWER(character) = LOWER(?)'); args.push(character); }
+      for (const w of String(words).split(/\s+/).filter(Boolean).slice(0, 6)) { where.push("LOWER(text) LIKE ? ESCAPE '\\'"); args.push(`%${w.toLowerCase().replace(/[%_\\]/g, (c) => `\\${c}`)}%`); }
+      args.push(Math.min(500, Math.max(1, limit)));
+      return db.prepare(`SELECT id, at, kind, character, who, text FROM activity WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...args);
+    },
+    /** How many events of each kind each character had since `since`. */
+    activityCounts: (since) => db.prepare('SELECT character, kind, COUNT(*) AS n FROM activity WHERE at >= ? GROUP BY character, kind ORDER BY character, n DESC').all(since),
     addUsage(input, output, at = Date.now()) {
       q.addUsage.run(new Date(at).toISOString().slice(0, 10), input | 0, output | 0);
     },
@@ -201,6 +259,13 @@ export function openDb(path) {
       q.setLink.run(a.id, b.id);
       return true;
     },
+    /** Undo a link: the alias stands on its own again (its old talks, feelings and memories stay with the other). */
+    unlink(id) {
+      const r = q.rawPerson.get(id);
+      if (!r?.link) return false;
+      q.setLink.run(null, id);
+      return true;
+    },
     /** Everyone known (own rows), most recently seen first, with aliases and each character's bond. */
     people: (n = 200) => q.people.all(n).map((r) => ({ ...r, aliases: q.aliases.all(r.id),
       bonds: Object.fromEntries(q.bondsOf.all(r.id).map((b) => [b.character, bondOut(b)])) })),
@@ -240,6 +305,33 @@ export function openDb(path) {
     findMemories: (ch, text, n = 8, asker = null) => q.memoriesFind.all(ch, `%${String(text).replace(/[\\%_]/g, (c) => `\\${c}`)}%`,
       asker ? canonical(asker)?.id ?? asker : '', n),
     allMemories: (n = 100) => q.memoriesAll.all(n),
+    /** A person's colour on Discord: the one an admin picked, else one from PALETTE that stays theirs. */
+    colorOf(id) {
+      const own = canonical(id);
+      if (own?.color) return own.color;
+      let h = 0;
+      for (const ch of String(own?.id ?? id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      return PALETTE[h % PALETTE.length];
+    },
+    setColor(id, color) {
+      const own = canonical(id);
+      if (own && (color === null || /^#[0-9a-f]{6}$/i.test(color))) q.setColor.run(color, own.id);
+    },
+    /** `ch` and a person: 'none', 'dating' or 'ex'. */
+    setStatus(ch, id, status) {
+      const own = canonical(id);
+      if (!own) return;
+      q.addBond.run(ch, own.id);
+      q.setStatus.run(status, ch, own.id);
+    },
+    /** Who `ch` is dating, if anyone (a person id). */
+    partner: (ch) => q.dating.get(ch)?.person ?? null,
+    pranked(ch, id, at = Date.now()) {
+      const own = canonical(id);
+      if (!own) return;
+      q.addBond.run(ch, own.id);
+      q.setPranked.run(at, ch, own.id);
+    },
     /** Times this person pushed `ch` out of character lately; it fades after a day of peace. */
     pressure(ch, id, at = Date.now()) {
       const b = this.bond(ch, id);

@@ -68,6 +68,48 @@ local function in_world(x, y, z)
 		and math.abs(x) < WORLD_LIMIT and math.abs(y) < WORLD_LIMIT and math.abs(z) < WORLD_LIMIT
 end
 
+-- A seed or crop set straight into the world does not grow by itself: planting it by hand starts its timer, so do the
+-- same (Minetest Game's farming: a growth step every 166 to 286 seconds, on wet soil, in light).
+local function start_growing(pos, name)
+	local def = core.registered_nodes[name]
+	if def and def.on_timer and (core.get_item_group(name, "plant") > 0 or core.get_item_group(name, "seed") > 0) then
+		core.get_node_timer(pos):start(math.random(166, 286))
+	end
+end
+
+-- Turned blocks (owner, 2026-10-27: "A lot of the houses are lacking in style. They all look super blocky"): a facing
+-- (north +z, east +x, south -z, west -x) and upside_down, made into the block's param2. Stairs rise toward their
+-- facing (upside down: hang from it); a door's front looks toward it; a torch, ladder or sign hangs on that side's wall.
+local FACEDIR = { north = 0, east = 1, south = 2, west = 3 }
+local UPSIDE = { [0] = 20, [1] = 23, [2] = 22, [3] = 21 }
+local WALL = { east = 3, west = 2, north = 5, south = 4 } -- wallmounted: the wall is on that side of the block
+local function set_turned(pos, n)
+	local name, param2 = n.item, tonumber(n.param2) or 0
+	local f = n.facing and FACEDIR[n.facing]
+	-- A door is two blocks: the door, and a hidden one above it.
+	local door = name:match("^(doors:door_[%w_]+)$")
+	if door and not door:match("_[ab]$") and core.registered_nodes[door .. "_a"] then
+		param2 = f or 0
+		core.set_node(pos, { name = door .. "_a", param2 = param2 })
+		core.get_meta(pos):set_int("state", 0)
+		local up = vector.add(pos, vector.new(0, 1, 0))
+		if core.registered_nodes["doors:hidden"] then core.set_node(up, { name = "doors:hidden", param2 = param2 }) end
+		return
+	end
+	if name == "default:torch" and n.facing and core.registered_nodes["default:torch_wall"] then
+		name = "default:torch_wall"
+	end
+	local def = core.registered_nodes[name] or {}
+	if f and (def.paramtype2 == "facedir" or def.paramtype2 == "4dir" or def.paramtype2 == "colorfacedir") then
+		param2 = n.upside_down and UPSIDE[f] or f
+	elseif n.facing and (def.paramtype2 == "wallmounted" or def.paramtype2 == "colorwallmounted") then
+		param2 = WALL[n.facing] or 1
+	elseif not f and n.upside_down and def.paramtype2 == "facedir" then
+		param2 = 20 -- a slab or stair hung from above
+	end
+	core.set_node(pos, { name = name, param2 = param2 })
+end
+
 -- Each returns ok, message.
 local actions = {}
 
@@ -135,17 +177,21 @@ function actions.place(a)
 	end
 	-- Blocks nobody is near may not be loaded; load them, or set_node does nothing there.
 	core.load_area(lo, hi)
-	local placed, protected = 0, 0
+	local placed, protected, filled = 0, 0, 0
 	for _, n in ipairs(a.nodes) do
 		local pos = vector.new(n.x, n.y, n.z)
 		if core.is_protected(pos, "") then
 			protected = protected + 1
+		elseif a.soft and core.get_node(pos).name ~= "air" then
+			filled = filled + 1 -- a prank only fills empty air: it never removes or replaces a block
 		else
-			core.set_node(pos, { name = n.item })
+			set_turned(pos, n)
+			start_growing(pos, n.item)
 			placed = placed + 1
 		end
 	end
-	return true, "Placed " .. placed .. " blocks" .. (protected > 0 and (", skipped " .. protected .. " protected") or "") .. "."
+	return true, "Placed " .. placed .. " blocks" .. (protected > 0 and (", skipped " .. protected .. " protected") or "")
+		.. (filled > 0 and (", " .. filled .. " spots were not empty") or "") .. "."
 end
 
 -- The surface of each column: the highest block a player could stand on, or water.
@@ -171,6 +217,270 @@ function actions.ground(a)
 	return true, core.write_json(found)
 end
 
+-- ---- Big work: boxes, clearing, levelling (owner, 2026-10-27: "characters need tools to clear stuff") ----
+-- One VoxelManip read and write each, so a big job is quick and never stalls the server.
+
+-- (owner, 2026-10-27: "expand it to something like 100,000")
+local BOX_MAX = 100000
+local CLEAR_COLUMNS, CLEAR_HIGH, LEVEL_DEPTH = 100000, 140, 16
+
+local function vm_box(p1, p2)
+	local vm = core.get_voxel_manip()
+	local emin, emax = vm:read_from_map(p1, p2)
+	return vm, VoxelArea:new({ MinEdge = emin, MaxEdge = emax }), vm:get_data()
+end
+
+local function finish(vm, data)
+	vm:set_data(data)
+	vm:write_to_map(true)
+	vm:update_liquids()
+end
+
+-- A box of one block (air empties it), solid or a hollow shell.
+function actions.box(a)
+	local item = a.item
+	if item ~= "air" and not core.registered_nodes[item] then return false, tostring(item) .. " is not a block that can be placed." end
+	if not (in_world(a.x1, a.y1, a.z1) and in_world(a.x2, a.y2, a.z2)) then return false, "The box is outside the world." end
+	local p1 = vector.new(math.min(a.x1, a.x2), math.min(a.y1, a.y2), math.min(a.z1, a.z2))
+	local p2 = vector.new(math.max(a.x1, a.x2), math.max(a.y1, a.y2), math.max(a.z1, a.z2))
+	local n = (p2.x - p1.x + 1) * (p2.y - p1.y + 1) * (p2.z - p1.z + 1)
+	if n > BOX_MAX then return false, "At most " .. BOX_MAX .. " blocks in one box: build it in parts." end
+	if core.is_area_protected(p1, p2, "", 4) then return false, "Part of that box is protected." end
+	local vm, area, data = vm_box(p1, p2)
+	local c = core.get_content_id(item)
+	local count = 0
+	for z = p1.z, p2.z do for y = p1.y, p2.y do for x = p1.x, p2.x do
+		if not a.hollow or x == p1.x or x == p2.x or y == p1.y or y == p2.y or z == p1.z or z == p2.z then
+			data[area:index(x, y, z)] = c
+			count = count + 1
+		end
+	end end end
+	finish(vm, data)
+	return true, (item == "air" and "Emptied " or "Placed ") .. count .. " blocks."
+end
+
+-- Trees, leaves, grass, flowers, bushes, cactus, papyrus, snow cover: what grows, which clearing takes away.
+local growth = {}
+local function grows(c)
+	if growth[c] == nil then
+		local name = core.get_name_from_content_id(c)
+		local def = core.registered_nodes[name] or {}
+		local g = function(k) return core.get_item_group(name, k) > 0 end
+		growth[c] = g("tree") or g("leaves") or g("leafdecay") or g("flora") or g("sapling") or g("grass")
+			or g("dry_grass") or g("plant") or name == "default:snow" or name == "default:cactus"
+			or name == "default:papyrus" or name:find("bush") ~= nil or def.drawtype == "plantlike"
+	end
+	return growth[c]
+end
+
+-- The world as it was made: rock, soil, sand, water and what grows. Levelling refuses to cut into anything else (a build).
+local natural = {}
+local function made_by_nature(c)
+	if natural[c] == nil then
+		local name = core.get_name_from_content_id(c)
+		natural[c] = grows(c) or name:find("^default:stone") ~= nil or name:find("^default:desert_stone") ~= nil
+			or name:find("^default:dirt") ~= nil or name:find("sand") ~= nil or name:find("^default:gravel") ~= nil
+			or name:find("^default:clay") ~= nil or name:find("^default:snow") ~= nil or name:find("ice$") ~= nil
+			or name:find("^default:permafrost") ~= nil or name:find("water") ~= nil or name:find("lava") ~= nil
+			or name:find("^default:mossycobble") ~= nil or name:find("^default:dry_dirt") ~= nil
+	end
+	return natural[c]
+end
+
+-- One part of a clearing (at most 64 by 64): mode "trees" takes away what grows; "level" makes it flat at y. With
+-- check, only says which built blocks levelling would cut into (nothing is changed).
+local function clear_part(x1, z1, x2, z2, a, check)
+	local level = a.mode == "level"
+	local y = tonumber(a.y)
+	local lo = level and y - LEVEL_DEPTH or (y and y - 12 or GROUND_BOTTOM)
+	local hi = level and y + 60 or math.min(lo + CLEAR_HIGH, y and y + 60 or GROUND_TOP)
+	local p1, p2 = vector.new(x1, lo, z1), vector.new(x2, hi, z2)
+	local vm, area, data = vm_box(p1, p2)
+	local AIR, IGNORE = core.CONTENT_AIR, core.CONTENT_IGNORE
+	if check then
+		local built = {}
+		for i in area:iterp(vector.new(x1, y + 1, z1), p2) do
+			local c = data[i]
+			if c ~= AIR and c ~= IGNORE and not made_by_nature(c) then built[core.get_name_from_content_id(c)] = true end
+		end
+		return built
+	end
+	local cut, filled = 0, 0
+	if not level then
+		for i in area:iterp(p1, p2) do
+			local c = data[i]
+			if c ~= AIR and c ~= IGNORE and grows(c) then data[i] = AIR; cut = cut + 1 end
+		end
+	else
+		local S = core.get_content_id(a.surface or "default:dirt_with_grass")
+		local F = core.get_content_id(a.fill or "default:dirt")
+		for z = z1, z2 do for x = x1, x2 do
+			for yy = y + 1, hi do
+				local i = area:index(x, yy, z)
+				if data[i] ~= AIR and data[i] ~= IGNORE then data[i] = AIR; cut = cut + 1 end
+			end
+			-- The top, and the gap under it down to the ground (or LEVEL_DEPTH).
+			for yy = y, lo, -1 do
+				local i = area:index(x, yy, z)
+				local c = data[i]
+				local solid = c ~= AIR and c ~= IGNORE and not grows(c) and core.get_name_from_content_id(c):find("water") == nil
+				if yy == y then data[i] = S; filled = filled + 1
+				elseif solid then break
+				else data[i] = F; filled = filled + 1 end
+			end
+		end end
+	end
+	finish(vm, data)
+	return cut, filled
+end
+
+-- mode "trees": take away what grows in the area, leaving the ground as it is. mode "level": make the ground flat at
+-- height y (everything above goes, gaps below fill with `fill` up to 16 deep, the top becomes `surface`), refusing
+-- if it would cut into a build. Up to CLEAR_COLUMNS columns, done 64 by 64, a part every server step, so the game
+-- never stalls: the first part now, the rest just after.
+local CLEAR_PART = 64
+function actions.clear(a)
+	if not (in_world(a.x1, 0, a.z1) and in_world(a.x2, 0, a.z2)) then return false, "The area is outside the world." end
+	local x1, x2, z1, z2 = math.min(a.x1, a.x2), math.max(a.x1, a.x2), math.min(a.z1, a.z2), math.max(a.z1, a.z2)
+	local cols = (x2 - x1 + 1) * (z2 - z1 + 1)
+	if cols > CLEAR_COLUMNS then return false, "At most " .. CLEAR_COLUMNS .. " columns at once (say 316 by 316)." end
+	local level = a.mode == "level"
+	local y = tonumber(a.y)
+	if level and not y then return false, "Say the height (y) to level the ground at." end
+	if level then
+		for _, name in ipairs({ a.surface or "default:dirt_with_grass", a.fill or "default:dirt" }) do
+			if not core.registered_nodes[name] then return false, name .. " is not a block." end
+		end
+	end
+	if core.is_area_protected(vector.new(x1, (y or 0) - 16, z1), vector.new(x2, (y or 0) + 60, z2), "", 8) then
+		return false, "Part of that area is protected."
+	end
+	local parts = {}
+	for px = x1, x2, CLEAR_PART do for pz = z1, z2, CLEAR_PART do
+		parts[#parts + 1] = { px, pz, math.min(px + CLEAR_PART - 1, x2), math.min(pz + CLEAR_PART - 1, z2) }
+	end end
+	if level then
+		local built, names = {}, {}
+		for _, p in ipairs(parts) do for k in pairs(clear_part(p[1], p[2], p[3], p[4], a, true)) do built[k] = true end end
+		for k in pairs(built) do names[#names + 1] = k end
+		if #names > 0 then
+			return false, "Levelling there would cut into a build (" .. table.concat(names, ", ", 1, math.min(#names, 5))
+				.. "). Pick another spot, or a height above it."
+		end
+	end
+	local cut, filled = clear_part(parts[1][1], parts[1][2], parts[1][3], parts[1][4], a)
+	local function next_part(k)
+		if not parts[k] then return end
+		local ok, err = pcall(clear_part, parts[k][1], parts[k][2], parts[k][3], parts[k][4], a)
+		if not ok then core.log("warning", "[ai_bot] clearing: " .. tostring(err)) end
+		core.after(0, next_part, k + 1)
+	end
+	core.after(0, next_part, 2)
+	local more = #parts > 1 and (" The other " .. (#parts - 1) .. " parts follow over the next few seconds; check with inspect_area after.") or ""
+	if not level then return true, "Clearing trees and plants from " .. cols .. " columns; the ground stays as it was." .. more end
+	return true, "Levelling " .. (x2 - x1 + 1) .. " by " .. (z2 - z1 + 1) .. " at y " .. y .. ". Build from y " .. (y + 1) .. "." .. more
+end
+
+-- ---- Farming (owner, 2026-10-27: "the bot is complaining that theres no farming mechanics", there is: wheat and cotton) ----
+
+local CROPS = { wheat = "farming:seed_wheat", cotton = "farming:seed_cotton" }
+local FIELD_MAX = 16
+
+-- The surface block of a column (as actions.ground sees it), and its y; or nil.
+local function surface(x, z)
+	for y = GROUND_TOP, GROUND_BOTTOM, -1 do
+		local name = core.get_node(vector.new(x, y, z)).name
+		local def = core.registered_nodes[name]
+		if name ~= "air" and name ~= "ignore" and def and (def.walkable or def.liquidtype ~= "none") and def.drawtype ~= "plantlike" then
+			return y, name
+		end
+	end
+end
+
+-- Till the ground of an area into wet soil and sow it, with water channels where none is within 3 blocks (soil needs it).
+function actions.farm(a)
+	local seed = CROPS[a.crop or "wheat"]
+	if not seed or not core.registered_nodes[seed] then return false, "This game has no " .. tostring(a.crop) .. " to sow." end
+	if not (in_world(a.x1, 0, a.z1) and in_world(a.x2, 0, a.z2)) then return false, "The field is outside the world." end
+	local x1, x2, z1, z2 = math.min(a.x1, a.x2), math.max(a.x1, a.x2), math.min(a.z1, a.z2), math.max(a.z1, a.z2)
+	if x2 - x1 + 1 > FIELD_MAX or z2 - z1 + 1 > FIELD_MAX then return false, "A field is at most " .. FIELD_MAX .. " by " .. FIELD_MAX .. "." end
+	core.load_area(vector.new(x1 - 4, GROUND_BOTTOM, z1 - 4), vector.new(x2 + 4, GROUND_TOP, z2 + 4))
+	-- Which columns are dry: no water within 3. Then a channel down every 7th column (x1 + 3, + 10) waters them.
+	local dry = false
+	for x = x1, x2 do for z = z1, z2 do
+		local y = surface(x, z)
+		if y and not core.find_node_near(vector.new(x, y, z), 3, { "group:water" }) then dry = true end
+	end end
+	local tilled, sown, water, skipped = 0, 0, 0, 0
+	for x = x1, x2 do for z = z1, z2 do
+		local y, name = surface(x, z)
+		local pos = y and vector.new(x, y, z)
+		local above = pos and vector.add(pos, vector.new(0, 1, 0))
+		local def = name and core.registered_nodes[name]
+		local up = above and core.registered_nodes[core.get_node(above).name]
+		if not pos or core.is_protected(pos, "") or not (def.soil or core.get_item_group(name, "soil") >= 2)
+			or not up or not (up.buildable_to or core.get_node(above).name == "air") then
+			skipped = skipped + 1
+		elseif a.water ~= false and dry and (x - x1) % 7 == 3 and x2 - x1 >= 2 then
+			core.set_node(pos, { name = "default:water_source" })
+			if up.buildable_to then core.set_node(above, { name = "air" }) end
+			water = water + 1
+		else
+			if def.soil and def.soil.wet then core.set_node(pos, { name = def.soil.wet }); tilled = tilled + 1 end
+			core.set_node(above, { name = seed, param2 = 1 })
+			start_growing(above, seed)
+			sown = sown + 1
+		end
+	end end
+	return true, "Tilled " .. tilled .. ", sowed " .. sown .. " " .. (a.crop or "wheat")
+		.. (water > 0 and (", dug " .. water .. " blocks of water channel") or "")
+		.. (skipped > 0 and (", skipped " .. skipped .. " spots (not soil, built on, or protected)") or "")
+		.. ". It ripens in about 25 to 40 minutes, in daylight."
+end
+
+-- Gather the ripe crops of an area (y: about the ground's height), sow each spot again, and give the harvest to a player
+-- (or drop it on the field). Tells how far the rest has grown.
+function actions.harvest(a)
+	if not (in_world(a.x1, a.y or 0, a.z1) and in_world(a.x2, a.y or 0, a.z2)) then return false, "The field is outside the world." end
+	local x1, x2, z1, z2 = math.min(a.x1, a.x2), math.max(a.x1, a.x2), math.min(a.z1, a.z2), math.max(a.z1, a.z2)
+	if x2 - x1 + 1 > FIELD_MAX * 2 or z2 - z1 + 1 > FIELD_MAX * 2 then return false, "That is too big: one field at a time." end
+	local lo, hi = vector.new(x1, (a.y or 0) - 8, z1), vector.new(x2, (a.y or 0) + 8, z2)
+	core.load_area(lo, hi)
+	local ripe, growing, got = 0, 0, {}
+	for crop, seed in pairs(CROPS) do
+		local last = "farming:" .. crop .. "_8"
+		for _, pos in ipairs(core.find_nodes_in_area(lo, hi, { "group:" .. crop })) do
+			local name = core.get_node(pos).name
+			if name == last and not core.is_protected(pos, "") then
+				local replant = false
+				for _, item in ipairs(core.get_node_drops(name, "")) do
+					local stack = ItemStack(item)
+					if not replant and stack:get_name() == seed then stack:take_item(1); replant = true end
+					if not stack:is_empty() then got[#got + 1] = stack end
+				end
+				core.set_node(pos, { name = seed, param2 = 1 })
+				start_growing(pos, seed)
+				ripe = ripe + 1
+			elseif name ~= seed and name:find("^farming:" .. crop .. "_%d$") then
+				growing = growing + 1
+			end
+		end
+	end
+	local who = a.player and core.get_player_by_name(a.player)
+	local counts = {}
+	for _, stack in ipairs(got) do
+		counts[stack:get_name()] = (counts[stack:get_name()] or 0) + stack:get_count()
+		local left = who and who:get_inventory():add_item("main", stack) or stack
+		if not left:is_empty() then core.add_item(vector.new((x1 + x2) / 2, (a.y or 0) + 1, (z1 + z2) / 2), left) end
+	end
+	local parts = {}
+	for name, n in pairs(counts) do parts[#parts + 1] = n .. " " .. name end
+	if ripe == 0 then return true, "Nothing is ripe yet (" .. growing .. " plants still growing)." end
+	return true, "Harvested " .. ripe .. " ripe plants (" .. table.concat(parts, ", ") .. ")"
+		.. (who and (", given to " .. a.player) or ", left on the field") .. ", and sowed them again; "
+		.. growing .. " still growing."
+end
+
 function actions.kick(a)
 	if not core.get_player_by_name(a.player) then return false, tostring(a.player) .. " is not online." end
 	core.kick_player(a.player, line(a.reason, 200) ~= "" and line(a.reason, 200) or "Kicked by an admin.")
@@ -190,7 +500,7 @@ local cast = {} -- id -> { name, chat, dress, hair }, as the sidecar last sent i
 local order = {} -- the ids, in the sidecar's order
 local bodies = {} -- id -> { obj, follow, go, go_until, go_anim, face, face_until, home, look }
 local has_model = core.get_modpath("player_api") ~= nil
-local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 } }
+local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 }, lay = { x = 162, y = 166 } }
 local WALK_SPEED, FAR = 4, 40
 local ARRIVE = 1.2 -- close enough to her place
 local APART = 1.4 -- nearer than this to another body, and they step apart
@@ -302,6 +612,12 @@ core.register_entity("ai_bot:npc", {
 		local obj = self.object
 		local pos = obj:get_pos()
 		local vel = obj:get_velocity()
+		-- Asleep (nobody in the game, and the sleep setting on): lying where she is until someone comes.
+		if cast[self._cid] and cast[self._cid].asleep then
+			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
+			anim(self, "lay")
+			return
+		end
 		self._saved = (self._saved or 0) + dtime
 		if self._saved > SAVE_EVERY then
 			self._saved = 0
@@ -437,7 +753,7 @@ local function tend(list)
 		local fresh, ids = {}, {}
 		for _, c in ipairs(list) do
 			if type(c) == "table" and type(c.id) == "string" and type(c.name) == "string" then
-				fresh[c.id] = { name = line(c.name, 32), chat = c.chat, dress = c.dress, hair = c.hair }
+				fresh[c.id] = { name = line(c.name, 32), chat = c.chat, dress = c.dress, hair = c.hair, asleep = c.asleep == true }
 				ids[#ids + 1] = c.id
 			end
 		end
@@ -458,10 +774,11 @@ local function tend(list)
 		if b.follow and not core.get_player_by_name(b.follow) then b.follow = nil end
 		if alive(b) then
 			b.waiting = nil
-			if b.look ~= c.name .. skin(c) then
-				b.obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
+			-- Her name (with zzz while she sleeps) and colours, refreshed when either changed.
+			if b.look ~= c.name .. skin(c) .. tostring(c.asleep) then
+				b.obj:set_properties({ nametag = c.name .. (c.asleep and " (zzz)" or ""), nametag_color = hex(c.chat, BOT_COLOR) })
 				if has_model then b.obj:set_properties({ textures = { skin(c) } }) end
-				b.look = c.name .. skin(c)
+				b.look = c.name .. skin(c) .. tostring(c.asleep)
 			end
 		elseif home_of(id) then
 			hold(id, home_of(id)) -- where she lives: load it, and she wakes there
@@ -489,10 +806,129 @@ local function after(a)
 		core.after(0.5, function() face(id, a.player) end)
 	elseif a.type == "say" and a.near then
 		face(id, a.near)
+	elseif (a.type == "farm" or a.type == "harvest" or a.type == "clear" or a.type == "box") and a.x1 then
+		go(id, vector.new(a.x1, a.y or select(1, surface(a.x1, a.z1)) or 0, a.z1), "mine")
 	elseif a.type == "place" and type(a.nodes) == "table" and a.nodes[1] then
 		local n = a.nodes[1]
 		go(id, vector.new(n.x, n.y, n.z), "mine")
 	end
+end
+
+-- ---- Seeing an area, for the isometric map (server/map.mjs) ----
+
+-- The blocks of an area as a picture needs them: for each column (x, then z) its top block's height and the blocks
+-- from there down as far as its sides show (to the lower of the two neighbours the camera sees past), as indexes
+-- into a list of names. VoxelManip reads the whole box at once, from memory or disk; ungenerated ground is left out.
+local SCAN_MAX, SCAN_HIGH, SIDE_MAX = 128, 160, 24
+function actions.scan(a)
+	local x1, z1 = math.floor(tonumber(a.x1) or 0), math.floor(tonumber(a.z1) or 0)
+	local w, d = math.floor(tonumber(a.w) or 0), math.floor(tonumber(a.d) or 0)
+	local y1, y2 = math.floor(tonumber(a.y1) or -32), math.floor(tonumber(a.y2) or 80)
+	if w < 1 or d < 1 or w > SCAN_MAX or d > SCAN_MAX or y2 <= y1 or y2 - y1 > SCAN_HIGH
+		or not in_world(x1, y1, z1) or not in_world(x1 + w, y2, z1 + d) then
+		return false, "Scan at most " .. SCAN_MAX .. " by " .. SCAN_MAX .. " columns and " .. SCAN_HIGH .. " high."
+	end
+	local vm = core.get_voxel_manip()
+	local emin, emax = vm:read_from_map({ x = x1, y = y1, z = z1 }, { x = x1 + w, y = y2, z = z1 + d })
+	local area = VoxelArea:new({ MinEdge = emin, MaxEdge = emax })
+	local data = vm:get_data()
+	local AIR, IGNORE = core.CONTENT_AIR, core.CONTENT_IGNORE
+	-- Leaves (and other foliage) are see-through on the map: the ground under a canopy counts as the ground.
+	local foliage = {}
+	local function leafy(c)
+		if foliage[c] == nil then
+			local n = core.get_name_from_content_id(c)
+			foliage[c] = core.get_item_group(n, "leaves") > 0 or (core.registered_nodes[n] or {}).walkable == false
+		end
+		return foliage[c]
+	end
+	-- Tops first, and the ground under any canopy (one extra row and column, for the neighbours of the last ones).
+	local top, ground = {}, {}
+	for z = z1, z1 + d do
+		for x = x1, x1 + w do
+			local h, g = nil, nil
+			for y = y2, y1, -1 do
+				local c = data[area:index(x, y, z)]
+				if c ~= AIR and c ~= IGNORE then
+					h = h or y
+					if not leafy(c) then g = y break end
+				end
+			end
+			top[(z - z1) * (w + 1) + (x - x1)] = h
+			ground[(z - z1) * (w + 1) + (x - x1)] = g or h
+		end
+	end
+	local names, index, cols = {}, {}, {}
+	local function id(c)
+		local n = core.get_name_from_content_id(c)
+		if not index[n] then names[#names + 1] = n index[n] = #names - 1 end
+		return index[n]
+	end
+	for z = z1, z1 + d - 1 do
+		for x = x1, x1 + w - 1 do
+			local h = top[(z - z1) * (w + 1) + (x - x1)]
+			if not h then
+				cols[#cols + 1] = false
+			elseif a.runs then
+				-- The whole column as runs of one block, top down: top y, length, name index, ... (air left out). The web
+				-- map draws (and cuts) these in the browser (owner, 2026-10-27: "ship renderer on front end").
+				local col, run_top, run_len, run_id = {}, nil, 0, nil
+				for y = h, y1, -1 do
+					local c = data[area:index(x, y, z)]
+					local cid = (c ~= AIR and c ~= IGNORE) and id(c) or nil
+					if cid ~= nil and cid == run_id and run_top - run_len == y then
+						run_len = run_len + 1
+					else
+						if run_id ~= nil then col[#col + 1] = run_top col[#col + 1] = run_len col[#col + 1] = run_id end
+						run_top, run_len, run_id = y, cid and 1 or 0, cid
+					end
+				end
+				if run_id ~= nil then col[#col + 1] = run_top col[#col + 1] = run_len col[#col + 1] = run_id end
+				cols[#cols + 1] = col
+			elseif a.tops then
+				-- A flat map wants each column's ground, and its canopy if a tree stands over it (server/maps.mjs).
+				local g = ground[(z - z1) * (w + 1) + (x - x1)]
+				local over = g < h and id(data[area:index(x, h, z)]) or nil
+				cols[#cols + 1] = { g, id(data[area:index(x, g, z)]), over }
+			else
+				-- Every block a face of which can be seen: open air or foliage above it or to its south or east (the
+				-- sides the camera sees), the cut at the top of the scan, or the edge of the area. So columns come out
+				-- whole down to the scan's floor at the edges, caves and overhangs show, and a lower cut opens the
+				-- ground up (owner, 2026-10-27: "make this the whole columns", "a depth slider to see 10 blocks down").
+				-- As pairs, top down: y, name index, y, name index...
+				local col = {}
+				local edge = x == x1 + w - 1 or z == z1 + d - 1
+				local function open(c) return c == AIR or c == IGNORE or leafy(c) end
+				for y = h, y1, -1 do
+					local c = data[area:index(x, y, z)]
+					if c ~= AIR and c ~= IGNORE then
+						if y == y2 or edge or open(data[area:index(x, y + 1, z)]) or open(data[area:index(x, y, z + 1)])
+							or open(data[area:index(x + 1, y, z)]) then
+							col[#col + 1] = y
+							col[#col + 1] = id(c)
+						end
+					end
+				end
+				cols[#cols + 1] = col
+			end
+		end
+	end
+	local here = {}
+	for bid, b in pairs(bodies) do
+		if alive(b) then
+			local p = b.obj:get_pos()
+			if p.x >= x1 and p.x < x1 + w and p.z >= z1 and p.z < z1 + d then
+				here[#here + 1] = { id = bid, x = math.floor(p.x + 0.5), y = math.floor(p.y + 0.5), z = math.floor(p.z + 0.5) }
+			end
+		end
+	end
+	for _, player in ipairs(core.get_connected_players()) do
+		local p = player:get_pos()
+		if p.x >= x1 and p.x < x1 + w and p.z >= z1 and p.z < z1 + d then
+			here[#here + 1] = { player = player:get_player_name(), x = math.floor(p.x + 0.5), y = math.floor(p.y + 0.5), z = math.floor(p.z + 0.5) }
+		end
+	end
+	return true, core.write_json({ x1 = x1, z1 = z1, w = w, d = d, y1 = y1, names = names, cols = cols, marks = here })
 end
 
 -- ---- Talking to one of them, and how she feels about you ----
@@ -583,6 +1019,15 @@ for _, cmd in ipairs({ "follow", "come", "stay" }) do
 	})
 end
 
+core.register_chatcommand("link", {
+	description = "Get a code to join your game account to your Discord account (then /link in Discord)",
+	privs = { shout = true },
+	func = function(name)
+		push({ type = "linkcode", name = name })
+		return true, "Asking for your code: it comes in a moment, only to you."
+	end,
+})
+
 core.register_chatcommand("rel", {
 	description = "How each character feels about you",
 	func = function(name)
@@ -650,6 +1095,16 @@ local function sync()
 		extra_headers = { "Content-Type: application/json", "X-Bridge-Key: " .. key },
 		data = core.write_json({
 			players = snapshot(), time = core.get_timeofday(), events = sent_events, results = sent_results,
+			bodies = (function()
+				local out = {}
+				for bid, b in pairs(bodies) do
+					if alive(b) then
+						local p = b.obj:get_pos()
+						out[#out + 1] = { id = bid, x = math.floor(p.x + 0.5), y = math.floor(p.y + 0.5), z = math.floor(p.z + 0.5) }
+					end
+				end
+				return out
+			end)(),
 		}),
 	}, function(res)
 		in_flight = false

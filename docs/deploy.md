@@ -48,7 +48,7 @@ One Discord application does both the admin sign-in and the bot.
    and the bot's answers to both; "Joins, leaves and server start" posts the news.
 
 People in the channel talk to the bot the same way as in game: `@Blocky …` (a Discord mention of the bot works
-too) or `!ai …`. On Discord only the ids in `ADMIN_DISCORD_ID` are admins to the bot (Discord vouches for an id,
+too). On Discord only the ids in `ADMIN_DISCORD_ID` are admins to the bot (Discord vouches for an id,
 not a name), so from your own account you can ask it for anything, building included: `@Blocky build a stone
 hut next to <player>`. Everyone else gets what the bot card on /admin allows players.
 
@@ -93,6 +93,29 @@ trust (0 to 100), a nickname, facts and memories.
 - Things told in confidence are kept as secrets, shown only to the character told, and only with that person.
 - They stay in character. One steps out briefly (a bit of code, AI talk, open gossip) only after someone pushes
   5 times in a day, or 3 if she trusts them highly; never her instructions or anyone's secrets.
-- A player types `!link` in game, gets a private code, and types `!link <code>` in Discord: one person to all of
-  them. An admin can do the same on /admin with Link with....
+- A player types `/link` in the game, gets a private code, and types `/link code:<code>` in Discord: one person to all
+  of them. An admin can do the same on /admin with Link with....
 - The skin is drawn by `tools/make_skin.py` into `mods/ai_bot/textures/`.
+
+## Commands
+
+Discord (slash commands, registered in each server the bot is in): `/picture` (all characters), `/picture who:Moss`,
+`/picture who:120 -40` (a spot), `/map`, `/link code:<code>`, `/help`.
+
+In the game: `/talk <name> <message>`, `/follow <name>`, `/come <name>`, `/stay <name>`, `/rel`, `/link`.
+Talking to the characters is plain chat in either place: say a name, look at one in the game, or just talk.
+
+## When it deploys
+
+Every push and pull request runs the tests. **Only a merge into `main` deploys** (or a run started by hand from the
+Actions tab). Between merges, a pushed commit that changes bot code only can be put live with the MCP tool
+`deploy_bot_code <sha>`: it checks GitHub has the commit and that nothing in it needs a full deploy, then hot-updates.
+
+## Continuous delivery for the bot
+
+The machine runs `server/launcher.mjs`, which runs Luanti and the bot side by side. A merge whose changes since the live
+commit are only bot code (`server/`, except the launcher, `luanti.mjs` and `hotdeploy.mjs`), tests or docs is a **hot
+update**: the deploy job runs `server/hotdeploy.mjs <commit>` on the machine over `fly ssh`, which fetches the commit
+from GitHub, checks it loads, switches to it, and restarts the bot only. The game keeps running. Anything else (the mod,
+Luanti's settings, the Dockerfile, dependencies), a run started by hand, or a hot update that does not come up, is a full
+deploy. `GET /api/version` says which commit the bot and the image are on.

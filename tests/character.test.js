@@ -104,3 +104,62 @@ test('characters know each other: each has a bond with the other, and removing o
   assert.equal(db.bond('blocky', 'char:moss').affinity, 0);
   assert.equal(db.person('char:moss'), null);
 });
+
+test('dating takes real closeness, one partner at a time; a breakup leaves an ex', () => {
+  const { db, moss } = fresh();
+  const ask = (person, status) => runCharacterTool(db, moss, 'set_relationship', { person, status, reason: 'asked' }, turn(null));
+  assert.match(ask('Ruben', 'dating').message, /do not feel that way/);
+  db.feel('moss', 'game:ruben', 75, 65);
+  db.feel('moss', 'game:alice', 90, 90);
+  assert.equal(ask('Ruben', 'dating').ok, true);
+  assert.match(ask('alice', 'dating').message, /dating Ruben already/);
+  assert.match(personCard(db, moss, 'game:ruben'), /You are dating them/);
+  assert.equal(ask('Ruben', 'none').ok, true);
+  assert.equal(db.bond('moss', 'game:ruben').status, 'ex');
+  assert.equal(ask('alice', 'dating').ok, true);
+  assert.equal(runCharacterTool(db, moss, 'set_relationship', { person: 'Ruben', status: 'dating', reason: 'x' },
+    { ...turn(null), romance: false }).message, 'Romance is switched off on this server.');
+});
+
+test('unlinking an account makes it its own person again', () => {
+  const { db } = fresh();
+  db.link('game:ruben', 'discord:42');
+  assert.equal(db.person('discord:42').id, 'game:ruben');
+  assert.equal(db.unlink('discord:42'), true);
+  assert.equal(db.person('discord:42').id, 'discord:42');
+  assert.equal(db.unlink('discord:42'), false);
+});
+
+test('two characters build together: an invitation, a join, steps shared, and the finish remembered by both', () => {
+  const { db } = fresh();
+  const get = (id) => cast(db).find((c) => c.id === id);
+  const run = (id, name, input) => runCharacterTool(db, get(id), name, input, undefined, 1000);
+  assert.equal(run('blocky', 'plan_project', { title: 'Twin Towers', x: 0, y: 5, z: 0, steps: ['base', 'walls', 'roof'] }).ok, true);
+  assert.equal(run('blocky', 'invite_to_project', { who: 'Moss', why: 'you know stone' }).ok, true);
+  assert.equal(get('moss').project, null); // invited, not yet in
+  assert.equal(get('blocky').project.invited.id, 'moss');
+  const joined = run('moss', 'join_project', { with: 'Blocky', part: 'the stone base and the garden' });
+  assert.equal(joined.ok, true);
+  assert.deepEqual(get('moss').project.crew.map((m) => m.name), ['Blocky', 'Moss']);
+  // A step by either is a step for both.
+  run('moss', 'step_done', { note: 'stone base laid' });
+  assert.equal(get('blocky').project.done, 1);
+  assert.match(get('blocky').project.notes.at(-1), /^Moss: stone base laid/);
+  run('blocky', 'step_done', { note: 'walls up' });
+  assert.equal(run('moss', 'step_done', { note: 'roof on' }).ok, true);
+  assert.equal(get('blocky').project, null);
+  assert.equal(get('moss').project, null);
+  assert.match(db.recentMemories('blocky', 5).map((m) => m.text).join(' '), /Finished with Moss Twin Towers/);
+  assert.match(db.recentMemories('moss', 5).map((m) => m.text).join(' '), /Finished with Blocky Twin Towers/);
+  // Nobody to join now; and one with a project of her own cannot join another's.
+  assert.equal(run('moss', 'join_project', { with: 'Blocky', part: 'x' }).ok, false);
+});
+
+test('a tool a character needs goes on the wish list, counted once per thing', () => {
+  const { db, blocky, moss } = fresh();
+  runCharacterTool(db, blocky, 'request_tool', { what: 'Plant trees', why: 'Ruben wants an orchard' }, undefined, 1);
+  runCharacterTool(db, moss, 'request_tool', { what: 'plant trees', why: 'a hedge' }, undefined, 2);
+  runCharacterTool(db, moss, 'request_tool', { what: 'Paint signs', why: 'a shop sign' }, undefined, 3);
+  const list = db.json('tool.requests', []);
+  assert.deepEqual(list.map((r) => [r.what, r.count, r.by]), [['Plant trees', 2, ['Blocky', 'Moss']], ['Paint signs', 1, ['Moss']]]);
+});

@@ -1,6 +1,9 @@
-# Deploy on every push to every branch, so the newest commit is what is live, after RubenTipparach/rubens-solitare-collection's deploy: tests, then build the
-# image and boot it here (the game must start and its mod must reach the sidecar), then Fly.io. The secrets live
-# in GitHub and are staged onto Fly here, so nobody has to run flyctl. docs/deploy.md has each secret.
+# Tests on every push and pull request; a deploy only when something is merged into main (owner, 2026-10-27: "Git
+# deploys will then need to be merged to trigger deploys from now on"), or when run by hand. After
+# RubenTipparach/rubens-solitare-collection's deploy: tests, then build the image and boot it here (the game must
+# start and its mod must reach the sidecar), then Fly.io. The secrets live in GitHub and are staged onto Fly here,
+# so nobody has to run flyctl. docs/deploy.md has each secret. Between merges, a pushed commit of bot code only can
+# go live from the MCP tool deploy_bot_code (server/mcp.mjs).
 name: deploy
 on:
   push:
@@ -8,6 +11,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
+  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,6 +30,8 @@ jobs:
 
   server:
     needs: test
+    # Merged into main (a push to main), or run by hand.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # One Fly deploy at a time; a newer push waits rather than cancelling one mid-release.
@@ -37,12 +43,65 @@ jobs:
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Continuous delivery for the bot (owner, 2026-10-27: "can we maintain continuos delivery just for the bot code?"):
+      # when everything since the live commit is bot code (server/, minus the launcher, Luanti's runner and hotdeploy)
+      # or tests and docs, and the live server runs the launcher, the new code goes onto the machine and only the bot
+      # restarts (server/hotdeploy.mjs): the game keeps running, nobody is disconnected. Anything else, a run started
+      # by hand, or a hot update that does not come up: the full deploy below.
+      - name: Hot update or full deploy?
+        id: choose
+        run: |
+          mode=full
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "${FLY_API_TOKEN}" ]; then
+            v="$(curl -fsS -m 10 "https://${APP}.fly.dev/api/version" || true)"
+            live="$(echo "$v" | jq -r '.sha // empty' 2>/dev/null || true)"
+            image="$(echo "$v" | jq -r '.image // empty' 2>/dev/null || true)"
+            if [ -n "$live" ] && [ -n "$image" ] && [ "$image" != "unknown" ] && git cat-file -e "${live}^{commit}" 2>/dev/null; then
+              changed="$(git diff --name-only "$live" "$GITHUB_SHA")"
+              echo "Changed since the live ${live:0:7}:"; echo "$changed"
+              others="$(echo "$changed" | grep -vE '^(server/|tests/|docs/)|\.md$' || true)"
+              core="$(echo "$changed" | grep -E '^server/(launcher|luanti|hotdeploy)\.mjs$' || true)"
+              if [ -n "$changed" ] && [ -z "$others" ] && [ -z "$core" ]; then mode=hot; fi
+            fi
+          fi
+          echo "Mode: $mode"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Hot update (the bot only)
+        id: hot
+        if: steps.choose.outputs.mode == 'hot'
+        run: |
+          if ! flyctl ssh console -a "$APP" -C "su-exec minetest:minetest node /app/server/hotdeploy.mjs ${GITHUB_SHA}"; then
+            echo "::warning::The hot update did not go through; doing a full deploy."; exit 0
+          fi
+          for i in $(seq 1 30); do
+            sha="$(curl -fsS -m 5 "https://${APP}.fly.dev/api/version" | jq -r '.sha // empty' || true)"
+            if [ "$sha" = "$GITHUB_SHA" ] && curl -fsS -m 5 "https://${APP}.fly.dev/api/info" | grep -q '"game":true'; then
+              echo "::notice::Hot update live: ${GITHUB_SHA:0:7}, the game kept running."
+              echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::warning::The hot update did not come up; doing a full deploy."
+
+      - name: Full deploy needed?
+        id: need
+        run: |
+          if [ "${{ steps.choose.outputs.mode }}" = "hot" ] && [ "${{ steps.hot.outputs.ok }}" = "true" ]; then
+            echo "full=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "full=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # Build the very image Fly will run and boot it first: the sidecar must answer, and Luanti must start
       # and its ai_bot mod must sync with the sidecar (a Lua error or a missing game stops it here, before
       # anything reaches the live server).
       - name: Build and boot the image before deploying
+        if: steps.need.outputs.full == 'true'
         run: |
           docker build -t blocky-check .
           docker run -d --name blocky-check -e LUANTI_BIND_HOST= -p 8080:8080 blocky-check
@@ -57,11 +116,27 @@ jobs:
             docker logs blocky-check 2>&1 | tail -n 120
             exit 1
           fi
+          # The isometric map end to end: the mod scans a real world, the sidecar draws it.
+          sleep 3
+          if ! curl -fsS -m 30 "http://localhost:8080/map/render?x=0&z=0&r=12" -o /tmp/map.png \
+            || [ "$(head -c 4 /tmp/map.png | od -An -tx1 | tr -d ' ')" != "89504e47" ]; then
+            echo "::error::The map did not render; nothing was deployed. The log follows."
+            docker logs blocky-check 2>&1 | tail -n 80
+            exit 1
+          fi
+          echo "Map render: $(wc -c < /tmp/map.png) bytes"
+          if ! curl -fsS -m 30 "http://localhost:8080/map/tiles/0/0.png" -o /tmp/tile.png \
+            || [ "$(head -c 4 /tmp/tile.png | od -An -tx1 | tr -d ' ')" != "89504e47" ]; then
+            echo "::error::A map tile did not render; nothing was deployed."
+            docker logs blocky-check 2>&1 | tail -n 80
+            exit 1
+          fi
           docker logs blocky-check 2>&1 | grep -E '\[ai_bot\]|Starting Luanti|Sidecar' || true
           docker rm -f blocky-check > /dev/null
 
       - name: Check Fly readiness
         id: fly_gate
+        if: steps.need.outputs.full == 'true'
         run: |
           if [ -z "${FLY_API_TOKEN}" ]; then
             echo "::notice::FLY_API_TOKEN not set; nothing was deployed. See docs/deploy.md."
@@ -146,7 +221,7 @@ jobs:
         if: steps.fly_gate.outputs.ready == 'true'
         run: |
           for attempt in 1 2 3; do
-            if flyctl deploy --remote-only -a "$APP"; then exit 0; fi
+            if flyctl deploy --remote-only -a "$APP" --build-arg GIT_SHA="$GITHUB_SHA"; then exit 0; fi
             [ "$attempt" -lt 3 ] && { echo "::warning::flyctl deploy failed (attempt ${attempt}/3); retrying"; sleep $((attempt * 20)); }
           done
           echo "::error::flyctl deploy failed after 3 attempts"; exit 1

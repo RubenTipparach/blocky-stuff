@@ -20,6 +20,11 @@ export const ACTIONS = {
   kick: ['player', 'reason?'],
   heal: ['player'],
   ground: ['columns'],
+  scan: ['x1', 'z1', 'w', 'd'],
+  farm: ['x1', 'z1', 'x2', 'z2', 'crop?', 'water?'],
+  box: ['item', 'x1', 'y1', 'z1', 'x2', 'y2', 'z2', 'hollow?'],
+  clear: ['x1', 'z1', 'x2', 'z2', 'mode', 'y?', 'surface?', 'fill?'],
+  harvest: ['x1', 'z1', 'x2', 'z2', 'y', 'player?'],
   walk: ['x', 'y', 'z'],
   follow: ['player'],
   come: ['player'],
@@ -32,6 +37,8 @@ const ACT_TIMEOUT_MS = 8_000;
 
 export function createGame({ now = () => Date.now() } = {}) {
   let players = [];
+  let bodies = []; // where each character's body stands: { id, x, y, z }
+  const actListeners = [];
   let time = null;
   let seenAt = 0;
   let items = [];
@@ -50,6 +57,9 @@ export function createGame({ now = () => Date.now() } = {}) {
     get connected() { return seenAt > 0 && now() - seenAt < STALE_MS; },
     get seenAt() { return seenAt; },
     get players() { return players; },
+    get bodies() { return bodies; },
+    /** fn(action) for every action sent to the game. */
+    onAct(fn) { actListeners.push(fn); },
     get time() { return time; },
     get items() { return items; },
     /** Calls fn with every event the mod reports. */
@@ -63,6 +73,7 @@ export function createGame({ now = () => Date.now() } = {}) {
         }));
       }
       if (typeof body?.time === 'number') time = body.time;
+      if (Array.isArray(body?.bodies)) bodies = body.bodies.filter((b) => typeof b?.id === 'string' && Number.isFinite(b.x));
       for (const r of Array.isArray(body?.results) ? body.results : []) {
         const p = pending.get(r?.id);
         if (!p) continue;
@@ -81,6 +92,8 @@ export function createGame({ now = () => Date.now() } = {}) {
       const problem = checkAction(action);
       if (problem) return Promise.resolve({ ok: false, message: problem });
       if (!this.connected) return Promise.resolve({ ok: false, message: 'The game server is not running.' });
+      // Whoever wants to know what is being done to the world (the map, for what to read again).
+      for (const fn of actListeners) { try { fn(action); } catch { /* a listener's problem */ } }
       const id = nextId++;
       queue.push({ ...action, id });
       return new Promise((resolve) => {
