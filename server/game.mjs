@@ -36,6 +36,7 @@ const ACT_TIMEOUT_MS = 8_000;
 export function createGame({ now = () => Date.now() } = {}) {
   let players = [];
   let bodies = []; // where each character's body stands: { id, x, y, z }
+  const actListeners = [];
   let time = null;
   let seenAt = 0;
   let items = [];
@@ -55,6 +56,8 @@ export function createGame({ now = () => Date.now() } = {}) {
     get seenAt() { return seenAt; },
     get players() { return players; },
     get bodies() { return bodies; },
+    /** fn(action) for every action sent to the game. */
+    onAct(fn) { actListeners.push(fn); },
     get time() { return time; },
     get items() { return items; },
     /** Calls fn with every event the mod reports. */
@@ -87,6 +90,8 @@ export function createGame({ now = () => Date.now() } = {}) {
       const problem = checkAction(action);
       if (problem) return Promise.resolve({ ok: false, message: problem });
       if (!this.connected) return Promise.resolve({ ok: false, message: 'The game server is not running.' });
+      // Whoever wants to know what is being done to the world (the map, for what to read again).
+      for (const fn of actListeners) { try { fn(action); } catch { /* a listener's problem */ } }
       const id = nextId++;
       queue.push({ ...action, id });
       return new Promise((resolve) => {

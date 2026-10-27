@@ -7,6 +7,7 @@ import { makeApp } from '../server/app.mjs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fakeRuns, sampleWorld } from './helpers/fake-scan.js';
 
 const quiet = { log() {}, error() {} };
 const PNG = [0x89, 0x50, 0x4e, 0x47];
@@ -40,13 +41,13 @@ test('the public map page, a render on request held to its pace, and /picture ta
     postImage: async (m) => { pictures.push(m); return { ok: true }; }, setChannels: () => true, start() {}, stop() {} };
   const server = makeApp({ config, db, bridgeKey: 'k', discord, bot: { ready: true, hear: async () => null }, log: quiet });
   const { game } = server;
-  // Play the mod: answer every scan with the patch above.
+  // Play the mod: answer every scan from a small world.
   game.sync({ players: [], bodies: [{ id: 'blocky', x: 5, y: 2, z: 5 }] });
   const asked = [];
   const answerScans = setInterval(() => {
     const { actions } = game.sync({});
     asked.push(...actions);
-    game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: JSON.stringify(scan) })) });
+    game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: JSON.stringify(a.runs ? fakeRuns(sampleWorld, a) : scan) })) });
   }, 5);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -78,9 +79,16 @@ test('the public map page, a render on request held to its pace, and /picture ta
     const isoPng = Buffer.from(await iso.arrayBuffer());
     assert.equal(isoPng[25], 6); // colour type 6: RGBA
     // The frame's height is fixed (y -32 to 127), whatever the chunk holds: that is what lines chunks up.
-    assert.equal(isoPng.readUInt32BE(20), Math.round(((4 + 4) * 4) / 2 + (127 + 32 + 3) * 4 + 3 * 4));
+    assert.equal(isoPng.readUInt32BE(20), Math.round(((64 + 64) * 4) / 2 + (127 + 32 + 3) * 4 + 3 * 4));
     assert.match(await (await fetch(`${base}/map?view=flat`)).text(), /tiles/);
-    assert.ok(asked.some((a) => a.type === 'scan' && a.x1 === 128 && a.z1 === -192 && a.w === 64 && a.y2 === 40 && a.y1 === -32));
+    // Everything was drawn from the store: the game was only asked for whole chunks, each once.
+    assert.ok(asked.every((a) => a.type === 'scan' && a.runs && a.x1 % 64 === 0 && a.z1 % 64 === 0 && a.w === 64 && a.y1 === -32 && a.y2 === 127));
+    const keys = asked.map((a) => `${a.x1},${a.z1}`);
+    assert.equal(new Set(keys).size, keys.length);
+    const before = asked.length;
+    // Another look at the same place: no new scan.
+    assert.equal((await fetch(`${base}/map/tiles/0/-1.png`)).status, 200);
+    assert.equal(asked.length, before);
   } finally {
     clearInterval(answerScans);
     await new Promise((r) => server.close(r));
@@ -101,13 +109,14 @@ test('pictures go to Discord only while someone is online, at most every 30 minu
   const answer = setInterval(() => {
     const { actions } = game.sync({});
     for (const a of actions) scans.push(a);
-    game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: JSON.stringify(scan) })) });
+    game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: JSON.stringify(fakeRuns(sampleWorld, a)) })) });
   }, 5);
   try {
     game.sync({ players: [], bodies: [{ id: 'blocky', x: 100, y: 7, z: -40 }] });
     await server.maps.tick();
     assert.equal(pictures.length, 0); // nobody online: the page's picture only
-    assert.deepEqual([scans[0].x1 + scans[0].w / 2, scans[0].z1 + scans[0].d / 2], [100, -40]); // aimed at her
+    assert.deepEqual([db.json('maps', {}).blocky.x, db.json('maps', {}).blocky.z], [100, -40]); // aimed at her
+    assert.ok(scans.some((a) => a.x1 === 64 && a.z1 === -64)); // the chunk she stands in
     game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }], bodies: [{ id: 'blocky', x: 100, y: 7, z: -40 }] });
     await server.maps.tick();
     assert.equal(pictures.length, 1);
@@ -150,5 +159,36 @@ test('the explored world is read from map.sqlite, in either layout', async () =>
     // Map blocks are 16 apart, chunks 64: blocks 0..3 are chunk 0, 4 is chunk 1, -5 is chunk -2, 8 is chunk 2.
     assert.deepEqual(e.chunks.map((c) => c.join(',')).sort(), ['-2,2', '0,0', '1,-1'], layout);
     assert.deepEqual(e.bounds, { cx1: -2, cz1: -1, cx2: 1, cz2: 2 }, layout);
+  }
+});
+
+test('the map store is brought up to date every 5 minutes, only where something happened', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', DATA_DIR: mkdtempSync(join(tmpdir(), 'blocky-map-')) });
+  const db = openDb(':memory:');
+  let clock = Date.parse('2026-10-27T12:00:00Z');
+  const discord = { mode: '', channelIds: [], post: async () => ({ ok: true }), news: async () => ({}), setChannels: () => true, start() {}, stop() {} };
+  const server = makeApp({ config, db, bridgeKey: 'k', discord, bot: { ready: true, hear: async () => null }, log: quiet, now: () => clock });
+  const { game } = server;
+  const scans = [];
+  const answer = setInterval(() => {
+    const { actions } = game.sync({});
+    for (const a of actions) {
+      if (a.type === 'scan') scans.push(a);
+      game.sync({ results: [{ id: a.id, ok: true, message: a.type === 'scan' ? JSON.stringify(fakeRuns(sampleWorld, a)) : 'Placed.' }] });
+    }
+  }, 5);
+  try {
+    game.sync({ players: [] });
+    assert.equal(await server.maps.survey(), 0); // nothing happened: nothing read
+    await game.act({ type: 'place', nodes: [{ x: 10, y: 9, z: 10, item: 'default:wood' }, { x: 70, y: 9, z: 10, item: 'default:wood' }] });
+    assert.equal(await server.maps.survey(), 2); // the two chunks built on
+    assert.deepEqual(scans.map((a) => [a.x1, a.z1]).sort(), [[0, 0], [64, 0]]);
+    await game.act({ type: 'place', nodes: [{ x: 10, y: 9, z: 10, item: 'default:wood' }] });
+    assert.equal(await server.maps.survey(), 0); // within 5 minutes: it waits
+    clock += 5 * 60_000;
+    game.sync({});
+    assert.equal(await server.maps.survey(), 1);
+  } finally {
+    clearInterval(answer);
   }
 });

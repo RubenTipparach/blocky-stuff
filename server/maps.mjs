@@ -19,12 +19,18 @@
 //                                    should be bounded by explored areas ... so I cant just scroll infinitely")
 //   GET /map/img/<name>.png          a kept picture
 //   GET /map/render?x=&z=[&y=][&r=]  a fresh picture of any spot (r up to 64 blocks around), a few a minute per address
+//
+// The world as the map knows it is kept on the volume, a 64-block chunk at a time (every column as runs of one block),
+// and everything above is drawn from that store, never by scanning the game on request (owner, 2026-10-27: "the mapping
+// program should update its db every 5 mins if there is server activity, so mapping calls dont call a scan
+// individually"). Every 5 minutes, when anything happened (a build, a field, a player in the game), the chunks it
+// touched are read from the game again; a chunk nobody has mapped yet is read once, the first time it is wanted.
 
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { gzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { renderIso, renderTile, colorOf } from './map.mjs';
 
 const RADIUS = 64; // a snapshot covers 128 by 128 blocks (owner, 2026-10-27: "I'd double the block resolution 128x128")
@@ -32,10 +38,12 @@ const EVERY_MS = 20 * 60_000; // a character's picture is refreshed this often w
 const RENDER_GAP_MS = 15_000; // one on-request render per address this often
 const MAP_COMMAND_GAP_MS = 30_000; // /picture at most this often
 const TILE = 64; // blocks a side, per tile
-const TILE_KEEP_MS = 30 * 60_000; // a drawn tile is good for this long
-// A chunk's block data for the browser is kept less long than the page's 5 minutes, so a page's refresh is current.
-const RUNS_KEEP_MS = 4 * 60_000;
-const TILE_AT_ONCE = 4; // tiles scanned at once, so the game never stalls on a map
+const TILE_KEEP_MS = 5 * 60_000; // a drawn tile is good for this long (drawn from the store: cheap)
+const SURVEY_MS = 5 * 60_000; // the store is brought up to date this often, when anything happened
+const SURVEY_MAX = 40; // chunks read again in one survey at most (the rest wait for the next)
+const TILE_AT_ONCE = 4; // chunks read from the game at once, so the game never stalls on a map
+// See-through on the map, as the mod's scan has it (leaves, and blocks one walks through): the ground under them shows.
+const SEE_THROUGH = /leaves|needles|foliage|flowers:|sapling|grass_\d|junglegrass|dry_shrub|fern|torch|mushroom|water|lava|farming:(seed|wheat|cotton)|snow$/;
 // Bump when tiles are drawn differently: kept tiles of an older drawing are drawn again.
 const TILE_VERSION = 3;
 // The isometric map's frame, shared with the page's script (which places each chunk from these numbers alone).
@@ -67,12 +75,10 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   async function render({ x, z, y = null, r = RADIUS }) {
     const rr = Math.max(8, Math.min(64, Math.round(r)));
     const yy = Number.isFinite(y) ? Math.round(y) : null;
-    const r1 = await game.act({ type: 'scan', x1: Math.round(x) - rr, z1: Math.round(z) - rr, w: 2 * rr, d: 2 * rr,
-      // Down to 48 blocks under her, whole columns to there (owner: "this should scan down to the lower depths").
-      y1: yy === null ? -32 : yy - 48, y2: yy === null ? 120 : yy + 50 });
-    if (!r1.ok) return { error: r1.message };
-    let scan;
-    try { scan = JSON.parse(r1.message); } catch { return { error: 'The game sent back something unreadable.' }; }
+    // Down to 48 blocks under her, whole columns to there (owner: "this should scan down to the lower depths").
+    const scan = await area(Math.round(x) - rr, Math.round(z) - rr, 2 * rr, 2 * rr,
+      yy === null ? ISO.YMIN : yy - 48, yy === null ? 120 : yy + 50);
+    if (!scan) return { error: 'There is no map of that spot yet: the game has not been there, or is not answering.' };
     return { png: renderIso(scan, { markColors: colorsByMark(), markNames: namesByMark() }).png, scan };
   }
 
@@ -110,6 +116,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
    * is online, post each one's picture to Discord, saying so when she finished a project since the last post.
    */
   async function tick() {
+    await survey().catch((err) => log.error('map survey failed:', err));
     if (busy || !game.connected) return;
     busy = true;
     try {
@@ -169,13 +176,11 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     }
     if (drawing.has(key)) return drawing.get(key);
     const job = (async () => {
-      await slot();
       try {
-        // Rows of the tile run north to south: z from -ty*64 down to -ty*64-63. The scan runs z upward, so flip it.
+        // Rows of the tile run north to south: z from -ty*64 down to -ty*64-63. The store runs z upward, so flip it.
         const z1 = -ty * TILE - (TILE - 1);
-        const r1 = await game.act({ type: 'scan', tops: true, x1: tx * TILE, z1, w: TILE, d: TILE, y1: -32, y2: 127 });
-        if (!r1.ok) return null;
-        const scan = JSON.parse(r1.message);
+        const scan = await area(tx * TILE, z1, TILE, TILE, ISO.YMIN, ISO.YMAX, { tops: true });
+        if (!scan) return null;
         const rows = [];
         for (let z = TILE - 1; z >= 0; z--) rows.push(...(scan.cols ?? []).slice(z * TILE, z * TILE + TILE));
         const png = renderTile({ ...scan, cols: rows });
@@ -184,7 +189,6 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
         db.putJson('maps.tiles', { ...db.json('maps.tiles', {}), [key]: now() });
         return png;
       } finally {
-        free();
         drawing.delete(key);
       }
     })();
@@ -203,17 +207,15 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     }
     if (drawing.has(key)) return drawing.get(key);
     const job = (async () => {
-      await slot();
       try {
-        const r1 = await game.act({ type: 'scan', x1: cx * ISO.C, z1: cz * ISO.C, w: ISO.C, d: ISO.C, y1: ISO.YMIN, y2: cut });
-        if (!r1.ok) return null;
-        const png = renderIso(JSON.parse(r1.message), { scale: ISO.A, fixed: { ymin: ISO.YMIN, ymax: ISO.YMAX }, transparent: true }).png;
+        const scan = await area(cx * ISO.C, cz * ISO.C, ISO.C, ISO.C, ISO.YMIN, cut);
+        if (!scan) return null;
+        const png = renderIso(scan, { scale: ISO.A, fixed: { ymin: ISO.YMIN, ymax: ISO.YMAX }, transparent: true }).png;
         await mkdir(join(dir, 'tiles'), { recursive: true });
         await writeFile(file, png);
         db.putJson('maps.tiles', { ...db.json('maps.tiles', {}), [key]: now() });
         return png;
       } finally {
-        free();
         drawing.delete(key);
       }
     })();
@@ -264,27 +266,31 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     return explored;
   }
 
-  /** A chunk's columns as runs (gzipped JSON): { names, colors, cols }, kept like the tiles. */
-  async function chunkRuns(cx, cz) {
+  // ---- The store: each chunk's columns as runs (gzipped JSON { cx, cz, names, colors, leaves, cols }) ----
+
+  const runsFile = (cx, cz) => join(dir, 'tiles', `runs_${cx}_${cz}.json.gz`);
+  const mem = new Map(); // "cx,cz" -> { names, cols }, the most recently used chunks
+  const remember = (k, v) => { mem.delete(k); mem.set(k, v); if (mem.size > 64) mem.delete(mem.keys().next().value); };
+
+  /** Read chunk (cx, cz) from the game into the store. Returns its gzipped JSON, or null. */
+  function readChunk(cx, cz) {
     const key = `runs_${cx}_${cz}`;
-    const file = join(dir, 'tiles', `${key}.json.gz`);
-    const meta = db.json('maps.tiles', {});
-    if (meta[key] && now() - meta[key] < RUNS_KEEP_MS) {
-      try { return await readFile(file); } catch { /* gone: read it again */ }
-    }
     if (drawing.has(key)) return drawing.get(key);
     const job = (async () => {
       await slot();
       try {
+        if (!game.connected) return null;
         const r1 = await game.act({ type: 'scan', runs: true, x1: cx * ISO.C, z1: cz * ISO.C, w: ISO.C, d: ISO.C, y1: ISO.YMIN, y2: ISO.YMAX });
         if (!r1.ok) return null;
         const scan = JSON.parse(r1.message);
         const names = Array.isArray(scan.names) ? scan.names : [];
+        const cols = (scan.cols ?? []).map((c) => c || []);
         const body = gzipSync(JSON.stringify({ cx, cz, names, colors: names.map((n) => colorOf(n)),
-          leaves: names.map((n) => /leaves|needles|foliage/.test(n)), cols: (scan.cols ?? []).map((c) => c || []) }));
+          leaves: names.map((n) => /leaves|needles|foliage/.test(n)), cols }));
         await mkdir(join(dir, 'tiles'), { recursive: true });
-        await writeFile(file, body);
+        await writeFile(runsFile(cx, cz), body);
         db.putJson('maps.tiles', { ...db.json('maps.tiles', {}), [key]: now() });
+        remember(`${cx},${cz}`, { names, cols });
         return body;
       } finally {
         free();
@@ -293,6 +299,134 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     })();
     drawing.set(key, job);
     return job;
+  }
+
+  /** Chunk (cx, cz) as the page wants it, from the store; read from the game only if it was never mapped. */
+  async function chunkRuns(cx, cz) {
+    try { return await readFile(runsFile(cx, cz)); } catch { return readChunk(cx, cz); }
+  }
+
+  /** Chunk (cx, cz) as { names, cols }, from memory or the store (or the game, the first time); null if none. */
+  async function loadChunk(cx, cz) {
+    const k = `${cx},${cz}`;
+    if (mem.has(k)) return mem.get(k);
+    const gz = await chunkRuns(cx, cz).catch(() => null);
+    if (!gz) return null;
+    const { names, cols } = JSON.parse(gunzipSync(gz).toString());
+    remember(k, { names, cols });
+    return mem.get(k);
+  }
+
+  /**
+   * An area from the store, in the shape of the mod's scan (so renderIso and renderTile draw it as before): per column
+   * top down, the blocks a face of which shows (y, name index pairs); or with `tops`, the ground and any canopy over it.
+   * Marks: the characters and players in it. Null when nothing of it is mapped.
+   */
+  async function area(x1, z1, w, d, lo, hi, { tops = false } = {}) {
+    const y1 = Math.max(ISO.YMIN, lo);
+    const y2 = Math.min(ISO.YMAX, hi);
+    const W = w + 1;
+    const D = d + 1;
+    const H = y2 - y1 + 1;
+    const grid = new Int32Array(W * D * H).fill(-1);
+    const names = [];
+    const gid = new Map();
+    const id = (n) => { if (!gid.has(n)) { gid.set(n, names.length); names.push(n); } return gid.get(n); };
+    let found = 0;
+    const C = ISO.C;
+    for (let cz = Math.floor(z1 / C); cz <= Math.floor((z1 + d) / C); cz++) {
+      for (let cx = Math.floor(x1 / C); cx <= Math.floor((x1 + w) / C); cx++) {
+        const ch = await loadChunk(cx, cz);
+        if (!ch) continue;
+        found++;
+        const ids = ch.names.map(id);
+        for (let lz = 0; lz < C; lz++) {
+          const z = cz * C + lz - z1;
+          if (z < 0 || z >= D) continue;
+          for (let lx = 0; lx < C; lx++) {
+            const x = cx * C + lx - x1;
+            if (x < 0 || x >= W) continue;
+            const col = ch.cols[lz * C + lx];
+            if (!col) continue;
+            for (let i = 0; i + 2 < col.length; i += 3) {
+              const n = ids[col[i + 2]];
+              for (let y = Math.min(col[i], y2); y > col[i] - col[i + 1] && y >= y1; y--) grid[(z * W + x) * H + (y - y1)] = n;
+            }
+          }
+        }
+      }
+    }
+    if (!found) return null;
+    const clear = names.map((n) => SEE_THROUGH.test(n));
+    const at = (x, y, z) => (y < y1 || y > y2 ? -1 : grid[(z * W + x) * H + (y - y1)]);
+    const open = (c) => c < 0 || clear[c];
+    const cols = [];
+    for (let z = 0; z < d; z++) {
+      for (let x = 0; x < w; x++) {
+        let h = null;
+        for (let y = y2; y >= y1; y--) if (at(x, y, z) >= 0) { h = y; break; }
+        if (h === null) { cols.push(false); continue; }
+        if (tops) {
+          let g = h;
+          for (let y = h; y >= y1; y--) { const c = at(x, y, z); if (c >= 0 && !clear[c]) { g = y; break; } }
+          cols.push(g < h ? [g, at(x, g, z), at(x, h, z)] : [g, at(x, g, z)]);
+          continue;
+        }
+        const col = [];
+        const edge = x === w - 1 || z === d - 1;
+        for (let y = h; y >= y1; y--) {
+          const c = at(x, y, z);
+          if (c >= 0 && (y === y2 || edge || open(at(x, y + 1, z)) || open(at(x, y, z + 1)) || open(at(x + 1, y, z)))) col.push(y, c);
+        }
+        cols.push(col);
+      }
+    }
+    const inside = (p) => p.x >= x1 && p.x < x1 + w && p.z >= z1 && p.z < z1 + d;
+    const marks = [
+      ...(game.bodies ?? []).filter(inside).map((b) => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y), z: Math.round(b.z) })),
+      ...game.players.filter((p) => p.pos && inside(p.pos)).map((p) => ({ player: p.name, x: p.pos.x, y: p.pos.y, z: p.pos.z })),
+    ];
+    return { x1, z1, w, d, y1, names, cols, marks };
+  }
+
+  // ---- Keeping the store up to date ----
+
+  const dirty = new Set(); // "cx,cz": chunks something was done to since they were read
+  const chunkOf = (x, z) => `${Math.floor(x / ISO.C)},${Math.floor(z / ISO.C)}`;
+  game.onAct?.((a) => {
+    if (a.type === 'place') for (const n of a.nodes ?? []) dirty.add(chunkOf(n.x, n.z));
+    if (a.type === 'farm' || a.type === 'harvest') {
+      for (const [x, z] of [[a.x1, a.z1], [a.x2, a.z2], [a.x1, a.z2], [a.x2, a.z1]]) dirty.add(chunkOf(x, z));
+    }
+  });
+  let lastSurvey = 0;
+  let surveying = false;
+
+  /**
+   * Every 5 minutes, when anything happened: read again the chunks that were built on, and those around each player
+   * in the game (they dig and build by hand). Nothing happened: nothing is read. Returns how many chunks it read.
+   */
+  async function survey() {
+    if (surveying || !game.connected || now() - lastSurvey < SURVEY_MS) return 0;
+    for (const p of game.players) {
+      if (!p.pos) continue;
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) dirty.add(chunkOf(p.pos.x + dx * ISO.C, p.pos.z + dz * ISO.C));
+    }
+    if (!dirty.size) return 0;
+    surveying = true;
+    lastSurvey = now();
+    let n = 0;
+    try {
+      for (const k of [...dirty].slice(0, SURVEY_MAX)) {
+        dirty.delete(k);
+        const [cx, cz] = k.split(',').map(Number);
+        if (await readChunk(cx, cz).catch(() => null)) n++;
+      }
+    } finally {
+      surveying = false;
+    }
+    if (n) log.log(`map: ${n} chunks brought up to date`);
+    return n;
   }
 
   /** Where everyone is: characters (with their colours) and players online. */
@@ -339,7 +473,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     }
     const t = /^\/map\/tiles\/(-?\d{1,4})\/(-?\d{1,4})\.png$/.exec(url.pathname);
     if (t && req.method === 'GET') {
-      const png = game.connected ? await tile(Number(t[1]), Number(t[2])).catch(() => null) : null;
+      const png = await tile(Number(t[1]), Number(t[2])).catch(() => null);
       if (!png) {
         res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '30' });
         res.end('The game is not answering; try again soon.');
@@ -351,7 +485,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     }
     const runs = /^\/map\/chunk\/(-?\d{1,4})\/(-?\d{1,4})\.json$/.exec(url.pathname);
     if (runs && req.method === 'GET') {
-      const gz = game.connected ? await chunkRuns(Number(runs[1]), Number(runs[2])).catch(() => null) : null;
+      const gz = await chunkRuns(Number(runs[1]), Number(runs[2])).catch(() => null);
       if (!gz) {
         res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '30' });
         res.end('The game is not answering; try again soon.');
@@ -364,7 +498,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     const iso = /^\/map\/iso\/(-?\d{1,4})\/(-?\d{1,4})\.png$/.exec(url.pathname);
     if (iso && req.method === 'GET') {
       const top = Number(url.searchParams.get('top') ?? ISO.YMAX);
-      const png = game.connected && Number.isFinite(top) ? await isoChunk(Number(iso[1]), Number(iso[2]), top).catch(() => null) : null;
+      const png = Number.isFinite(top) ? await isoChunk(Number(iso[1]), Number(iso[2]), top).catch(() => null) : null;
       if (!png) {
         res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '30' });
         res.end('The game is not answering; try again soon.');
@@ -487,7 +621,7 @@ ${view === 'iso' ? isoScript(first) : flatScript(first)}
 </script></body></html>`;
   }
 
-  return { render, snapshot, tick, pictures, handle, settings, page, postNow, tile, isoChunk, chunkRuns, where };
+  return { render, snapshot, tick, survey, pictures, handle, settings, page, postNow, tile, isoChunk, chunkRuns, where };
 }
 
 // The flat map's script: one map unit is one block, x east and z north as the map's up; tiles are 64 blocks at zoom 2.
