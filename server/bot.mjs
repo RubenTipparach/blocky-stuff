@@ -70,7 +70,6 @@ const TASK_TOOLS = [
 const TASK_DEFS = TASK_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
 const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
 const BUILDS = new Set(['fill_box', 'place_blocks', 'build_roof', 'farm', 'clear_area']);
-const TASK_ROUNDS_MAX = 60; // tool rounds one task may take in all, so a stuck one cannot run up the bill
 const NUDGES = 3; // times a turn is sent back to an open task before it goes on in the background
 
 // The tools that change the world: what the daily summary tells of.
@@ -150,6 +149,8 @@ export function botSettings(db, config) {
     perHour: saved.perHour ?? 60,
     // Most LLM calls a day across everyone, so a busy day cannot run up the bill. 0 is no limit.
     perDay: saved.perDay ?? 1000,
+    // Tool rounds one task may take in all, so a stuck one cannot run up the bill (60 was too few for big builds).
+    taskRounds: Number.isFinite(saved.taskRounds) ? saved.taskRounds : 150,
     policy: { ...DEFAULT_POLICY, ...(saved.policy ?? {}) },
     // Flirting and dating with characters who are fond of someone, and pranks by those who are hostile; both may be
     // switched off on /admin.
@@ -447,7 +448,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       const task = openTask(ch.id);
       if (task) {
         updateTask(ch.id, task.id, { rounds: task.rounds + 1 });
-        if (task.rounds + 1 >= TASK_ROUNDS_MAX) runTaskTool(ch, 'task_blocked', { reason: 'It took too long; ask again in smaller parts.' }, turn);
+        if (task.rounds + 1 >= s.taskRounds) runTaskTool(ch, 'task_blocked', { reason: `It reached its limit of ${s.taskRounds} steps. Tell them what is finished, and that saying "keep going" picks it up again.` }, turn);
       }
       const uses = response.content.filter((b) => b.type === 'tool_use');
       // Cut off in the middle of a tool call: its input is incomplete, so it is not run; she goes on in smaller steps.
@@ -509,7 +510,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       const turn = { speakerId: task.personId, moved: new Map(), romance: s.romance, asker, source: task.source, game: actingAs(ch), inspected: false };
       const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { speakerId: task.personId, others: onlineIds(), cast: cast(), now: now() })}`
         + `\n\nYou are in the middle of a task for ${task.by}${task.source === 'discord' ? ' (on Discord)' : ''}: ${task.goal}\n`
-        + `How to check it is done: ${task.check}\nTool rounds so far: ${task.rounds} of ${TASK_ROUNDS_MAX}.\n\n`
+        + `How to check it is done: ${task.check}\nTool rounds so far: ${task.rounds} of ${s.taskRounds}.\n\n`
         + 'Carry on with it now. Look at where it stands with inspect_area, do the next part, check again, and call finish_task '
         + 'when it is done and checked (or task_blocked if it cannot be). Say nothing in chat until it is finished or blocked; '
         + 'then one line to them.' }];
@@ -520,7 +521,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         const current = openTask(ch.id);
         if (current) {
           updateTask(ch.id, current.id, { rounds: current.rounds + 1 });
-          if (current.rounds + 1 >= TASK_ROUNDS_MAX) runTaskTool(ch, 'task_blocked', { reason: 'It took too long; ask again in smaller parts.' }, turn);
+          if (current.rounds + 1 >= s.taskRounds) runTaskTool(ch, 'task_blocked', { reason: `It reached its limit of ${s.taskRounds} steps. Tell them what is finished, and that saying "keep going" picks it up again.` }, turn);
         }
         const uses = response.content.filter((b) => b.type === 'tool_use');
         if (response.stop_reason === 'max_tokens' && round < MAX_ROUNDS - 1) {
@@ -1026,7 +1027,22 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   /** The characters a character's line names: they may answer it, up to CHAIN_MAX in a row. */
   const answerers = (text, ch, depth = 0) => (depth >= CHAIN_MAX ? [] : named(text, cast()).filter((c) => c.id !== ch.id));
 
-  return { hear, addressed, answerers, summary, idle, work, cast, tasksOf, saveTasks, activity: () => [...events].reverse(),
+  /**
+   * Take up a character's last stopped task again (set aside, or out of steps), with a fresh count of steps; her task
+   * turns carry it on. For MCP (owner, 2026-10-27: "Make it so [from] the mcp side"). Returns the task, or null.
+   */
+  function resumeTask(name) {
+    const ch = cast().find((c) => c.name.toLowerCase() === String(name).toLowerCase());
+    if (!ch || openTask(ch.id)) return ch && openTask(ch.id) ? { ...openTask(ch.id), already: true } : null;
+    const last = [...tasksOf(ch.id)].reverse().find((t) => t.status === 'blocked' || t.status === 'cancelled');
+    if (!last) return null;
+    updateTask(ch.id, last.id, { status: 'open', rounds: 0, reason: null, done: null });
+    lastBusy.set(ch.id, -Infinity);
+    note('task', ch, last.by, `taken up again: ${last.goal}`);
+    return { ...last, status: 'open' };
+  }
+
+  return { hear, addressed, answerers, summary, idle, work, cast, tasksOf, saveTasks, resumeTask, activity: () => [...events].reverse(),
     get ready() { return llm !== null; },
     /** Answers and turns in progress: a restart waits for these to finish. */
     get busy() { return busy; } };

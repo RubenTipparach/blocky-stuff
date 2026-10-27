@@ -48,6 +48,49 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetch, now = () => Date.now(),
   game = createGame({ now }), discord = null, bot = null, log = console, daily = false }) {
   const sessionSecret = config.sessionSecret || db.secret('session');
+
+  /** Change the bot's settings (from /admin or MCP); only what `body` names, checked. Returns them all. */
+  function saveBotSettings(body) {
+    const cur = db.json('bot', {});
+    const next = { ...cur };
+    if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
+    if (typeof body.name === 'string' && /^[\w-]{2,20}$/.test(body.name.trim())) next.name = body.name.trim();
+    if (typeof body.model === 'string' && /^[a-z0-9.-]{3,60}$/.test(body.model)) next.model = body.model;
+    if (typeof body.buildModel === 'string' && /^[a-z0-9.-]{3,60}$/.test(body.buildModel)) next.buildModel = body.buildModel;
+    if (EFFORTS.includes(body.effort)) next.effort = body.effort;
+    if (typeof body.persona === 'string') next.persona = body.persona.slice(0, 2000);
+    // Tool rounds one task may take in all (owner, 2026-10-27: "Bot complains it takes too long").
+    if (Number.isFinite(Number(body.taskRounds)) && Number(body.taskRounds) >= 10) next.taskRounds = Math.min(1000, Math.floor(Number(body.taskRounds)));
+    for (const k of ['cooldown', 'perHour', 'perDay']) {
+      if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
+    }
+    if (['all', 'every', 'mentions'].includes(body.listen)) next.listen = body.listen;
+    if (Number.isFinite(Number(body.sleepAfter))) next.sleepAfter = Math.min(720, Math.max(5, Math.round(Number(body.sleepAfter))));
+    if (typeof body.sleep === 'boolean') {
+      // Switched off: wake them now (owner: "If I toggle sleep off wake bots up immediately"): the next sync stands
+      // their bodies up, and an own turn starts at once instead of at the next tick.
+      if (!body.sleep && botSettings(db, config).sleep) setTimeout(() => { idleTick().catch((err) => log.error(err)); }, 100);
+      next.sleep = body.sleep;
+    }
+    if (typeof body.romance === 'boolean') next.romance = body.romance;
+    if (typeof body.pranks === 'boolean') next.pranks = body.pranks;
+    if (body.idle && typeof body.idle === 'object') {
+      const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.floor(Number(v)))) : d);
+      const was = botSettings(db, config).idle; // a partial change keeps the rest
+      next.idle = { enabled: typeof body.idle.enabled === 'boolean' ? body.idle.enabled : was.enabled, after: num(body.idle.after, 15, 3600, was.after),
+        perHour: num(body.idle.perHour, 0, 120, was.perHour), social: num(body.idle.social, 0, 100, was.social),
+        kindness: num(body.idle.kindness, 0, 100, was.kindness) };
+    }
+    if (Number.isInteger(Number(body.summaryHour)) && Number(body.summaryHour) >= -1 && Number(body.summaryHour) <= 23) {
+      next.summaryHour = Number(body.summaryHour);
+    }
+    if (body.policy && typeof body.policy === 'object') {
+      next.policy = Object.fromEntries(Object.entries(body.policy).filter(([, v]) => typeof v === 'boolean'));
+    }
+    db.putJson('bot', next);
+    return botSettings(db, config);
+  }
+
   // The Activity feed's filters, as kinds of event.
   const FEED_KINDS = { talk: ['answered', 'quiet', 'chat'], work: ['own turn', 'task', 'prank', 'kindness'], skipped: ['skipped', 'ignored'], problems: ['limited', 'error'] };
   // Once: "mentions only" was the first version's default and stayed saved; everyone gets an answer now (owner,
@@ -491,42 +534,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       });
     }
     const body = req.method === 'POST' ? (await readBody(req)) ?? {} : {};
-    if (route === 'POST /api/admin/bot') {
-      const cur = db.json('bot', {});
-      const next = { ...cur };
-      if (typeof body.enabled === 'boolean') next.enabled = body.enabled;
-      if (typeof body.name === 'string' && /^[\w-]{2,20}$/.test(body.name.trim())) next.name = body.name.trim();
-      if (typeof body.model === 'string' && /^[a-z0-9.-]{3,60}$/.test(body.model)) next.model = body.model;
-      if (typeof body.buildModel === 'string' && /^[a-z0-9.-]{3,60}$/.test(body.buildModel)) next.buildModel = body.buildModel;
-      if (EFFORTS.includes(body.effort)) next.effort = body.effort;
-      if (typeof body.persona === 'string') next.persona = body.persona.slice(0, 2000);
-      for (const k of ['cooldown', 'perHour', 'perDay']) {
-        if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
-      }
-      if (['all', 'every', 'mentions'].includes(body.listen)) next.listen = body.listen;
-      if (Number.isFinite(Number(body.sleepAfter))) next.sleepAfter = Math.min(720, Math.max(5, Math.round(Number(body.sleepAfter))));
-      if (typeof body.sleep === 'boolean') {
-        // Switched off: wake them now (owner: "If I toggle sleep off wake bots up immediately"): the next sync stands
-        // their bodies up, and an own turn starts at once instead of at the next tick.
-        if (!body.sleep && botSettings(db, config).sleep) setTimeout(() => { idleTick().catch((err) => log.error(err)); }, 100);
-        next.sleep = body.sleep;
-      }
-      if (typeof body.romance === 'boolean') next.romance = body.romance;
-      if (typeof body.pranks === 'boolean') next.pranks = body.pranks;
-      if (body.idle && typeof body.idle === 'object') {
-        const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.floor(Number(v)))) : d);
-        next.idle = { enabled: body.idle.enabled !== false, after: num(body.idle.after, 15, 3600, 60),
-          perHour: num(body.idle.perHour, 0, 120, 20), social: num(body.idle.social, 0, 100, 30), kindness: num(body.idle.kindness, 0, 100, 15) };
-      }
-      if (Number.isInteger(Number(body.summaryHour)) && Number(body.summaryHour) >= -1 && Number(body.summaryHour) <= 23) {
-        next.summaryHour = Number(body.summaryHour);
-      }
-      if (body.policy && typeof body.policy === 'object') {
-        next.policy = Object.fromEntries(Object.entries(body.policy).filter(([, v]) => typeof v === 'boolean'));
-      }
-      db.putJson('bot', next);
-      return send(res, 200, { settings: botSettings(db, config) });
-    }
+    if (route === 'POST /api/admin/bot') return send(res, 200, { settings: saveBotSettings(body) });
     if (route === 'POST /api/admin/relay') {
       db.putJson('relay', { chat: body.chat !== false, news: body.news !== false });
       return send(res, 200, { relay: relay() });
@@ -679,7 +687,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         luanti.restart().catch((err) => log.error('restart failed:', err));
         return { ok: true, message: 'Restarting the game; back in about 20 seconds.' };
       };
-      const ctx = { game, db, status, announce, maps, talk, restartGame };
+      const ctx = { game, db, status, announce, maps, talk, restartGame, settings: () => botSettings(db, config),
+        saveSettings: saveBotSettings, resumeTask: (name) => brain.resumeTask?.(name) ?? null };
       if (Array.isArray(msg)) {
         const out = (await Promise.all(msg.map((m) => mcpCall(m, ctx)))).filter(Boolean);
         return out.length ? send(res, 200, out) : (res.writeHead(202), res.end());

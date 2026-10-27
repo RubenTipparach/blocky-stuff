@@ -359,3 +359,21 @@ test('the game\'s items survive a bot restart (the mod sends them only when Luan
   const again = makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
   assert.deepEqual(again.game.findItems('door'), ['doors:door_wood']);
 });
+
+test('MCP: settings read and changed (only what is named), and a stopped task taken up again', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', MCP_TOKEN: 'tok' });
+  const db = openDb(':memory:');
+  const server = makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = async (name, args) => (await (await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: 'Bearer tok', 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) })).json()).result.content[0].text;
+  try {
+    assert.equal(JSON.parse(await call('bot_settings', {})).taskRounds, 150);
+    const after = JSON.parse(await call('bot_settings', { set: { taskRounds: 300, idle: { social: 10 } } }));
+    assert.deepEqual([after.taskRounds, after.idle.social, after.idle.after], [300, 10, 300]); // the rest of idle kept
+    assert.match(await call('resume_task', { name: 'Blocky' }), /no stopped task/);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});

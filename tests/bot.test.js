@@ -391,3 +391,11 @@ test('a reply cut off mid-call, or pushed back by the harness, leaves no tool ca
     assert.deepEqual(answered.sort(), ids.sort(), `message ${i}`);
   }
 });
+
+test('a task that ran out of steps can be taken up again, with a fresh count', () => {
+  const { bot } = setup([]);
+  bot.saveTasks('blocky', [{ id: 't1', goal: 'detail the tower', check: 'windows', by: 'ruben', status: 'blocked', rounds: 60, at: 0 }]);
+  assert.equal(bot.resumeTask('Blocky').goal, 'detail the tower');
+  assert.deepEqual([bot.tasksOf('blocky')[0].status, bot.tasksOf('blocky')[0].rounds], ['open', 0]);
+  assert.equal(bot.resumeTask('Blocky').already, true); // already on it
+});
