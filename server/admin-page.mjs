@@ -340,8 +340,10 @@ function build() {
 <div class="grid">
   <section><h2>The bot</h2><form id="bot">
     <label class="check"><input type="checkbox" id="b_enabled"> The characters answer in chat</label>
-    <div class="two"><label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label>
-    <label class="field">Model<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label></div>
+    <div class="two"><label class="field">Model for talking (answers, chats between them, the daily summary)<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label>
+    <label class="field">Model for building (their own projects, kind deeds, tasks you give them)<select id="b_buildModel">\${[...new Set([...state.models, s.buildModel])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label></div>
+    <p class="muted note" style="margin:-4px 0 8px">A talk that turns into a job switches to the building model as soon as she starts it. A bigger building model builds better and costs more per call.</p>
+    <div class="two"><label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label><span></span></div>
     <div class="two"><label class="field">Listens to<select id="b_listen"><option value="mentions">Only messages that say its name</option>
       <option value="all">Every chat message, answering what is worth it (replies, questions, hellos; not players' own talk)</option>
       <option value="every">Every chat message, always answering</option></select></label>
@@ -542,7 +544,7 @@ function build() {
     }
   });
 
-  $('b_enabled').checked = s.enabled; $('b_model').value = s.model; $('b_effort').value = s.effort;
+  $('b_enabled').checked = s.enabled; $('b_model').value = s.model; $('b_buildModel').value = s.buildModel; $('b_effort').value = s.effort;
   $('b_cooldown').value = s.cooldown; $('b_perHour').value = s.perHour; $('b_perDay').value = s.perDay;
   $('b_listen').value = s.listen; $('b_summaryHour').value = s.summaryHour;
   $('b_romance').checked = s.romance; $('b_pranks').checked = s.pranks; $('b_sleep').checked = s.sleep;
@@ -620,7 +622,7 @@ function build() {
     const policy = {};
     for (const el of document.querySelectorAll('[data-perm]')) policy[el.dataset.perm] = el.checked;
     try {
-      await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value,
+      await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value, buildModel: $('b_buildModel').value,
         effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
         perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, sleep: $('b_sleep').checked, sleepAfter: Number($('b_sleepAfter').value), summaryHour: Number($('b_summaryHour').value),
         idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value,
