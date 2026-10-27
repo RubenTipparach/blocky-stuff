@@ -152,6 +152,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   const note = (kind, ch, who, text) => {
     events.push({ at: now(), kind, character: ch?.name ?? null, who: who ?? null, text: String(text ?? '').slice(0, 300) });
     if (events.length > 80) events.shift();
+    // Kept for 30 days, for the admin page's scrolling feed and for looking into what happened (the MCP tools).
+    db.addActivity({ at: now(), kind, character: ch?.name ?? null, who: who ?? null, text: String(text ?? '') });
   };
 
   /** True when `text` names the character called `name`. */
@@ -516,6 +518,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       + 'player to build near if it is not clear), check the ground there with find_ground, then build with '
       + 'fill_box (floors, walls, roofs; hollow for rooms, air to cut doors and windows) and place_blocks for '
       + 'details. Build a few blocks away from players, never on top of them. Say what you built and where.\n'
+      + '- You have no inventory and need no items or hand tools: no axe, pick, hoe or materials. Your tools act on the '
+      + 'world directly (clear_area fells trees, fill_box with air digs, farm tills). Never turn a job down for lack of '
+      + 'an item, even if you said so before: that was a mistake.\n'
       + '- Big jobs are fine: fill_box sets up to 100,000 blocks at once, and clear_area takes the trees off an area or '
       + 'levels it flat (up to about 316 by 316, without cutting into builds). Clear and level a site before a large '
       + 'build instead of saying it cannot be done; for a huge area, work through it in parts.\n'

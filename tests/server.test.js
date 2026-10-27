@@ -6,7 +6,8 @@ import { makeApp } from '../server/app.mjs';
 import { sign } from '../server/tokens.mjs';
 import { createDiscord } from '../server/discord.mjs';
 import { managedConfig } from '../server/luanti.mjs';
-import { storeMcpToken } from '../server/mcp.mjs';
+import { storeMcpToken, mcpCall } from '../server/mcp.mjs';
+import { cast } from '../server/character.mjs';
 
 const quiet = { log() {}, error() {} };
 
@@ -329,4 +330,23 @@ test('once, an old "mentions only" setting becomes "every message"; after that t
   db.putJson('bot', { listen: 'mentions' });
   makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
   assert.equal(db.json('bot', {}).listen, 'mentions');
+});
+
+test('activity is kept and pages back; MCP tools search it, the chat and a character', async () => {
+  const db = openDb(':memory:');
+  for (let i = 0; i < 120; i++) db.addActivity({ at: 1000 + i, kind: i % 3 ? 'answered' : 'skipped', character: i % 2 ? 'Moss' : 'Blocky', who: 'ruben', text: `"line ${i}" -> ok` });
+  const first = db.activity({ limit: 40 });
+  assert.equal(first[0].text, '"line 119" -> ok');
+  const next = db.activity({ before: first.at(-1).id, limit: 40 });
+  assert.equal(next[0].id, first.at(-1).id - 1);
+  assert.equal(db.activity({ kinds: ['skipped'], limit: 500 }).length, 40);
+  db.addChat('discord', 'ruben', 'Moss can you clear the pines?', 5);
+  db.addChat('bot', 'Moss', 'No axe, sorry.', 6);
+  const call = (name, args = {}) => mcpCall({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, { db, game: null });
+  assert.match((await call('search_chat', { words: 'clear pines' })).result.content[0].text, /Moss can you clear/);
+  assert.match((await call('activity_log', { kind: 'skipped', limit: 2 })).result.content[0].text, /\[skipped\]/);
+  const summary = JSON.parse((await call('activity_summary', { hours: 720 })).result.content[0].text);
+  assert.ok(summary.hours === 720 && 'characters' in summary);
+  cast(db);
+  assert.match((await call('character_state', { name: 'moss' })).result.content[0].text, /"name": "Moss"/);
 });

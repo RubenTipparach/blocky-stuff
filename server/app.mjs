@@ -48,6 +48,8 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetch, now = () => Date.now(),
   game = createGame({ now }), discord = null, bot = null, log = console, daily = false }) {
   const sessionSecret = config.sessionSecret || db.secret('session');
+  // The Activity feed's filters, as kinds of event.
+  const FEED_KINDS = { talk: ['answered', 'quiet'], work: ['own turn', 'task', 'prank'], skipped: ['skipped', 'ignored'], problems: ['limited', 'error'] };
   // Once: "mentions only" was the first version's default and stayed saved; everyone gets an answer now (owner,
   // 2026-10-27: "Someone should reply"). Set it back on /admin after this if wanted.
   if (!db.setting('once.listen-all')) {
@@ -448,12 +450,18 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   async function admin(req, res, route) {
     const you = adminOf(req, res);
     if (!you) return undefined;
+    // Older Activity, a page at a time, for the feed's endless scroll (owner, 2026-10-27: "some kind of infiniscroll").
+    if (route === 'GET /api/admin/activity') {
+      const p = url.searchParams;
+      const kinds = FEED_KINDS[p.get('feed')] ?? null;
+      return send(res, 200, { activity: db.activity({ before: Number(p.get('before')) || null, kinds, limit: Number(p.get('limit')) || 40 }) });
+    }
     if (route === 'GET /api/admin') {
       return send(res, 200, {
         you, ...status(), settings: botSettings(db, config), relay: relay(), models: MODELS, efforts: EFFORTS,
         characters: castOf(db, config, now()), people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
         memories: db.allMemories(80),
-        activity: brain.activity?.() ?? [],
+        activity: db.activity({ limit: 40 }),
         // Every account on the game server, each saying who on Discord it is linked to, if anyone (Players lists them all
         // in its dropdown; owner: "drop down of users unlinked on the game server side").
         gameAccounts: gameAccounts().map((a) => {

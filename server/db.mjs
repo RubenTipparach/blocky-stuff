@@ -12,7 +12,9 @@ export const PALETTE = ['#e06c75', '#e5a046', '#d6c34a', '#7bc96f', '#45b5a0', '
   '#e57bb5', '#c98a5b', '#8fb83f', '#5bc0de'];
 
 // Chat kept for the admin page and the bot's context; older lines are dropped.
-const CHAT_KEEP = 2000;
+const CHAT_KEEP = 20_000;
+// What the characters heard and did (the Activity log), kept this long.
+const ACTIVITY_KEEP_MS = 30 * 86_400_000;
 
 export function openDb(path) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -46,6 +48,10 @@ export function openDb(path) {
     CREATE TABLE IF NOT EXISTS usage (
       day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS activity (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind TEXT NOT NULL, character TEXT, who TEXT, text TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS activity_at ON activity (at);
   `);
   // Before several characters, memories and feelings were Blocky's alone: they become Blocky's.
   if (!db.prepare('PRAGMA table_info(memories)').all().some((c) => c.name === 'character')) {
@@ -69,6 +75,8 @@ export function openDb(path) {
     dropSetting: db.prepare('DELETE FROM settings WHERE name = ?'),
     addChat: db.prepare('INSERT INTO chat (at, source, name, text) VALUES (?, ?, ?, ?)'),
     trimChat: db.prepare('DELETE FROM chat WHERE id <= (SELECT MAX(id) FROM chat) - ?'),
+    addActivity: db.prepare('INSERT INTO activity (at, kind, character, who, text) VALUES (?, ?, ?, ?, ?)'),
+    trimActivity: db.prepare('DELETE FROM activity WHERE at < ?'),
     chat: db.prepare('SELECT id, at, source, name, text FROM chat ORDER BY id DESC LIMIT ?'),
     addUsage: db.prepare(`INSERT INTO usage (day, calls, input, output) VALUES (?, 1, ?, ?)
       ON CONFLICT(day) DO UPDATE SET calls = calls + 1, input = input + excluded.input, output = output + excluded.output`),
@@ -149,6 +157,40 @@ export function openDb(path) {
     },
     /** The newest `n` lines, oldest first. */
     chat: (n = 50) => q.chat.all(n).reverse(),
+    /**
+     * Chat lines, newest first, a page at a time: before (an id), since/until (times), name, source, and words that
+     * must all appear (any case).
+     */
+    searchChat({ before = null, since = 0, until = null, name = null, source = null, words = '', limit = 50 } = {}) {
+      const where = ['at >= ?'];
+      const args = [since];
+      if (before) { where.push('id < ?'); args.push(before); }
+      if (until) { where.push('at <= ?'); args.push(until); }
+      if (name) { where.push('LOWER(name) = LOWER(?)'); args.push(name); }
+      if (source) { where.push('source = ?'); args.push(source); }
+      for (const w of String(words).split(/\s+/).filter(Boolean).slice(0, 6)) { where.push("LOWER(text) LIKE ? ESCAPE '\\'"); args.push(`%${w.toLowerCase().replace(/[%_\\]/g, (c) => `\\${c}`)}%`); }
+      args.push(Math.min(500, Math.max(1, limit)));
+      return db.prepare(`SELECT id, at, source, name, text FROM chat WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...args);
+    },
+
+    // ---- The Activity log: what the characters heard and did ----
+    addActivity({ at = Date.now(), kind, character = null, who = null, text = '' }) {
+      q.addActivity.run(at, String(kind).slice(0, 20), character, who ? String(who).slice(0, 64) : null, String(text).slice(0, 1000));
+      if (++added % 100 === 0) q.trimActivity.run(at - ACTIVITY_KEEP_MS);
+    },
+    /** Events newest first, a page at a time: before (an id), kinds, character, since, and words (all, any case). */
+    activity({ before = null, kinds = null, character = null, since = 0, words = '', limit = 50 } = {}) {
+      const where = ['at >= ?'];
+      const args = [since];
+      if (before) { where.push('id < ?'); args.push(before); }
+      if (kinds?.length) { where.push(`kind IN (${kinds.map(() => '?').join(', ')})`); args.push(...kinds); }
+      if (character) { where.push('LOWER(character) = LOWER(?)'); args.push(character); }
+      for (const w of String(words).split(/\s+/).filter(Boolean).slice(0, 6)) { where.push("LOWER(text) LIKE ? ESCAPE '\\'"); args.push(`%${w.toLowerCase().replace(/[%_\\]/g, (c) => `\\${c}`)}%`); }
+      args.push(Math.min(500, Math.max(1, limit)));
+      return db.prepare(`SELECT id, at, kind, character, who, text FROM activity WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`).all(...args);
+    },
+    /** How many events of each kind each character had since `since`. */
+    activityCounts: (since) => db.prepare('SELECT character, kind, COUNT(*) AS n FROM activity WHERE at >= ? GROUP BY character, kind ORDER BY character, n DESC').all(since),
     addUsage(input, output, at = Date.now()) {
       q.addUsage.run(new Date(at).toISOString().slice(0, 10), input | 0, output | 0);
     },

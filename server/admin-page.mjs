@@ -151,32 +151,64 @@ const KIND = { answered: ['💬 answered', 'ok', 'talk'], quiet: ['🤐 stayed q
   'own turn': ['🔨 own turn', 'muted', 'work'], task: ['📋 task', 'ok', 'work'], prank: ['😈 prank', 'warn', 'work'] };
 let feedFilter = 'all';
 try { feedFilter = localStorage.getItem('feedFilter') || 'all'; } catch { /* no storage */ }
+// The feed's events, newest first: the newest come with each refresh, older ones a page at a time as it scrolls.
+const feed = { items: [], done: false, loading: false };
+const inGroup = (e) => feedFilter === 'all' || (KIND[e.kind] || [])[2] === feedFilter;
+const stamp = (t) => { const d = new Date(t); return (d.toDateString() === new Date().toDateString() ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ') + clock(t); };
+function cardOf(e, colour) {
+  const [label, tone] = KIND[e.kind] || [e.kind, ''];
+  const cut = String(e.text || '').indexOf(' -> ');
+  const heard = cut >= 0 ? e.text.slice(0, cut) : (e.kind === 'own turn' || e.kind === 'task' ? '' : e.text);
+  const said = cut >= 0 ? e.text.slice(cut + 4) : (heard ? '' : e.text);
+  return '<div class="card"' + (colour[e.character] ? ' style="--who:' + esc(colour[e.character]) + '"' : '') + '><div class="top">'
+    + '<span class="pill ' + tone + '">' + esc(label) + '</span>'
+    + (e.character ? '<span class="name">' + esc(e.character) + '</span>' : '')
+    + (e.who ? '<span class="muted">' + (e.character ? 'with ' : 'from ') + esc(e.who) + '</span>' : '')
+    + '<span class="when">' + stamp(e.at) + '</span></div>'
+    + (heard ? '<div class="heard">' + esc(heard) + '</div>' : '')
+    + (said ? '<div class="said' + (heard ? ' reply' : '') + '">' + esc(said) + '</div>' : '') + '</div>';
+}
 function renderFeed() {
-  const st = state;
-  if (!st || !st.activity) return;
+  if (!state || !state.activity) return;
   for (const b of document.querySelectorAll('#feedFilter button')) b.classList.toggle('on', b.dataset.feed === feedFilter);
-  const colour = Object.fromEntries((st.characters || []).map((c) => [c.name, c.chatColor]));
-  const shown = st.activity.filter((e) => feedFilter === 'all' || (KIND[e.kind] || [])[2] === feedFilter);
-  $('activity').innerHTML = shown.length ? shown.map((e) => {
-    const [label, tone] = KIND[e.kind] || [e.kind, ''];
-    const cut = String(e.text || '').indexOf(' -> ');
-    const heard = cut >= 0 ? e.text.slice(0, cut) : (e.kind === 'own turn' || e.kind === 'task' ? '' : e.text);
-    const said = cut >= 0 ? e.text.slice(cut + 4) : (heard ? '' : e.text);
-    return '<div class="card"' + (colour[e.character] ? ' style="--who:' + esc(colour[e.character]) + '"' : '') + '><div class="top">'
-      + '<span class="pill ' + tone + '">' + esc(label) + '</span>'
-      + (e.character ? '<span class="name">' + esc(e.character) + '</span>' : '')
-      + (e.who ? '<span class="muted">' + (e.character ? 'with ' : 'from ') + esc(e.who) + '</span>' : '')
-      + '<span class="when">' + clock(e.at) + '</span></div>'
-      + (heard ? '<div class="heard">' + esc(heard) + '</div>' : '')
-      + (said ? '<div class="said' + (heard ? ' reply' : '') + '">' + esc(said) + '</div>' : '') + '</div>';
-  }).join('') : '<p class="muted">Nothing here yet.</p>';
+  // What the refresh brought that the feed does not have yet goes on top.
+  const top = feed.items.length ? feed.items[0].id : 0;
+  const fresh = state.activity.filter((e) => e.id > top && inGroup(e));
+  if (!feed.items.length && !feed.done) feed.items = state.activity.filter(inGroup);
+  else feed.items = fresh.concat(feed.items);
+  const colour = Object.fromEntries((state.characters || []).map((c) => [c.name, c.chatColor]));
+  $('activity').innerHTML = (feed.items.length ? feed.items.map((e) => cardOf(e, colour)).join('') : '<p class="muted">Nothing here yet.</p>')
+    + '<p id="feedMore" class="muted note" style="text-align:center">' + (feed.done ? (feed.items.length ? 'That is everything (30 days are kept).' : '') : 'Loading older…') + '</p>';
+  watchFeedEnd();
+}
+async function loadOlder() {
+  if (feed.loading || feed.done) return;
+  feed.loading = true;
+  try {
+    const last = feed.items.length ? feed.items[feed.items.length - 1].id : '';
+    const r = await api('/api/admin/activity?limit=40&feed=' + encodeURIComponent(feedFilter) + (last ? '&before=' + last : ''));
+    const have = new Set(feed.items.map((e) => e.id));
+    const more = (r.activity || []).filter((e) => !have.has(e.id));
+    if ((r.activity || []).length < 40) feed.done = true;
+    feed.items = feed.items.concat(more);
+  } catch { /* try again on the next scroll */ } finally { feed.loading = false; }
+  renderFeed();
+}
+// Endless scroll: when the end of the feed comes into view, the next page loads.
+let feedWatch = null;
+function watchFeedEnd() {
+  if (!('IntersectionObserver' in window)) return;
+  feedWatch = feedWatch || new IntersectionObserver((seen) => { if (seen.some((s) => s.isIntersecting)) loadOlder(); }, { rootMargin: '400px' });
+  feedWatch.disconnect();
+  if ($('feedMore') && !feed.done) feedWatch.observe($('feedMore'));
 }
 document.addEventListener('click', (ev) => {
   const b = ev.target.closest && ev.target.closest('#feedFilter button');
   if (!b) return;
   feedFilter = b.dataset.feed;
   try { localStorage.setItem('feedFilter', feedFilter); } catch { /* no storage */ }
-  renderFeed();
+  feed.items = []; feed.done = false;
+  loadOlder();
 });
 function renderRelationships(force) {
   if (!state || !$('rel')) return;
