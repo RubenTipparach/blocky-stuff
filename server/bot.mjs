@@ -125,8 +125,8 @@ export const IDLE_BLOCKS = 20_000; // blocks a character may set in one turn of 
 // A person keeps talking to the character they last talked with for this long, without naming it.
 const STICKY_MS = 15 * 60_000;
 // Characters answering characters: at most this many in a row, so two of them cannot talk forever.
-// How many lines characters say to each other in a row, one answering the other (a chat of three each, at most).
-const CHAIN_MAX = 6;
+// How many lines characters say to each other in a row, one answering the other (a chat of two each, at most).
+const CHAIN_MAX = 4;
 // The share of the day's calls the characters may spend on their own turns (work, chats, kindness).
 const OWN_SHARE = 0.8;
 
@@ -165,8 +165,9 @@ export function botSettings(db, config) {
     // hour across the cast, each held to IDLE_BLOCKS.
     idle: {
       enabled: saved.idle?.enabled ?? true,
-      after: Number.isFinite(saved.idle?.after) ? saved.idle.after : 60,
-      perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 30,
+      // Seconds of quiet before an own turn; each character waits between this and twice it (5 to 10 minutes).
+      after: Number.isFinite(saved.idle?.after) ? saved.idle.after : 300,
+      perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 12,
       // How likely an own turn is a chat with another character instead of work, in percent, before it grows with
       // every turn of work since her last chat.
       social: Number.isFinite(saved.idle?.social) ? saved.idle.social : 30,
@@ -776,6 +777,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     return null;
   }
 
+  const gaps = new Map(); // character id -> how long she waits before her next own turn (ms)
+
   async function idle(reply) {
     const s = botSettings(db, config);
     const t = now();
@@ -787,11 +790,15 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     let ch = null;
     for (let k = 0; k < all.length && !ch; k++) {
       const c = all[(idleNext + k) % all.length];
-      if (!openTask(c.id) && t - (lastBusy.get(c.id) ?? -Infinity) >= s.idle.after * 1000) { ch = c; idleNext = (idleNext + k + 1) % all.length; }
+      // Each waits her own while: between the idle time and twice it, drawn anew after every turn (owner, 2026-10-27:
+      // "They should say or do something after about 5-10 mins of idle time").
+      if (!gaps.has(c.id)) gaps.set(c.id, s.idle.after * 1000 * (1 + random()));
+      if (!openTask(c.id) && t - (lastBusy.get(c.id) ?? -Infinity) >= gaps.get(c.id)) { ch = c; idleNext = (idleNext + k + 1) % all.length; }
     }
     if (!ch) return null;
     idleTimes.push(t);
     lastBusy.set(ch.id, t);
+    gaps.delete(ch.id); // a new wait is drawn for her next turn
     busy++;
     try {
       // Not all work (owner, 2026-10-27: "The bots work too hard, over time they should have more friendly

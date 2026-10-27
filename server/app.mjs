@@ -57,6 +57,13 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (b.listen === 'mentions') db.putJson('bot', { ...b, listen: 'all' });
     db.putSetting('once.listen-all', '1');
   }
+  // Once: the first pace (a turn after a minute, 30 an hour) was too chatty (owner, 2026-10-27: "Bots are too chatty.
+  // They should say or do something after about 5-10 mins of idle time"): at least 5 minutes, at most 12 an hour.
+  if (!db.setting('once.idle-pace')) {
+    const b = db.json('bot', {});
+    if (b.idle) db.putJson('bot', { ...b, idle: { ...b.idle, after: Math.max(300, b.idle.after ?? 300), perHour: Math.min(12, b.idle.perHour ?? 12) } });
+    db.putSetting('once.idle-pace', '1');
+  }
   const redirectUri = `${config.publicUrl}/auth/discord/callback`;
   const relay = () => ({ chat: true, news: true, ...db.json('relay', {}) });
   // The characters in the world now, and the one who speaks for the server (the first).

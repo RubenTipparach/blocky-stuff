@@ -355,7 +355,7 @@ function build() {
     <label class="check"><input type="checkbox" id="b_romance"> Romance: characters fond of someone may flirt, and date (always PG)</label>
     <label class="check"><input type="checkbox" id="b_pranks"> Pranks: characters hostile to someone may drop a few harmless blocks on their build, once a day</label>
     <label class="check"><input type="checkbox" id="b_idle"> They work on their own projects when nobody is asking them anything (while someone is online, and for an hour after anyone's last word)</label>
-    <div class="two"><label class="field">A turn when not asked anything for (seconds)<input id="b_idleAfter" type="number" min="15"></label>
+    <div class="two"><label class="field">Quiet before an own turn (seconds; each waits this to twice this, 300 = 5 to 10 min)<input id="b_idleAfter" type="number" min="60"></label>
     <label class="field">Own turns per hour, at most (all together)<input id="b_idlePerHour" type="number" min="0"></label></div>
     <div class="two"><label class="field">Chats with each other (% of own turns; it grows the longer they work)<input id="b_idleSocial" type="number" min="0" max="100"></label>
     <label class="field">Something nice for a friend (% of work turns)<input id="b_idleKindness" type="number" min="0" max="100"></label></div>
