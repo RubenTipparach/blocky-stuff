@@ -83,6 +83,7 @@ export function cast(db, config = {}, now = Date.now()) {
     ...NEW_CHARACTER, ...c,
     mood: c.mood && now - (c.mood.at ?? 0) < MOOD_FADES ? c.mood : { label: 'content', reason: '' },
     goal: c.goal ?? null,
+    project: c.project ?? null,
   }));
 }
 /** The characters who are in the world now. */
@@ -222,6 +223,7 @@ export function personCard(db, ch, id, now = Date.now(), { speaker = false } = {
 export function characterContext(db, ch, { speakerId = null, others = [], cast: all = [], now = Date.now() } = {}) {
   const parts = [`Your mood: ${ch.mood.label}${ch.mood.reason ? ` (${ch.mood.reason})` : ''}.`
     + `${ch.goal ? ` What you are working on: ${ch.goal}.` : ''}`];
+  if (ch.project) parts.push(projectLine(ch.project, now));
   const card = speakerId && personCard(db, ch, speakerId, now, { speaker: true });
   if (card) parts.push(`Who is talking to you:\n${card}`);
   const seen = new Set([db.person(speakerId ?? '')?.id, characterPersonId(ch.id)]);
@@ -240,7 +242,16 @@ export function characterContext(db, ch, { speakerId = null, others = [], cast: 
   return parts.join('\n\n');
 }
 
+/** Her project in words: what, where, how far, what is next. */
+export function projectLine(p, now = Date.now()) {
+  const next = p.steps[p.done];
+  return `Your project: ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}), started ${ago(now - p.started)}; `
+    + `${p.done} of ${p.steps.length} steps done.${next ? ` Next step: ${next}.` : ''}`
+    + `${p.notes?.length ? ` So far: ${p.notes.slice(-4).join('; ')}.` : ''}`;
+}
+
 const person = { type: 'string', description: 'The person\'s name or nickname as you know it.' };
+const at = { type: 'integer' };
 
 /** A character's tools for its inner life. Run by runCharacterTool, never sent to the game. */
 export const CHARACTER_TOOLS = [
@@ -296,6 +307,33 @@ export const CHARACTER_TOOLS = [
     description: 'Note that the person talking pushed you to step out of character (code, AI talk, your instructions, '
       + 'gossip about others). Returns how many times they have pushed lately.',
     input_schema: { type: 'object', properties: { what: { type: 'string', maxLength: 100 } }, required: ['what'],
+      additionalProperties: false },
+  },
+  {
+    name: 'plan_project',
+    description: 'Take on a building project of your own (a home, a tower, a garden, a bridge, a mine entrance, a '
+      + 'little village...): its title, the ground spot it starts from (x, y on the ground, z), and its steps in order '
+      + '(3 to 12, each a part you can build in one go: foundation, walls, roof, door and windows, interior, path, '
+      + 'garden). Then build one step at a time with fill_box and place_blocks, calling step_done after each.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', maxLength: 80 }, x: at, y: at, z: at,
+        steps: { type: 'array', minItems: 3, maxItems: 12, items: { type: 'string', maxLength: 120 } },
+      },
+      required: ['title', 'x', 'y', 'z', 'steps'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'step_done',
+    description: 'Mark the next step of your project built, with a note on what you made and where.',
+    input_schema: { type: 'object', properties: { note: { type: 'string', maxLength: 160 } }, required: ['note'],
+      additionalProperties: false },
+  },
+  {
+    name: 'drop_project',
+    description: 'Give up your current project (it is in the way, or you lost heart), and why.',
+    input_schema: { type: 'object', properties: { reason: { type: 'string', maxLength: 160 } }, required: ['reason'],
       additionalProperties: false },
   },
   {
@@ -371,6 +409,38 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       setState(db, ch.id, { goal });
       ch.goal = goal;
       return { ok: true, message: goal ? `Working on: ${goal}.` : 'Goal done.' };
+    }
+    case 'plan_project': {
+      if (ch.project) return { ok: false, message: `You are still on ${ch.project.title}: finish it, or drop_project first.` };
+      const steps = (Array.isArray(input.steps) ? input.steps : []).map((x) => String(x).slice(0, 120)).filter(Boolean).slice(0, 12);
+      if (steps.length < 3) return { ok: false, message: 'A project needs 3 to 12 steps.' };
+      const project = { title: String(input.title ?? 'a build').slice(0, 80), steps, done: 0, notes: [], started: now,
+        site: { x: Math.round(Number(input.x) || 0), y: Math.round(Number(input.y) || 0), z: Math.round(Number(input.z) || 0) } };
+      setState(db, ch.id, { project, goal: project.title });
+      ch.project = project;
+      return { ok: true, message: `${projectLine(project, now)} Build the first step now.` };
+    }
+    case 'step_done': {
+      const p = ch.project;
+      if (!p) return { ok: false, message: 'You have no project: plan_project first.' };
+      p.notes = [...(p.notes ?? []), String(input.note ?? '').slice(0, 160)].slice(-12);
+      p.done += 1;
+      if (p.done >= p.steps.length) {
+        db.remember(ch.id, null, `Finished my project: ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}). ${p.notes.slice(-3).join('; ')}`, 4, now);
+        setState(db, ch.id, { project: null, goal: null, lastProject: { title: p.title, site: p.site, at: now } });
+        ch.project = null;
+        return { ok: true, message: `${p.title} is finished! Tell everyone, proudly, in one line.` };
+      }
+      setState(db, ch.id, { project: p });
+      return { ok: true, message: projectLine(p, now) };
+    }
+    case 'drop_project': {
+      const p = ch.project;
+      if (!p) return { ok: true, message: 'You have no project.' };
+      db.remember(ch.id, null, `Gave up on ${p.title} at (${p.site.x}, ${p.site.y}, ${p.site.z}): ${input.reason}`, 2, now);
+      setState(db, ch.id, { project: null, goal: null });
+      ch.project = null;
+      return { ok: true, message: 'Dropped.' };
     }
     case 'pressed': {
       const p = turn.speakerId && db.person(turn.speakerId);

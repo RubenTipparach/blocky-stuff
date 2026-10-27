@@ -59,12 +59,13 @@ export function botSettings(db, config) {
     // The hour (UTC) the daily summary goes to Discord and the game; -1 is off. 16:00 UTC is 9 in the morning in
     // California.
     summaryHour: Number.isInteger(saved.summaryHour) ? saved.summaryHour : 16,
-    // Idle: while a player is online and nobody has said anything for `after` seconds, a character takes a turn of
-    // its own (builds something small, walks over, chats); at most `perHour` turns an hour, each held to IDLE_BLOCKS.
+    // Own time: while a player is online (and for an hour after anyone's last word), a character nobody has asked
+    // anything for `after` seconds takes a turn of her own, mostly building her project; at most `perHour` turns an
+    // hour across the cast, each held to IDLE_BLOCKS.
     idle: {
       enabled: saved.idle?.enabled ?? true,
       after: Number.isFinite(saved.idle?.after) ? saved.idle.after : 60,
-      perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 20,
+      perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 30,
     },
   };
 }
@@ -76,7 +77,14 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   let busy = 0;
   let idleTimes = []; // when own turns started, this hour
   let idleNext = 0; // whose own turn is next
+  const lastBusy = new Map(); // character -> when she last answered someone or took a turn of her own
   const cast = () => activeCast(db, config, now());
+  // What the characters heard and did lately, for /admin: so a line that got no answer says why.
+  const events = [];
+  const note = (kind, ch, who, text) => {
+    events.push({ at: now(), kind, character: ch?.name ?? null, who: who ?? null, text: String(text ?? '').slice(0, 300) });
+    if (events.length > 80) events.shift();
+  };
 
   /** True when `text` names the character called `name` (or starts with !ai, which any character may take). */
   function addressed(text, name) {
@@ -90,12 +98,17 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     return n && new RegExp(`(^|[^\\w])@?${n}\\b`, 'i').test(String(text ?? ''));
   });
 
-  /** Who answers a line: the characters it names; else the one this person last talked with; else the fondest of them. */
+  /**
+   * Who answers a line: the characters it names; else the one they looked at or stood by when they said it (the
+   * game works it out); else the one they last talked with; else the fondest of them.
+   */
   function responders(msg, s) {
     const all = cast();
     if (msg.only) return all.filter((c) => c.id === msg.only);
     const byName = named(msg.text, all);
     if (byName.length) return byName;
+    const facing = msg.target && all.find((c) => c.id === msg.target);
+    if (facing) return [facing];
     if (s.listen !== 'all' && !/^!ai\b/i.test(String(msg.text ?? '').trim())) return [];
     const pid = msg.personId;
     const last = pid && lastWith.get(pid);
@@ -129,7 +142,10 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     const pid = msg.personId ?? personId(msg.source, msg.name);
     const m = { ...msg, personId: pid };
     const chosen = responders(m, s);
-    if (!chosen.length) return null;
+    if (!chosen.length) {
+      note('ignored', null, m.name, `"${m.text}": names no character, and they listen to mentions only`);
+      return null;
+    }
     if (!llm) {
       if (m.source === 'character') return null;
       const off = 'Our brains are not plugged in yet: an admin needs to set ANTHROPIC_API_KEY.';
@@ -141,18 +157,23 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     for (const ch of chosen) {
       if (m.source !== 'character') {
         const lim = limited(pid, s);
-        if (lim.why) { await reply(lim.why, ch); return lim.why; }
+        if (lim.why) { note('limited', ch, m.name, lim.why); await reply(lim.why, ch); return lim.why; }
         if (lim.wait) await new Promise((r) => setTimeout(r, lim.wait));
       }
       while (busy >= MAX_BUSY) await new Promise((r) => setTimeout(r, 250));
       busy++;
       try {
+        lastBusy.set(ch.id, now());
         const answer = await ask(ch, m, s, direct);
+        lastBusy.set(ch.id, now());
+        note(answer ? 'answered' : 'quiet', ch, m.name, `${m.source === 'discord' ? '[Discord] ' : ''}"${m.text}"`
+          + `${m.target === ch.id ? ' (looking at her)' : ''} -> ${answer ?? '(stayed quiet)'}`);
         if (m.source !== 'character') lastWith.set(pid, { id: ch.id, at: now() });
         if (answer) await reply(answer, ch);
         first ??= answer;
       } catch (err) {
         log.error(`${ch.name} failed:`, err?.status ?? '', err?.message ?? err);
+        note('error', ch, m.name, `${err?.status ?? ''} ${err?.message ?? err}`);
         if (m.source === 'character') continue;
         const sorry = err?.status === 401 ? 'My API key was refused: an admin needs to check ANTHROPIC_API_KEY.'
           : err?.status === 429 || err?.status === 529 ? 'I am a bit overloaded right now. Try again in a minute.'
@@ -298,18 +319,25 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   }
 
   /**
-   * A turn of a character's own, when nobody has said anything for a while; the cast takes turns. Says what it is
-   * up to through `reply(text, ch)`, or nothing. Returns the line, or null (no turn, or it chose quiet).
+   * A turn of a character's own: the cast takes turns, each one who has not answered anyone or taken a turn for the
+   * idle spell. Most turns she works on her project (planning one if she has none); she says a line only now and
+   * then, through `reply(text, ch)`. Returns the line, or null (no turn, or she worked quietly).
    */
   async function idle(reply) {
     const s = botSettings(db, config);
     const t = now();
     idleTimes = idleTimes.filter((x) => t - x < 3_600_000);
     const all = cast();
-    if (!llm || !all.length || !s.enabled || !s.idle.enabled || busy > 0 || !game.connected || !game.players.length) return null;
+    if (!llm || !all.length || !s.enabled || !s.idle.enabled || busy >= MAX_BUSY - 1 || !game.connected) return null;
     if (idleTimes.length >= s.idle.perHour || (s.perDay && todayCalls() >= s.perDay)) return null;
+    let ch = null;
+    for (let k = 0; k < all.length && !ch; k++) {
+      const c = all[(idleNext + k) % all.length];
+      if (t - (lastBusy.get(c.id) ?? -Infinity) >= s.idle.after * 1000) { ch = c; idleNext = (idleNext + k + 1) % all.length; }
+    }
+    if (!ch) return null;
     idleTimes.push(t);
-    const ch = all[idleNext++ % all.length];
+    lastBusy.set(ch.id, t);
     busy++;
     try {
       const self = { name: ch.name, admin: true };
@@ -318,19 +346,24 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       ...INNER_TOOLS.filter((x) => x.name !== 'pressed')];
       const turn = { speakerId: null, moved: new Map() };
       const g = actingAs(ch);
-      const mine = db.deeds(t - 7 * 86400_000).filter((d) => d.who.includes(ch.name)).slice(-12)
-        .map((d) => `${new Date(d.at).toISOString().slice(0, 16)} ${d.tool} ${d.input}`);
-      const others = all.filter((c) => c.id !== ch.id).map((c) => c.name);
+      const others = all.filter((c) => c.id !== ch.id);
+      const sites = others.filter((c) => c.project).map((c) => `${c.name} is building ${c.project.title} at `
+        + `(${c.project.site.x}, ${c.project.site.y}, ${c.project.site.z})`);
+      const task = ch.project
+        ? `Work on your project now: build the next step (${ch.project.steps[ch.project.done]}) with find_ground, fill_box `
+          + 'and place_blocks, then call step_done with a note. Keep the design coherent with what you already built '
+          + '(the notes say where), and make it look good: varied blocks, trims, windows, light, details.'
+        : 'You have no project. Think of something you would love to build, true to who you are (a home of your own, a '
+          + 'workshop, a tower, a garden, a well, a bridge, a mine entrance, a shrine to the builder who made you...), '
+          + 'something that takes many steps. Pick a spot on natural ground (dirt, grass, sand, stone; check with '
+          + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, call plan_project, '
+          + 'then build the first step.';
       const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { others: onlineIds(), cast: all, now: t })}`
-        + `\n\nWhat you built lately (newest last):\n${mine.join('\n') || '(nothing yet)'}\n\n`
-        + 'Nobody has said anything for a while, so do something on your own. Pick ONE: build something small and '
-        + `charming near a player (a lamp post, a bench, a little garden, a well, a statue; at most ${IDLE_BLOCKS} blocks), `
-        + 'maybe as a gift for someone you are fond of; add a detail to something you built before; chase your current '
-        + 'goal; walk over to someone and chat (bring up something you remember about them)'
-        + `${others.length ? `; or say something to ${others.join(' or ')} by name` : ''}. Check the ground with find_ground `
-        + 'first and build on natural ground (dirt, grass, sand, stone), 5 to 15 blocks from players, never on or inside '
-        + 'anything a player built. Then say ONE short line in chat, in your own voice. If now is not a good time, answer '
-        + 'with exactly QUIET.' }];
+        + `${sites.length ? `\n\nThe others: ${sites.join('; ')}.` : ''}\n\n`
+        + `Nobody is asking you for anything right now, so you are on your own time. ${task} At most ${IDLE_BLOCKS} `
+        + 'blocks this turn. Never build on or inside anything a player built. When you are done for this turn, say ONE '
+        + 'short line in chat only if it is worth sharing (you started or finished something, or have a word for '
+        + `someone${others.length ? `, or for ${others.map((c) => c.name).join(' or ')} by name` : ''}); otherwise answer with exactly QUIET.` }];
       let placed = 0;
       for (let round = 0; round < MAX_ROUNDS; round++) {
         const response = await call(s, systemPrompt(ch), tools, messages);
@@ -338,6 +371,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         const uses = response.content.filter((b) => b.type === 'tool_use');
         if (response.stop_reason !== 'tool_use' || !uses.length) {
           const out = finalText(response.content);
+          note('own turn', ch, null, `${ch.project ? `${ch.project.title}: ${ch.project.done}/${ch.project.steps.length} steps` : 'no project'}`
+            + `, ${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
           if (!out || out.replace(/[^A-Z]/g, '') === QUIET) return null;
           await reply(out, ch);
           return out;
@@ -355,26 +390,30 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
             r = await runTool(use.name, use.input, { game: g, asker: self, policy: s.policy });
             if (r.ok) placed += size;
           }
-          log.log(`${ch.name} (idle) ${use.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
+          log.log(`${ch.name} (own turn) ${use.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
           if (r.ok && ACTS.has(use.name)) db.addDeed(`${ch.name} (own idea)`, use.name, use.input, r.message, now());
           results.push({ type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'),
             ...(r.ok ? {} : { is_error: true }) });
         }
         messages.push({ role: 'user', content: results });
       }
+      note('own turn', ch, null, `ran out of steps, ${placed} blocks`);
       return null;
     } catch (err) {
       log.error(`${ch.name} idle turn failed:`, err?.status ?? '', err?.message ?? err);
+      note('error', ch, null, `own turn: ${err?.status ?? ''} ${err?.message ?? err}`);
       return null;
     } finally {
       busy--;
+      lastBusy.set(ch.id, now());
     }
   }
 
   /** The characters a character's line names: they may answer it, up to CHAIN_MAX in a row. */
   const answerers = (text, ch, depth = 0) => (depth >= CHAIN_MAX ? [] : named(text, cast()).filter((c) => c.id !== ch.id));
 
-  return { hear, addressed, answerers, summary, idle, cast, get ready() { return llm !== null; } };
+  return { hear, addressed, answerers, summary, idle, cast, activity: () => [...events].reverse(),
+    get ready() { return llm !== null; } };
 }
 
 /** The reply's text, flattened to one chat-sized line. */

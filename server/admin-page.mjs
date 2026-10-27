@@ -138,9 +138,9 @@ function build() {
     <div class="three"><label class="field">Cooldown (s)<input id="b_cooldown" type="number" min="0"></label>
     <label class="field">Per player / hour<input id="b_perHour" type="number" min="0"></label>
     <label class="field">Calls / day (0 = no limit)<input id="b_perDay" type="number" min="0"></label></div>
-    <label class="check"><input type="checkbox" id="b_idle"> Does things on its own when nobody asks (builds small things, walks, chats)</label>
-    <div class="two"><label class="field">After a quiet spell of (seconds)<input id="b_idleAfter" type="number" min="15"></label>
-    <label class="field">Own turns per hour, at most<input id="b_idlePerHour" type="number" min="0"></label></div>
+    <label class="check"><input type="checkbox" id="b_idle"> They work on their own projects when nobody is asking them anything (while someone is online, and for an hour after anyone's last word)</label>
+    <div class="two"><label class="field">A turn when not asked anything for (seconds)<input id="b_idleAfter" type="number" min="15"></label>
+    <label class="field">Own turns per hour, at most (all together)<input id="b_idlePerHour" type="number" min="0"></label></div>
     <div class="muted note" style="margin:0 0 6px">Players who are not admins may ask for:</div>
     <div id="policy"></div>
     <div class="row" style="margin-top:10px"><button>Save</button><button type="button" class="quiet" id="summaryNow">Post today's summary now</button>
@@ -189,6 +189,10 @@ function build() {
   Players join their game and Discord selves by typing <code>!link</code> in game, or with Link with... here.</p>
   <div class="scroll"><table><thead><tr><th>Person</th><th>Feels</th><th>Affinity</th><th>Trust</th><th>Nickname</th><th>Talks</th><th>Last seen</th><th></th></tr></thead>
   <tbody id="people"></tbody></table></div></section>
+<section style="margin-top:14px"><h2>Activity</h2>
+  <p class="muted note">What the characters heard and did lately, newest first: who answered, who stayed quiet and why, their own turns, errors.</p>
+  <div class="scroll"><table><thead><tr><th>When</th><th>What</th><th>Who</th><th>From</th><th></th></tr></thead>
+  <tbody id="activity"></tbody></table></div></section>
 <section style="margin-top:14px"><h2>Her memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
   <tbody id="memories"></tbody></table></div></section>
 <section style="margin-top:14px"><h2>Luanti log</h2><pre id="log"></pre></section>\`;
@@ -336,7 +340,12 @@ function refresh() {
   const typing = document.activeElement && document.activeElement.closest && document.activeElement.closest('#people');
   const me = st.characters.find((c) => c.id === picked) || st.characters[0];
   if (me) $('moodLine').textContent = 'Mood: ' + me.mood.label + (me.mood.reason ? ' (' + me.mood.reason + ')' : '')
-    + (me.goal ? ' · Working on: ' + me.goal : '');
+    + (me.project ? ' · Project: ' + me.project.title + ' at ' + me.project.site.x + ', ' + me.project.site.y + ', ' + me.project.site.z
+      + ' (' + me.project.done + ' of ' + me.project.steps.length + ' steps)' : me.goal ? ' · Working on: ' + me.goal : '');
+  const kinds = { answered: 'ok', quiet: 'muted', ignored: 'warn', limited: 'warn', error: 'bad', 'own turn': 'muted' };
+  $('activity').innerHTML = (st.activity || []).length ? st.activity.map((e) => '<tr><td class="muted">' + clock(e.at) + '</td><td class="'
+    + (kinds[e.kind] || '') + '">' + esc(e.kind) + '</td><td>' + esc(e.character || '') + '</td><td>' + esc(e.who || '') + '</td><td>'
+    + esc(e.text) + '</td></tr>').join('') : '<tr><td colspan="5" class="muted">Nothing yet.</td></tr>';
   const bondOf = (p) => (me && p.bonds && p.bonds[me.id]) || { affinity: 0, trust: 20, nickname: null, facts: [] };
   const feels = (a) => a <= -60 ? 'hostile' : a <= -25 ? 'dislike' : a < -5 ? 'wary' : a < 15 ? 'neutral' : a < 35 ? 'friendly' : a < 60 ? 'fond' : a < 85 ? 'close friend' : 'best friend';
   const kind = (id) => (id.startsWith('discord:') ? 'Discord: ' : id.startsWith('char:') ? 'Character: ' : 'Game: ');

@@ -179,12 +179,12 @@ end
 
 -- ---- The characters' bodies ----
 -- Each character the sidecar names (server/character.mjs) has a body: a woman in a dress and long hair, in her
--- own colours, her name over her head. She is in the world while a player is online, and stays where she is
--- (owner, 2026-10-26: "bots shouldnt follow me unless I asked"): she turns to face whoever she answers, and walks
--- only to what she builds, to hand something over, or when asked (follow, come, walk; stay stops her). Bodies keep
--- apart: each takes her own place around a shared goal, and two that end up close step away from each other
--- ("they shouldnt be standing insside of eachotehr"). Bodies are never saved with the map (static_save off); when
--- an area unloads they are gone, and the next sync puts them back where they stood, or by a player.
+-- own colours, her name over her head. She lives in the world like a player's things do: saved with the map
+-- where she stands, so a player who walks away leaves her behind (owner, 2026-10-27: "Bots keep following me
+-- around. They should not unless I order them to"). She turns to face whoever she answers, and walks only to
+-- what she builds, to hand something over, or when asked (follow, come, walk; stay stops her). Bodies keep apart:
+-- each takes her own place around a shared goal, and two that end up close step away from each other. Where each
+-- one lives is kept in mod storage, so a body is only made anew the first time, or when she is called.
 
 local cast = {} -- id -> { name, chat, dress, hair }, as the sidecar last sent it
 local order = {} -- the ids, in the sidecar's order
@@ -195,7 +195,8 @@ local WALK_SPEED, FAR = 4, 40
 local ARRIVE = 1.2 -- close enough to her place
 local APART = 1.4 -- nearer than this to another body, and they step apart
 local RING = 2.5 -- how far from a shared goal each takes her place
-local HOME_NEAR = 64 -- she comes back where she stood when a player is this near it
+local storage = core.get_mod_storage()
+local SAVE_EVERY = 5 -- seconds between noting where a body stands
 
 -- Her skin: the base (face, hands, boots) with the dress and hair masks tinted in her colours.
 local function skin(c)
@@ -208,6 +209,27 @@ local function body(id)
 	return bodies[id]
 end
 local function alive(b) return b.obj ~= nil and b.obj:get_pos() ~= nil end
+-- Where she lives (last stood), across restarts.
+local function home_of(id) return core.parse_json(storage:get_string("home:" .. id) ~= "" and storage:get_string("home:" .. id) or "null") end
+local function set_home(id, pos)
+	storage:set_string("home:" .. id, core.write_json({ x = math.floor(pos.x + 0.5), y = math.floor(pos.y + 0.5), z = math.floor(pos.z + 0.5) }))
+end
+
+-- Keep the map block she stands in loaded, player or no player (owner, 2026-10-27: "Is there a way to mark on the
+-- server to stay loaded without the player"), so she stays awake: walks, builds, is there when someone comes. One
+-- block per character, moved with her (max_forceloaded_blocks in luanti/minetest.conf leaves room).
+local held = {} -- id -> { key, pos }
+local function hold(id, pos)
+	local key = core.hash_node_position(vector.floor(vector.divide(pos, 16)))
+	local h = held[id]
+	if h and h.key == key then return end
+	if h then core.forceload_free_block(h.pos, true) end
+	if core.forceload_block(pos, true) then held[id] = { key = key, pos = vector.round(pos) } else held[id] = nil end
+end
+local function release(id)
+	if held[id] then core.forceload_free_block(held[id].pos, true) end
+	held[id] = nil
+end
 
 -- Her place around a goal: each character a different angle on a ring, so two never aim for the same spot.
 local function place_for(id, goal)
@@ -245,9 +267,21 @@ core.register_entity("ai_bot:npc", {
 		visual_size = has_model and { x = 1, y = 1 } or { x = 0.6, y = 1.7 },
 		stepheight = 1.1,
 		nametag = "",
-		static_save = false,
+		static_save = true,
 	},
-	on_activate = function(self)
+	get_staticdata = function(self) return self._cid or "" end,
+	on_activate = function(self, staticdata)
+		-- A body saved with the map wakes up as her; if she is already up elsewhere (called away while this
+		-- copy slept), this one goes.
+		if staticdata and staticdata ~= "" then
+			self._cid = staticdata
+			local b = body(staticdata)
+			if alive(b) and b.obj ~= self.object then
+				self.object:remove()
+				return
+			end
+			b.obj, b.look = self.object, nil
+		end
 		self.object:set_armor_groups({ immortal = 1 })
 		self.object:set_acceleration({ x = 0, y = -9.81, z = 0 })
 		self._stuck = 0
@@ -261,14 +295,19 @@ core.register_entity("ai_bot:npc", {
 	end,
 	on_step = function(self, dtime)
 		local b = self._cid and bodies[self._cid]
-		if not b or b.obj ~= self.object then
-			self.object:remove() -- a body the sidecar no longer knows
+		if not b or b.obj ~= self.object or (#order > 0 and not cast[self._cid]) then
+			self.object:remove() -- a stray copy, or a character the sidecar no longer has
 			return
 		end
 		local obj = self.object
 		local pos = obj:get_pos()
 		local vel = obj:get_velocity()
-		b.home = pos
+		self._saved = (self._saved or 0) + dtime
+		if self._saved > SAVE_EVERY then
+			self._saved = 0
+			set_home(self._cid, pos)
+			hold(self._cid, pos)
+		end
 		-- Step away from any other body standing too close.
 		local push = { x = 0, z = 0 }
 		for id, other in pairs(bodies) do
@@ -330,9 +369,10 @@ local function spawn(id, at)
 	obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
 	if has_model then obj:set_properties({ textures = { skin(c) } }) end
 	b.look = c.name .. skin(c)
+	set_home(id, at)
 end
 
--- Into the world near `at` if she is not in it.
+-- Into the world near `at` if she is not up (she was called, or sent to work).
 local function ensure(id, at)
 	if cast[id] and not alive(body(id)) and at then spawn(id, at) end
 end
@@ -346,13 +386,11 @@ local function go(id, pos, how)
 	ensure(id, pos)
 end
 
--- Turn to face a player for a while (she answered them).
+-- Turn to face a player for a while (she answered them), if she is near; she does not come over for it.
 local function face(id, name)
-	local p = name and core.get_player_by_name(name)
-	if not p or not cast[id] then return end
+	if not cast[id] or not name then return end
 	local b = body(id)
 	b.face, b.face_until = name, core.get_us_time() + 20 * 1000000
-	ensure(id, p:get_pos())
 end
 
 local function player_pos(name)
@@ -391,8 +429,9 @@ function actions.stay(a)
 	return true, "Staying put."
 end
 
--- Each sync: the cast as the sidecar has it; each in the world while anyone is, where she last stood if a player
--- is near it, else by a player (spread among them). Nobody online and nothing to do: gone until someone comes.
+-- Each sync: the cast as the sidecar has it. A character who has never been in the world appears by a player the
+-- first time one is online; after that she lives where she stood, saved with the map, and wakes when someone goes
+-- there.
 local function tend(list)
 	if type(list) == "table" then
 		local fresh, ids = {}, {}
@@ -408,6 +447,8 @@ local function tend(list)
 		if not cast[id] then
 			if alive(b) then b.obj:remove() end
 			bodies[id] = nil
+			storage:set_string("home:" .. id, "")
+			release(id)
 		end
 	end
 	local players = core.get_connected_players()
@@ -416,34 +457,22 @@ local function tend(list)
 		local c = cast[id]
 		if b.follow and not core.get_player_by_name(b.follow) then b.follow = nil end
 		if alive(b) then
-			if #players == 0 and not b.go then
-				b.obj:remove()
-				b.obj = nil
-			elseif b.look ~= c.name .. skin(c) then
+			b.waiting = nil
+			if b.look ~= c.name .. skin(c) then
 				b.obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
 				if has_model then b.obj:set_properties({ textures = { skin(c) } }) end
 				b.look = c.name .. skin(c)
 			end
+		elseif home_of(id) then
+			hold(id, home_of(id)) -- where she lives: load it, and she wakes there
+			-- Still not up half a minute after her block loaded (her saved body was lost): make her anew there.
+			b.waiting = b.waiting or core.get_us_time()
+			if core.get_us_time() - b.waiting > 30 * 1000000 then
+				b.waiting = nil
+				spawn(id, home_of(id))
+			end
 		elseif #players > 0 then
-			local near_home = false
-			if b.home then
-				for _, p in ipairs(players) do
-					if vector.distance(p:get_pos(), b.home) < HOME_NEAR then near_home = true end
-				end
-			end
-			if near_home then
-				local obj = core.add_entity(vector.add(b.home, { x = 0, y = 0.5, z = 0 }), "ai_bot:npc")
-				if obj then
-					local ent = obj:get_luaentity()
-					if ent then ent._cid = id end
-					b.obj = obj
-					obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
-					if has_model then obj:set_properties({ textures = { skin(c) } }) end
-					b.look = c.name .. skin(c)
-				end
-			else
-				spawn(id, players[(i - 1) % #players + 1]:get_pos())
-			end
+			spawn(id, players[(i - 1) % #players + 1]:get_pos())
 		end
 	end
 end
@@ -465,6 +494,129 @@ local function after(a)
 		go(id, vector.new(n.x, n.y, n.z), "mine")
 	end
 end
+
+-- ---- Talking to one of them, and how she feels about you ----
+
+-- The character a player is looking at (within 12 blocks, about 20 degrees of where they look), else the nearest
+-- within 5 blocks: who a line said in game is meant for when it names nobody (owner, 2026-10-27: "recognize when
+-- I talk to one of them ... looking at someone when speaking").
+local function looked_at(player, strict)
+	local eye = vector.add(player:get_pos(), { x = 0, y = player:get_properties().eye_height or 1.5, z = 0 })
+	local dir = player:get_look_dir()
+	local best, best_cos, nearest, nearest_d = nil, strict and 0.97 or 0.94, nil, 5
+	for id, b in pairs(bodies) do
+		if cast[id] and alive(b) then
+			local v = vector.subtract(vector.add(b.obj:get_pos(), { x = 0, y = 1.2, z = 0 }), eye)
+			local d = vector.length(v)
+			if d > 0.1 and d < (strict and 10 or 12) then
+				local cos = vector.dot(vector.divide(v, d), dir)
+				if cos > best_cos then best, best_cos = id, cos end
+			end
+			if d < nearest_d then nearest, nearest_d = id, d end
+		end
+	end
+	return best or (not strict and nearest) or nil
+end
+
+-- A character by (the start of) her name.
+local function named(text)
+	local want = tostring(text or ""):lower()
+	if want == "" then return nil end
+	for _, id in ipairs(order) do
+		if cast[id].name:lower() == want then return id end
+	end
+	for _, id in ipairs(order) do
+		if cast[id].name:lower():sub(1, #want) == want then return id end
+	end
+	return nil
+end
+
+local function in_her_voice(to, id, text)
+	local c = cast[id]
+	core.chat_send_player(to, core.colorize(hex(c.chat, BOT_COLOR), "<" .. c.name .. "> ") .. text)
+end
+
+-- How each character feels about each player online, as the sidecar last sent it: meters[player][id] =
+-- { a = affinity, t = trust, w = word, tw = trust word }.
+local meters = {}
+
+local function meter_line(player_name, id)
+	local m = meters[player_name] and meters[player_name][id]
+	local c = cast[id]
+	if not m or not c then return c and c.name or "" end
+	local filled = math.floor((m.a + 100) / 20 + 0.5)
+	return string.format("%s  %s (%+d)  [%s%s]  trust: %s", c.name, m.w or "", m.a or 0, string.rep("|", filled),
+		string.rep(".", 10 - filled), m.tw or "")
+end
+
+core.register_chatcommand("talk", {
+	params = "<name> <message>",
+	description = "Say something to one of the characters, by name",
+	privs = { shout = true },
+	func = function(name, param)
+		local who, text = param:match("^(%S+)%s+(.+)$")
+		local id = who and named(who)
+		if not id then return false, "Say /talk <name> <message>; the characters are: " .. table.concat((function()
+			local n = {} for _, x in ipairs(order) do n[#n + 1] = cast[x].name end return n end)(), ", ") end
+		core.chat_send_all("<" .. name .. "> (to " .. cast[id].name .. ") " .. line(text))
+		push({ type = "chat", name = name, text = line(text), target = id })
+		return true
+	end,
+})
+
+for _, cmd in ipairs({ "follow", "come", "stay" }) do
+	core.register_chatcommand(cmd, {
+		params = "<name>",
+		description = ({ follow = "Have a character follow you until /stay", come = "Call a character over",
+			stay = "Have a character stop and stay where she is" })[cmd],
+		privs = { shout = true },
+		func = function(name, param)
+			local id = named(param:match("^%s*(%S+)"))
+			if not id then return false, "Which one? /" .. cmd .. " <name>" end
+			local ok, msg = actions[cmd]({ by = id, player = name })
+			if ok then
+				in_her_voice(name, id, ({ follow = "Lead the way!", come = "On my way.", stay = "I'll stay right here." })[cmd])
+				push({ type = "order", name = name, order = cmd, target = id })
+			end
+			return ok, not ok and msg or nil
+		end,
+	})
+end
+
+core.register_chatcommand("rel", {
+	description = "How each character feels about you",
+	func = function(name)
+		local lines = {}
+		for _, id in ipairs(order) do lines[#lines + 1] = meter_line(name, id) end
+		return true, #lines > 0 and table.concat(lines, "\n") or "Nobody here yet."
+	end,
+})
+
+-- The meter of whoever a player looks at, near the crosshair.
+local huds = {}
+local hud_timer = 0
+core.register_globalstep(function(dtime)
+	hud_timer = hud_timer + dtime
+	if hud_timer < 0.3 then return end
+	hud_timer = 0
+	for _, player in ipairs(core.get_connected_players()) do
+		local pname = player:get_player_name()
+		local id = looked_at(player, true)
+		local text = id and meter_line(pname, id) or ""
+		local h = huds[pname]
+		if not h then
+			h = { id = player:hud_add({ type = "text", position = { x = 0.5, y = 0.58 },
+				text = "", number = 0xFFE8B0, alignment = { x = 0, y = 0 }, scale = { x = 400, y = 40 } }), text = "" }
+			huds[pname] = h
+		end
+		if h.text ~= text then
+			player:hud_change(h.id, "text", text)
+			h.text = text
+		end
+	end
+end)
+
+core.register_on_leaveplayer(function(player) huds[player:get_player_name()] = nil end)
 
 local function run(a)
 	local handler = actions[a.type]
@@ -510,6 +662,7 @@ local function sync()
 		end
 		local answer = core.parse_json(res.data)
 		if type(answer) == "table" then
+			if type(answer.meters) == "table" then meters = answer.meters end
 			local tended, err = pcall(tend, answer.characters)
 			if not tended then core.log("warning", "[ai_bot] body: " .. tostring(err)) end
 		end
@@ -529,7 +682,10 @@ core.register_globalstep(function(dtime)
 end)
 
 core.register_on_chat_message(function(name, message)
-	if message:sub(1, 1) ~= "/" then push({ type = "chat", name = name, text = line(message) }) end
+	if message:sub(1, 1) ~= "/" then
+		local player = core.get_player_by_name(name)
+		push({ type = "chat", name = name, text = line(message), target = player and looked_at(player, false) or nil })
+	end
 	-- false: the message is shown to everyone as usual.
 	return false
 end)

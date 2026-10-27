@@ -19,8 +19,11 @@ import { createDiscord } from './discord.mjs';
 import { mcpAuthorized, mcpCall, storeMcpToken } from './mcp.mjs';
 import { ADMIN_PAGE } from './admin-page.mjs';
 import { TOOLS } from './tools.mjs';
-import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId } from './character.mjs';
+import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId, affinityWord,
+  trustWord } from './character.mjs';
 
+// The characters keep working on their own for this long after anyone last said or did anything.
+const WORK_AFTER_MS = 60 * 60_000;
 // A !link code lasts this long.
 const LINK_MS = 10 * 60_000;
 // Where new players get the game, in the "server is up" post.
@@ -50,6 +53,11 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   const host = () => characters()[0] ?? { id: 'blocky', name: 'Blocky', chatColor: '#f2b84b' };
   // What the game needs of each character for its body and its name in chat.
   const bodies = () => characters().map((c) => ({ id: c.id, name: c.name, chat: c.chatColor, dress: c.dressColor, hair: c.hairColor }));
+  // How each character feels about each player online, for the meter a player sees when looking at one.
+  const meters = () => Object.fromEntries(game.players.map((p) => [p.name, Object.fromEntries(characters().map((c) => {
+    const b = db.bond(c.id, personId('game', p.name));
+    return [c.id, { a: b.affinity, t: b.trust, w: affinityWord(b.affinity), tw: trustWord(b.trust) }];
+  }))]));
   const joinAt = () => `${config.gameAddress || new URL(config.publicUrl).hostname}:${config.gamePort}`;
 
   const chat = discord ?? createDiscord({
@@ -88,10 +96,11 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     return r;
   }
 
-  // When a player or Discord last said anything, or the bot last spoke: the idle clock counts from here.
+  // When a person last did anything (chat in game or on Discord, joined, gave an order): the characters keep working
+  // on their own while a player is online, and for WORK_AFTER_MS after the last of this.
   let lastActivity = now();
   game.onEvent((e) => {
-    if (e.type === 'chat' || e.type === 'join') lastActivity = now();
+    if (e.type === 'chat' || e.type === 'join' || e.type === 'order') lastActivity = now();
     if (e.type === 'chat' && typeof e.name === 'string' && typeof e.text === 'string') {
       // Everyone who chats is someone the bot knows, whether or not it answers.
       db.meet(personId('game', e.name), e.name, { at: now() });
@@ -99,9 +108,16 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       db.addChat('game', e.name, e.text, now());
       if (relay().chat) chat.post({ text: e.text, as: e.name });
       const admin = game.player(e.name)?.privs.includes('server') ?? false;
-      brain.hear({ source: 'game', name: e.name, text: e.text, admin, personId: personId('game', e.name) },
+      // target: the character they were looking at, or stood next to, when they said it (the mod works it out).
+      brain.hear({ source: 'game', name: e.name, text: e.text, admin, personId: personId('game', e.name),
+        target: typeof e.target === 'string' ? e.target : undefined },
         (t, ch) => botSays(t, ch, { near: e.name }))
         .catch((err) => log.error(err));
+    } else if (e.type === 'order' && typeof e.name === 'string' && typeof e.target === 'string') {
+      // /follow, /come, /stay: done in game at once; the character remembers being asked.
+      db.meet(personId('game', e.name), e.name, { at: now() });
+      const ch = characters().find((c) => c.id === e.target);
+      if (ch) db.addChat('game', '*', `${e.name} asked ${ch.name} to ${e.order === 'stay' ? 'stay put' : e.order === 'come' ? 'come over' : 'follow them'}`, now());
     } else if (e.type === 'join' || e.type === 'leave') {
       db.meet(personId('game', e.name), e.name, { at: now(), talked: false });
       const line = `${e.name} ${e.type === 'join' ? 'joined' : 'left'} the game`;
@@ -122,16 +138,19 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     }
   });
 
-  // The idle clock: a quiet minute (the bot's idle `after`) with a player online, and the bot takes a turn.
+  // The work clock: while a player is online, or within WORK_AFTER_MS of anyone's last word, the characters take
+  // turns of their own (server/bot.mjs idle: their projects), one at a time, each when she has not been asked
+  // anything for the idle spell (owner, 2026-10-27: "if they are on their own they should build whatever they want,
+  // at least for an hour or so").
   let idling = false;
   async function idleTick() {
     const s = botSettings(db, config);
-    if (idling || !s.idle.enabled || !game.players.length || now() - lastActivity < s.idle.after * 1000) return;
+    if (idling || !s.idle.enabled || !game.connected) return;
+    if (!game.players.length && now() - lastActivity > WORK_AFTER_MS) return;
     idling = true;
     try {
       await brain.idle?.((t, ch) => botSays(t, ch));
     } finally {
-      lastActivity = now();
       idling = false;
     }
   }
@@ -323,6 +342,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       return send(res, 200, {
         you, ...status(), settings: botSettings(db, config), relay: relay(), models: MODELS, efforts: EFFORTS,
         characters: castOf(db, config, now()), people: db.people(100), memories: db.allMemories(80),
+        activity: brain.activity?.() ?? [],
         policyTools: TOOLS.filter((t) => t.permission && t.permission !== 'admin').map((t) => ({ name: t.name, permission: t.permission })),
         missing: config.missing, chat: db.chat(80), usage: db.usage(14),
         mcp: { url: `${config.publicUrl}/mcp`, hasToken: Boolean(config.mcpToken || db.setting('mcp.token')) },
@@ -442,7 +462,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       }
       const body = await readBody(req, SYNC_MAX);
       if (!body) return send(res, 400, { error: 'Not JSON.' });
-      return send(res, 200, { ...game.sync(body), bot: host().name, characters: bodies() });
+      return send(res, 200, { ...game.sync(body), bot: host().name, characters: bodies(), meters: meters() });
     }
 
     const ip = req.headers['fly-client-ip'] ?? req.socket.remoteAddress ?? '';
