@@ -677,11 +677,6 @@ figcaption { padding: 10px 12px; display: grid; gap: 2px; } figcaption span { co
 code { background: #232a1f; padding: 1px 6px; border-radius: 4px; }
 </style></head><body><main>
 <h1>${esc(config.serverName)} map</h1>
-<p>${view === 'iso' ? 'Drag and zoom the world; switch on the cut to slice it open one block at a time.' : 'Drag and zoom the world from above.'}
-The characters and players move on it live. Join at
-<code>${esc(config.gameAddress || new URL(config.publicUrl).hostname)}:${config.gamePort}</code> with <a href="https://www.luanti.org/en/">Luanti</a>.
-Parts of the world nobody has been to yet stay blank. The map brings itself up to date every 5 minutes; Refresh reads
-the area you are looking at from the game right now.</p>
 <div class="bar"><span class="seg"><button id="toIso"${view === 'iso' ? ' class="on"' : ''}>Isometric</button><button id="toFlat"${view === 'flat' ? ' class="on"' : ''}>Top-down</button></span>
 <button id="refresh" class="act">↻ Refresh this view</button><span id="refreshNote"></span></div>
 ${view === 'iso' ? `<div class="cut"><label class="tog"><input type="checkbox" id="cutOn"> Cut at height</label>
