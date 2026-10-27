@@ -76,16 +76,13 @@ test('a Discord user gets admin tools only when the caller vouches for them', as
   assert.ok(client.calls[1].tools.some((t) => t.name === 'fill_box'));
 });
 
-test('a quick second question is dropped, and the hourly limit is said', async () => {
-  const { db, bot, tick } = setup([text('one'), text('two')]);
-  db.putJson('bot', { perHour: 2, cooldown: 5 });
+test('a quick second question waits its turn instead of being dropped, and the hourly limit is said', async () => {
+  const { db, bot } = setup([text('one'), text('two')]);
+  db.putJson('bot', { perHour: 2, cooldown: 0.05 });
   const said = [];
   const ask = () => bot.hear({ source: 'game', name: 'alice', text: '!ai hi' }, (t) => said.push(t));
-  await ask();
-  assert.equal(await ask(), null);
-  tick(6000);
-  await ask();
-  tick(6000);
+  assert.equal(await ask(), 'one');
+  assert.equal(await ask(), 'two');
   assert.match(await ask(), /a lot this hour/);
   assert.equal(said.length, 3);
 });
@@ -110,18 +107,29 @@ test('the reply is one chat line, cut to length', () => {
   assert.equal(finalText([]), null);
 });
 
-test('listening to everything, the bot joins in or stays QUIET, and never nags about limits', async () => {
-  const { db, bot, tick } = setup([text('QUIET'), text('Welcome back, alice!')]);
-  db.putJson('bot', { listen: 'all', cooldown: 1 });
-  const said = [];
-  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'lol' }, (t) => said.push(t)), null);
-  tick(2000);
-  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'im back' }, (t) => said.push(t)), 'Welcome back, alice!');
-  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'ok' }, (t) => said.push(t)), null); // cooldown, quietly
-  assert.deepEqual(said, ['Welcome back, alice!']);
-  db.putJson('bot', { listen: 'mentions' });
-  tick(2000);
-  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'hello all' }, () => {}), null);
+test('every line from a person gets an answer, from the character they talk with; characters may stay quiet', async () => {
+  const { db, bot } = setup([text('Hi there!'), text('Aye.'), text('Still me.'), text('QUIET'), text('Hello!')]);
+  db.putJson('bot', { cooldown: 0 });
+  const who = [];
+  const hear = (text, extra = {}) => bot.hear({ source: 'game', name: 'alice', text, ...extra }, (t, ch) => who.push([ch.name, t]));
+  assert.equal(await hear('lol'), 'Hi there!'); // no name: the first character answers
+  assert.equal(await hear('Moss, how deep is the cave?'), 'Aye.');
+  assert.equal(await hear('and the diamonds?'), 'Still me.'); // she keeps talking with Moss
+  assert.deepEqual(who.map(([n]) => n), ['Blocky', 'Moss', 'Moss']);
+  // A character speaking to another may be met with silence.
+  assert.equal(await bot.hear({ source: 'character', name: 'Blocky', text: 'Moss, you grump!', personId: 'char:blocky',
+    only: 'moss' }, () => {}), null);
+  db.putJson('bot', { cooldown: 0, listen: 'mentions' });
+  assert.equal(await hear('hello all'), null);
+  assert.equal(await hear('@Blocky hello'), 'Hello!');
+});
+
+test('a character naming another may get an answer, but not forever', () => {
+  const { bot } = setup([]);
+  const [blocky, moss] = bot.cast();
+  assert.deepEqual(bot.answerers('Moss, look at this!', blocky).map((c) => c.id), ['moss']);
+  assert.deepEqual(bot.answerers('Moss, look at this!', blocky, 2), []);
+  assert.deepEqual(bot.answerers('I talk about myself, Moss', moss), []);
 });
 
 test('what the bot does is kept, and the daily summary tells of it', async () => {

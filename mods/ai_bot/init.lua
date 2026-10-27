@@ -22,6 +22,11 @@ local WORLD_LIMIT = 30000
 local BOT_COLOR = "#f2b84b"
 local DISCORD_COLOR = "#9aa8ff"
 
+-- A colour from the sidecar, if it is one ("#rrggbb"), else the fallback.
+local function hex(c, fallback)
+	return type(c) == "string" and c:match("^#%x%x%x%x%x%x$") and c or fallback
+end
+
 local events = {}
 local results = {}
 local in_flight = false
@@ -69,7 +74,7 @@ local actions = {}
 function actions.say(a)
 	local text = line(a.text)
 	if a.from then
-		local color = a.from:sub(1, 9) == "[Discord]" and DISCORD_COLOR or BOT_COLOR
+		local color = hex(a.color, a.from:sub(1, 9) == "[Discord]" and DISCORD_COLOR or BOT_COLOR)
 		text = core.colorize(color, "<" .. line(a.from, 48) .. "> ") .. text
 	end
 	if a.to then
@@ -172,23 +177,33 @@ function actions.kick(a)
 	return true, "Kicked " .. a.player .. "."
 end
 
--- ---- The bot's body ----
--- A character with the bot's name over its head, in the world whenever a player is online or it has work to
--- do: it walks after whoever it is talking to, and goes to what it builds. It is never saved with the map
--- (static_save off), so a world never fills with stale copies: when its area unloads it is gone, and the
--- next sync puts it back by a player.
+-- ---- The characters' bodies ----
+-- Each character the sidecar names (server/character.mjs) has a body: a woman in a dress and long hair, in her
+-- own colours, her name over her head. She is in the world whenever a player is online or she has work to do:
+-- she walks after whoever she is talking to and goes to what she builds. Bodies are never saved with the map
+-- (static_save off), so a world never fills with stale copies: when an area unloads they are gone, and the next
+-- sync puts them back by a player.
 
-local npc_name = "Blocky"
-local npc = nil -- the ObjectRef while it exists
-local follow = nil -- the player it walks after
-local work_pos, work_until, work_anim = nil, 0, "mine" -- a site, when it is done there, what it does there
+local cast = {} -- id -> { name, chat, dress, hair }, as the sidecar last sent it
+local order = {} -- the ids, in the sidecar's order
+local bodies = {} -- id -> { obj, follow, work_pos, work_until, work_anim, look }
 local has_model = core.get_modpath("player_api") ~= nil
 local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 } }
 local WALK_SPEED, NEAR, FAR = 4, 3, 40
 
-local function npc_alive() return npc ~= nil and npc:get_pos() ~= nil end
+-- Her skin: the base (face, hands, boots) with the dress and hair masks tinted in her colours.
+local function skin(c)
+	return "ai_bot_skin.png^(ai_bot_dress.png^[multiply:" .. hex(c.dress, "#2f7fd0")
+		.. ")^(ai_bot_hair.png^[multiply:" .. hex(c.hair, "#6b4226") .. ")"
+end
 
-local function npc_anim(self, which)
+local function body(id)
+	bodies[id] = bodies[id] or {}
+	return bodies[id]
+end
+local function alive(b) return b.obj ~= nil and b.obj:get_pos() ~= nil end
+
+local function anim(self, which)
 	if not has_model or self._anim == which then return end
 	self._anim = which
 	self.object:set_animation(ANIM[which], which == "walk" and 30 or 20, 0)
@@ -202,38 +217,44 @@ core.register_entity("ai_bot:npc", {
 		selectionbox = { -0.3, 0.0, -0.3, 0.3, 1.7, 0.3 },
 		visual = has_model and "mesh" or "cube",
 		mesh = has_model and "character.b3d" or nil,
-		textures = has_model and { "character.png^[colorize:#2f7fd0:90" } or { "default_wood.png" },
+		textures = has_model and { "ai_bot_skin.png" } or { "default_wood.png" },
 		visual_size = has_model and { x = 1, y = 1 } or { x = 0.6, y = 1.7 },
 		stepheight = 1.1,
-		nametag = npc_name,
-		nametag_color = BOT_COLOR,
+		nametag = "",
 		static_save = false,
 	},
 	on_activate = function(self)
 		self.object:set_armor_groups({ immortal = 1 })
 		self.object:set_acceleration({ x = 0, y = -9.81, z = 0 })
 		self._stuck = 0
-		npc_anim(self, "stand")
+		anim(self, "stand")
 	end,
-	on_rightclick = function(_, clicker)
-		core.chat_send_player(clicker:get_player_name(),
-			core.colorize(BOT_COLOR, "<" .. npc_name .. "> ") .. "Say @" .. npc_name .. " in chat and tell me what you need!")
+	on_rightclick = function(self, clicker)
+		local c = cast[self._cid]
+		if not c then return end
+		core.chat_send_player(clicker:get_player_name(), core.colorize(hex(c.chat, BOT_COLOR), "<" .. c.name .. "> ")
+			.. "Talk to me in chat (say my name if others are around), or from the Discord channel!")
 	end,
 	on_step = function(self, dtime)
+		local b = self._cid and bodies[self._cid]
+		if not b or b.obj ~= self.object then
+			self.object:remove() -- a body the sidecar no longer knows
+			return
+		end
 		local obj = self.object
 		local pos = obj:get_pos()
 		local goal
-		if work_pos and core.get_us_time() < work_until then
-			goal = work_pos
+		if b.work_pos and core.get_us_time() < b.work_until then
+			goal = b.work_pos
 		else
-			work_pos = nil
-			local p = follow and core.get_player_by_name(follow)
+			b.work_pos = nil
+			local p = b.follow and core.get_player_by_name(b.follow)
 			goal = p and p:get_pos()
 		end
 		local vel = obj:get_velocity()
 		if not goal then
 			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
-			npc_anim(self, "stand")
+			anim(self, "stand")
 			return
 		end
 		local to = vector.subtract(goal, pos)
@@ -246,8 +267,8 @@ core.register_entity("ai_bot:npc", {
 		if flat > 0.01 then obj:set_yaw(core.dir_to_yaw({ x = to.x, y = 0, z = to.z })) end
 		if flat > NEAR then
 			obj:set_velocity({ x = to.x / flat * WALK_SPEED, y = vel.y, z = to.z / flat * WALK_SPEED })
-			npc_anim(self, "walk")
-			-- Walking into a wall it cannot step over: hop to the goal after a couple of seconds.
+			anim(self, "walk")
+			-- Walking into a wall she cannot step over: hop to the goal after a couple of seconds.
 			if math.abs(vel.x) + math.abs(vel.z) < 0.5 then self._stuck = self._stuck + dtime else self._stuck = 0 end
 			if self._stuck > 2 then
 				obj:set_pos(vector.add(goal, { x = 2, y = 0.5, z = 2 }))
@@ -255,61 +276,102 @@ core.register_entity("ai_bot:npc", {
 			end
 		else
 			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
-			npc_anim(self, work_pos and work_anim or "stand")
+			anim(self, b.work_pos and b.work_anim or "stand")
 		end
 	end,
 })
 
-local function npc_spawn(near)
-	npc = core.add_entity(vector.add(near, { x = 2, y = 0.5, z = 2 }), "ai_bot:npc")
-	if npc then npc:set_properties({ nametag = npc_name }) end
+-- Put a character's body in the world near `near`, a little apart from the others, dressed in her colours.
+local function spawn(id, near)
+	local c = cast[id]
+	if not c then return end
+	local i = 0
+	for n, x in ipairs(order) do if x == id then i = n end end
+	local obj = core.add_entity(vector.add(near, { x = 2 + i, y = 0.5, z = 2 - i }), "ai_bot:npc")
+	if not obj then return end
+	local ent = obj:get_luaentity()
+	if ent then ent._cid = id end
+	local b = body(id)
+	b.obj, b.look = obj, nil
+	obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
+	if has_model then obj:set_properties({ textures = { skin(c) } }) end
+	b.look = c.name .. skin(c)
 end
 
--- Walk after a player (and appear by them when it is not in the world).
-local function npc_follow(name)
+-- Walk after a player (and appear by them when not in the world).
+local function follow(id, name)
 	local p = name and core.get_player_by_name(name)
-	if not p then return end
-	follow = name
-	if not npc_alive() then npc_spawn(p:get_pos()) end
+	if not p or not cast[id] then return end
+	local b = body(id)
+	b.follow = name
+	if not alive(b) then spawn(id, p:get_pos()) end
 end
 
--- Go to a build site and work there a while, appearing there if need be.
-local function npc_work(pos, anim)
-	work_pos, work_until, work_anim = pos, core.get_us_time() + 10 * 1000000, anim or "mine"
-	if not npc_alive() then npc_spawn(pos) end
+-- Go to a site and work (or stand) there a while, appearing there if need be.
+local function work(id, pos, how)
+	if not cast[id] then return end
+	local b = body(id)
+	b.work_pos, b.work_until, b.work_anim = pos, core.get_us_time() + 10 * 1000000, how or "mine"
+	if not alive(b) then spawn(id, pos) end
 end
 
 function actions.walk(a)
 	if not in_world(a.x, a.y, a.z) then return false, "That position is outside the world." end
-	npc_work(vector.new(a.x, a.y, a.z), "stand")
+	work(a.by or order[1], vector.new(a.x, a.y, a.z), "stand")
 	return true, "Walking to " .. a.x .. ", " .. a.y .. ", " .. a.z .. "."
 end
 
--- Each sync: in the world while anyone is, by the player it last followed or the first one online.
-local function npc_tend(bot)
-	if bot and bot ~= npc_name then
-		npc_name = line(bot, 32)
-		if npc_alive() then npc:set_properties({ nametag = npc_name }) end
+-- Each sync: the cast as the sidecar has it, each in the world while anyone is, by the player she last followed
+-- or one of those online (spread among them).
+local function tend(list)
+	if type(list) == "table" then
+		local fresh, ids = {}, {}
+		for _, c in ipairs(list) do
+			if type(c) == "table" and type(c.id) == "string" and type(c.name) == "string" then
+				fresh[c.id] = { name = line(c.name, 32), chat = c.chat, dress = c.dress, hair = c.hair }
+				ids[#ids + 1] = c.id
+			end
+		end
+		cast, order = fresh, ids
+	end
+	for id, b in pairs(bodies) do
+		if not cast[id] then
+			if alive(b) then b.obj:remove() end
+			bodies[id] = nil
+		end
 	end
 	local players = core.get_connected_players()
-	if follow and not core.get_player_by_name(follow) then follow = nil end
-	if not follow and players[1] then follow = players[1]:get_player_name() end
-	if npc_alive() then
-		if not follow and not work_pos then npc:remove(); npc = nil end
-	elseif follow then
-		npc_follow(follow)
+	for i, id in ipairs(order) do
+		local b = body(id)
+		local c = cast[id]
+		if b.follow and not core.get_player_by_name(b.follow) then b.follow = nil end
+		if not b.follow and #players > 0 then b.follow = players[(i - 1) % #players + 1]:get_player_name() end
+		if alive(b) then
+			if not b.follow and not b.work_pos then
+				b.obj:remove()
+				b.obj = nil
+			elseif b.look ~= c.name .. skin(c) then
+				b.obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
+				if has_model then b.obj:set_properties({ textures = { skin(c) } }) end
+				b.look = c.name .. skin(c)
+			end
+		elseif b.follow then
+			follow(id, b.follow)
+		end
 	end
 end
 
--- What each action does to the body.
-local function npc_after(a)
+-- What each action does to the body of the character who did it.
+local function after(a)
+	local id = a.by or order[1]
+	if not id then return end
 	if (a.type == "give" or a.type == "heal" or a.type == "teleport") and a.player then
-		core.after(a.type == "teleport" and 0.5 or 0, npc_follow, a.player)
+		core.after(a.type == "teleport" and 0.5 or 0, follow, id, a.player)
 	elseif a.type == "say" and a.near then
-		npc_follow(a.near)
+		follow(id, a.near)
 	elseif a.type == "place" and type(a.nodes) == "table" and a.nodes[1] then
 		local n = a.nodes[1]
-		npc_work(vector.new(n.x, n.y, n.z))
+		work(id, vector.new(n.x, n.y, n.z))
 	end
 end
 
@@ -323,7 +385,7 @@ local function run(a)
 		if fine then ok, message = r1, r2 else ok, message = false, "Failed: " .. tostring(r1) end
 	end
 	if ok then
-		local moved, err = pcall(npc_after, a)
+		local moved, err = pcall(after, a)
 		if not moved then core.log("warning", "[ai_bot] body: " .. tostring(err)) end
 	end
 	if a.id then results[#results + 1] = { id = a.id, ok = ok, message = message } end
@@ -357,7 +419,7 @@ local function sync()
 		end
 		local answer = core.parse_json(res.data)
 		if type(answer) == "table" then
-			local tended, err = pcall(npc_tend, answer.bot)
+			local tended, err = pcall(tend, answer.characters)
 			if not tended then core.log("warning", "[ai_bot] body: " .. tostring(err)) end
 		end
 		if type(answer) == "table" and type(answer.actions) == "table" then

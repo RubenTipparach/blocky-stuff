@@ -87,6 +87,7 @@ function signIn(message) {
 }
 
 let state = null;
+let picked = ''; // the character shown on the Characters card and in People
 let built = false;
 
 async function load() {
@@ -128,10 +129,9 @@ function build() {
   <button>Send</button></form></section>
 <div class="grid">
   <section><h2>The bot</h2><form id="bot">
-    <label class="check"><input type="checkbox" id="b_enabled"> Answers in chat</label>
-    <div class="two"><label class="field">Name (players say @name)<input id="b_name" maxlength="20"></label>
-    <label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label></div>
-    <label class="field">Model<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label>
+    <label class="check"><input type="checkbox" id="b_enabled"> The characters answer in chat</label>
+    <div class="two"><label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label>
+    <label class="field">Model<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label></div>
     <div class="two"><label class="field">Listens to<select id="b_listen"><option value="mentions">Only messages that say its name</option>
       <option value="all">Every chat message (it joins in when it has something to say)</option></select></label>
     <label class="field">Daily summary at (UTC hour, -1 = off)<input id="b_summaryHour" type="number" min="-1" max="23"></label></div>
@@ -165,37 +165,67 @@ function build() {
   <section><h2>LLM use</h2><div class="scroll"><table><thead><tr><th>Day (UTC)</th><th>Calls</th><th>Input</th><th>Output</th></tr></thead>
     <tbody id="usage"></tbody></table></div></section>
 </div>
-<section style="margin-top:14px"><h2>Character</h2>
+<section style="margin-top:14px"><h2>Characters</h2>
+  <div class="row" style="margin-bottom:10px"><select id="c_pick" style="width:auto"></select>
+    <button type="button" class="quiet" id="c_new">Add a character</button></div>
   <p class="muted note" id="moodLine"></p>
   <form id="character">
+    <div class="three"><label class="field">Name (players say @name)<input id="c_name" maxlength="20"></label>
+    <label class="field">Pronouns<input id="c_pronouns" maxlength="20"></label>
+    <label class="check" style="align-self:end"><input type="checkbox" id="c_enabled"> In the world</label></div>
+    <div class="three"><label class="field">Name colour in chat<input type="color" id="c_chatColor"></label>
+    <label class="field">Dress<input type="color" id="c_dressColor"></label>
+    <label class="field">Hair<input type="color" id="c_hairColor"></label></div>
     <label class="field">Backstory<textarea id="c_backstory" maxlength="3000"></textarea></label>
     <div class="two"><label class="field">Personality<textarea id="c_personality" maxlength="3000"></textarea></label>
-    <label class="field">How it talks<textarea id="c_speech" maxlength="3000"></textarea></label></div>
-    <label class="field">What it wants in life<textarea id="c_goals" maxlength="3000"></textarea></label>
-    <label class="field">Working on now (it changes this itself)<input id="c_goal" maxlength="200"></label>
-    <div class="row"><button>Save character</button><button type="button" class="quiet" id="resetMood">Calm its mood</button>
-      <span id="charNote" class="note muted"></span></div>
+    <label class="field">How she talks<textarea id="c_speech" maxlength="3000"></textarea></label></div>
+    <label class="field">What she wants in life<textarea id="c_goals" maxlength="3000"></textarea></label>
+    <label class="field">Working on now (she changes this herself)<input id="c_goal" maxlength="200"></label>
+    <div class="row"><button>Save character</button><button type="button" class="quiet" id="resetMood">Calm her mood</button>
+      <button type="button" class="danger" id="c_remove">Remove</button><span id="charNote" class="note muted"></span></div>
   </form></section>
-<section style="margin-top:14px"><h2>People it knows</h2>
-  <p class="muted note">Affinity runs from -100 (hostile) to 100 (best friend), trust from 0 to 100. The bot moves them a little at a time; you can set them here.
-  Players join their game and Discord selves by typing <code>!link</code> in game.</p>
+<section style="margin-top:14px"><h2>People they know</h2>
+  <p class="muted note">How <b id="peopleFor"></b> feels about each person (pick another character above to see hers). Affinity runs from -100 (hostile) to 100 (best friend), trust from 0 to 100. Characters move them a little at a time; you can set them here.
+  Players join their game and Discord selves by typing <code>!link</code> in game, or with Link with... here.</p>
   <div class="scroll"><table><thead><tr><th>Person</th><th>Feels</th><th>Affinity</th><th>Trust</th><th>Nickname</th><th>Talks</th><th>Last seen</th><th></th></tr></thead>
   <tbody id="people"></tbody></table></div></section>
-<section style="margin-top:14px"><h2>Memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
+<section style="margin-top:14px"><h2>Her memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
   <tbody id="memories"></tbody></table></div></section>
 <section style="margin-top:14px"><h2>Luanti log</h2><pre id="log"></pre></section>\`;
-  const ch = state.character;
-  $('c_backstory').value = ch.backstory; $('c_personality').value = ch.personality; $('c_speech').value = ch.speech;
-  $('c_goals').value = ch.goals; $('c_goal').value = ch.goal || '';
+  const FIELDS = ['name', 'pronouns', 'chatColor', 'dressColor', 'hairColor', 'backstory', 'personality', 'speech', 'goals'];
+  const fillCharacter = () => {
+    const list = state.characters;
+    if (!list.some((c) => c.id === picked)) picked = list[0] ? list[0].id : '';
+    $('c_pick').innerHTML = list.map((c) => '<option value="' + esc(c.id) + '"' + (c.id === picked ? ' selected' : '') + '>'
+      + esc(c.name) + (c.enabled === false ? ' (away)' : '') + '</option>').join('');
+    const c = list.find((x) => x.id === picked);
+    if (!c) return;
+    for (const f of FIELDS) $('c_' + f).value = c[f] || '';
+    $('c_enabled').checked = c.enabled !== false;
+    $('c_goal').value = c.goal || '';
+    $('peopleFor').textContent = c.name;
+  };
+  fillCharacter();
+  $('c_pick').onchange = () => { picked = $('c_pick').value; fillCharacter(); refresh(); };
+  $('c_new').onclick = async () => {
+    const name = prompt('Her name (2 to 20 letters):');
+    if (!name) return;
+    try { const r = await api('/api/admin/character', { id: '', name }); picked = r.character.id; await load(); fillCharacter(); }
+    catch (e) { alert(e.message); }
+  };
+  $('c_remove').onclick = async () => {
+    const c = state.characters.find((x) => x.id === picked);
+    if (!c || !confirm('Remove ' + c.name + ' for good? Her feelings and memories go with her. (To send her away for a while, untick In the world instead.)')) return;
+    try { await api('/api/admin/character', { id: picked, remove: true }); picked = ''; await load(); fillCharacter(); } catch (e) { alert(e.message); }
+  };
   $('character').onsubmit = async (ev) => {
     ev.preventDefault();
-    try {
-      await api('/api/admin/character', { backstory: $('c_backstory').value, personality: $('c_personality').value,
-        speech: $('c_speech').value, goals: $('c_goals').value, goal: $('c_goal').value });
-      $('charNote').textContent = 'Saved.';
-    } catch (e) { $('charNote').textContent = e.message; }
+    const body = { id: picked, enabled: $('c_enabled').checked, goal: $('c_goal').value };
+    for (const f of FIELDS) body[f] = $('c_' + f).value;
+    try { await api('/api/admin/character', body); $('charNote').textContent = 'Saved.'; await load(); fillCharacter(); }
+    catch (e) { $('charNote').textContent = e.message; }
   };
-  $('resetMood').onclick = async () => { await api('/api/admin/character', { resetMood: true }).catch(() => {}); refreshSoon(); };
+  $('resetMood').onclick = async () => { await api('/api/admin/character', { id: picked, resetMood: true }).catch(() => {}); refreshSoon(); };
   document.addEventListener('change', async (ev) => {
     const link = ev.target.closest('[data-link]');
     if (link && link.value) {
@@ -206,10 +236,10 @@ function build() {
     }
     const el = ev.target.closest('[data-person]');
     if (!el) return;
-    try { await api('/api/admin/person', { id: el.dataset.person, [el.dataset.field]: el.value }); refreshSoon(); } catch (e) { alert(e.message); }
+    try { await api('/api/admin/person', { id: el.dataset.person, character: picked, [el.dataset.field]: el.value }); refreshSoon(); } catch (e) { alert(e.message); }
   });
 
-  $('b_enabled').checked = s.enabled; $('b_name').value = s.name; $('b_model').value = s.model; $('b_effort').value = s.effort;
+  $('b_enabled').checked = s.enabled; $('b_model').value = s.model; $('b_effort').value = s.effort;
   $('b_cooldown').value = s.cooldown; $('b_perHour').value = s.perHour; $('b_perDay').value = s.perDay;
   $('b_listen').value = s.listen; $('b_summaryHour').value = s.summaryHour;
   $('b_idle').checked = s.idle.enabled; $('b_idleAfter').value = s.idle.after; $('b_idlePerHour').value = s.idle.perHour;
@@ -224,7 +254,7 @@ function build() {
     const policy = {};
     for (const el of document.querySelectorAll('[data-perm]')) policy[el.dataset.perm] = el.checked;
     try {
-      await api('/api/admin/bot', { enabled: $('b_enabled').checked, name: $('b_name').value, model: $('b_model').value,
+      await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value,
         effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
         perDay: $('b_perDay').value, listen: $('b_listen').value, summaryHour: Number($('b_summaryHour').value),
         idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value }, policy });
@@ -304,23 +334,32 @@ async function loadChannels() {
 function refresh() {
   const st = state;
   const typing = document.activeElement && document.activeElement.closest && document.activeElement.closest('#people');
-  $('moodLine').textContent = 'Mood: ' + st.character.mood.label + (st.character.mood.reason ? ' (' + st.character.mood.reason + ')' : '')
-    + (st.character.goal ? ' · Working on: ' + st.character.goal : '');
+  const me = st.characters.find((c) => c.id === picked) || st.characters[0];
+  if (me) $('moodLine').textContent = 'Mood: ' + me.mood.label + (me.mood.reason ? ' (' + me.mood.reason + ')' : '')
+    + (me.goal ? ' · Working on: ' + me.goal : '');
+  const bondOf = (p) => (me && p.bonds && p.bonds[me.id]) || { affinity: 0, trust: 20, nickname: null, facts: [] };
   const feels = (a) => a <= -60 ? 'hostile' : a <= -25 ? 'dislike' : a < -5 ? 'wary' : a < 15 ? 'neutral' : a < 35 ? 'friendly' : a < 60 ? 'fond' : a < 85 ? 'close friend' : 'best friend';
-  const where = (p) => [p, ...(p.aliases || [])].map((x) => (x.id.startsWith('discord:') ? 'Discord: ' : 'Game: ') + esc(x.name)).join('<br>');
+  const kind = (id) => (id.startsWith('discord:') ? 'Discord: ' : id.startsWith('char:') ? 'Character: ' : 'Game: ');
+  const where = (p) => [p, ...(p.aliases || [])].map((x) => kind(x.id) + esc(x.name)).join('<br>');
+  const others = st.people.filter((p) => !me || p.id !== 'char:' + me.id);
   const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
-  if (!typing) $('people').innerHTML = st.people.length ? st.people.map((p) => '<tr><td>' + where(p)
-    + (p.facts.length ? '<div class="note muted">' + p.facts.map(esc).join(' · ') + '</div>' : '') + '</td><td>' + feels(p.affinity) + '</td>'
-    + '<td><input type="number" min="-100" max="100" style="width:80px" data-person="' + esc(p.id) + '" data-field="affinity" value="' + p.affinity + '"></td>'
-    + '<td><input type="number" min="0" max="100" style="width:72px" data-person="' + esc(p.id) + '" data-field="trust" value="' + p.trust + '"></td>'
-    + '<td><input style="width:110px" data-person="' + esc(p.id) + '" data-field="nickname" value="' + esc(p.nickname || '') + '"></td>'
+  if (!typing) $('people').innerHTML = others.length ? others.map((p) => { const b = bondOf(p); return '<tr><td>' + where(p)
+    + (b.facts.length ? '<div class="note muted">' + b.facts.map(esc).join(' · ') + '</div>' : '') + '</td><td>' + feels(b.affinity) + '</td>'
+    + '<td><input type="number" min="-100" max="100" style="width:80px" data-person="' + esc(p.id) + '" data-field="affinity" value="' + b.affinity + '"></td>'
+    + '<td><input type="number" min="0" max="100" style="width:72px" data-person="' + esc(p.id) + '" data-field="trust" value="' + b.trust + '"></td>'
+    + '<td><input style="width:110px" data-person="' + esc(p.id) + '" data-field="nickname" value="' + esc(b.nickname || '') + '"></td>'
     + '<td>' + p.talks + '</td><td class="muted">' + ago(p.last_at) + '</td>'
-    + '<td class="row"><select data-link="' + esc(p.id) + '" style="width:auto"><option value="">Link with...</option>'
-    + st.people.filter((o) => o.id !== p.id).map((o) => '<option value="' + esc(o.id) + '">' + (o.id.startsWith('discord:') ? 'Discord: ' : 'Game: ') + esc(o.name) + '</option>').join('')
-    + '</select><button class="danger" data-forget="' + esc(p.id) + '" data-name="' + esc(p.name) + '">Forget</button></td></tr>').join('')
-    : '<tr><td colspan="8" class="muted">Nobody yet: it meets people as they chat.</td></tr>';
+    + '<td class="row">' + (p.id.startsWith('char:') ? '' : (() => {
+      const pool = others.filter((o) => o.id !== p.id && !o.id.startsWith('char:'));
+      return '<select data-link="' + esc(p.id) + '" style="width:auto"' + (pool.length ? '' : ' disabled') + '><option value="">'
+        + (pool.length ? 'Link with...' : 'Nobody else to link yet') + '</option>'
+        + pool.map((o) => '<option value="' + esc(o.id) + '">' + kind(o.id) + esc(o.name) + '</option>').join('') + '</select>'
+        + '<button class="danger" data-forget="' + esc(p.id) + '" data-name="' + esc(p.name) + '">Forget</button>';
+    })()) + '</td></tr>'; }).join('')
+    : '<tr><td colspan="8" class="muted">Nobody yet: the characters meet people as they chat.</td></tr>';
   const nameOf = (id) => { const p = st.people.find((x) => x.id === id || (x.aliases || []).some((a) => a.id === id)); return p ? p.name : ''; };
-  $('memories').innerHTML = st.memories.length ? st.memories.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'
+  const mems = st.memories.filter((m) => !me || m.character === me.id);
+  $('memories').innerHTML = mems.length ? mems.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'
     + esc(m.about ? nameOf(m.about) : 'itself') + '</td><td>' + (m.secret ? '<span class="warn">secret</span> ' : '') + esc(m.text) + '</td><td>' + m.weight + '</td>'
     + '<td><button class="quiet" data-memory="' + m.id + '">Forget</button></td></tr>').join('')
     : '<tr><td colspan="5" class="muted">No memories yet.</td></tr>';

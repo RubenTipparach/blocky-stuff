@@ -19,7 +19,7 @@ import { createDiscord } from './discord.mjs';
 import { mcpAuthorized, mcpCall, storeMcpToken } from './mcp.mjs';
 import { ADMIN_PAGE } from './admin-page.mjs';
 import { TOOLS } from './tools.mjs';
-import { characterSheet, personId, DEFAULT_CHARACTER } from './character.mjs';
+import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId } from './character.mjs';
 
 // A !link code lasts this long.
 const LINK_MS = 10 * 60_000;
@@ -45,11 +45,15 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   const sessionSecret = config.sessionSecret || db.secret('session');
   const redirectUri = `${config.publicUrl}/auth/discord/callback`;
   const relay = () => ({ chat: true, news: true, ...db.json('relay', {}) });
-  const botName = () => botSettings(db, config).name;
+  // The characters in the world now, and the one who speaks for the server (the first).
+  const characters = () => activeCast(db, config, now());
+  const host = () => characters()[0] ?? { id: 'blocky', name: 'Blocky', chatColor: '#f2b84b' };
+  // What the game needs of each character for its body and its name in chat.
+  const bodies = () => characters().map((c) => ({ id: c.id, name: c.name, chat: c.chatColor, dress: c.dressColor, hair: c.hairColor }));
   const joinAt = () => `${config.gameAddress || new URL(config.publicUrl).hostname}:${config.gamePort}`;
 
   const chat = discord ?? createDiscord({
-    token: config.discordBotToken, webhookUrls: config.discordWebhookUrls, fetchImpl, log, botName,
+    token: config.discordBotToken, webhookUrls: config.discordWebhookUrls, fetchImpl, log, botName: () => host().name,
     // DISCORD_CHANNEL_ID wins; otherwise the channels last picked on /admin.
     channelIds: config.discordChannelIds.length ? config.discordChannelIds : (db.setting('discord.channels') ?? '').split(',')
       .filter(Boolean),
@@ -59,13 +63,19 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
 
   // ---- Chat, between the game, Discord and the bot ----
 
-  /** The bot's answer: into the game, the log, and Discord (always, when the question came from there). */
-  async function botSays(text, { toDiscord = false, near } = {}) {
-    const name = botName();
-    db.addChat('bot', name, text, now());
-    // near: the player it answers, whom its body in the world walks over to.
-    const [r] = await Promise.all([game.act({ type: 'say', text, from: name, ...(near ? { near } : {}) }),
-      relay().chat || toDiscord ? chat.post({ text, as: name }) : null]);
+  /**
+   * A character's line: into the game (in its colour, its body walking to `near`), the log, and Discord (always,
+   * when the question came from there). Characters it names may answer it, a few in a row at most.
+   */
+  async function botSays(text, ch = host(), { toDiscord = false, near, depth = 0 } = {}) {
+    db.addChat('bot', ch.name, text, now());
+    db.meet(characterPersonId(ch.id), ch.name, { at: now() });
+    const [r] = await Promise.all([game.act({ type: 'say', text, from: ch.name, by: ch.id, color: ch.chatColor,
+      ...(near ? { near } : {}) }), relay().chat || toDiscord ? chat.post({ text, as: ch.name }) : null]);
+    for (const other of brain.answerers?.(text, ch, depth) ?? []) {
+      brain.hear({ source: 'character', name: ch.name, text, personId: characterPersonId(ch.id), only: other.id, depth: depth + 1 },
+        (t, who) => botSays(t, who, { toDiscord, depth: depth + 1 })).catch((err) => log.error(err));
+    }
     return r;
   }
   /** An admin's or the server's announcement: the same, under the server's name. */
@@ -90,7 +100,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (relay().chat) chat.post({ text: e.text, as: e.name });
       const admin = game.player(e.name)?.privs.includes('server') ?? false;
       brain.hear({ source: 'game', name: e.name, text: e.text, admin, personId: personId('game', e.name) },
-        (t) => botSays(t, { near: e.name }))
+        (t, ch) => botSays(t, ch, { near: e.name }))
         .catch((err) => log.error(err));
     } else if (e.type === 'join' || e.type === 'leave') {
       db.meet(personId('game', e.name), e.name, { at: now(), talked: false });
@@ -101,7 +111,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (e.type === 'join' && botSettings(db, config).listen === 'all') {
         setTimeout(() => brain.hear({ source: 'game', name: e.name, text: '(just joined the game)', admin: false,
           personId: personId('game', e.name) },
-          (t) => botSays(t, { near: e.name })).catch((err) => log.error(err)), 3000);
+          (t, ch) => botSays(t, ch, { near: e.name })).catch((err) => log.error(err)), 3000);
       }
     } else if (e.type === 'start') {
       db.addChat('game', '*', 'The server started', now());
@@ -119,7 +129,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (idling || !s.idle.enabled || !game.players.length || now() - lastActivity < s.idle.after * 1000) return;
     idling = true;
     try {
-      await brain.idle?.((t) => botSays(t));
+      await brain.idle?.((t, ch) => botSays(t, ch));
     } finally {
       lastActivity = now();
       idling = false;
@@ -135,22 +145,22 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     const code = randomBytes(4).toString('hex').slice(0, 6).toUpperCase();
     linkCodes.set(code, { gameId: personId('game', name), name, at: now() });
     // Whispered: only the player sees it, so nobody else can claim their name on Discord.
-    game.act({ type: 'say', to: name, from: botName(), text: `Type  !link ${code}  in the Discord channel within 10 minutes `
+    game.act({ type: 'say', to: name, from: host().name, color: host().chatColor, text: `Type  !link ${code}  in the Discord channel within 10 minutes `
       + 'and I will know you are the same person there.' });
   }
 
   function linkDiscord(m, code) {
     const entry = linkCodes.get(code.toUpperCase());
     if (!entry || now() - entry.at > LINK_MS) {
-      chat.post({ text: 'That code is not one I gave out (or it ran out). Type !link in game for a new one.', as: botName() });
+      chat.post({ text: 'That code is not one I gave out (or it ran out). Type !link in game for a new one.', as: host().name });
       return;
     }
     linkCodes.delete(code.toUpperCase());
     const discordId = personId('discord', m.userId);
     db.meet(discordId, m.name, { at: now(), talked: false });
     db.link(entry.gameId, discordId);
-    db.remember(entry.gameId, `Learned that ${m.name} on Discord is ${entry.name} in game.`, 2, now());
-    chat.post({ text: `Got it, ${m.name}: you and ${entry.name} in game are one and the same to me now.`, as: botName() });
+    for (const c of characters()) db.remember(c.id, entry.gameId, `Learned that ${m.name} on Discord is ${entry.name} in game.`, 2, now());
+    chat.post({ text: `Got it, ${m.name}: you and ${entry.name} in game are one and the same to us now.`, as: host().name });
   }
 
   function fromDiscord(m) {
@@ -163,7 +173,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     // An admin on Discord is known by their Discord id, which Discord vouches for; a name anyone can type.
     const admin = Boolean(m.userId) && config.adminIds.includes(m.userId);
     brain.hear({ source: 'discord', name: m.name, text: m.text, admin,
-      personId: m.userId ? personId('discord', m.userId) : undefined }, (t) => botSays(t, { toDiscord: true }))
+      personId: m.userId ? personId('discord', m.userId) : undefined }, (t, ch) => botSays(t, ch, { toDiscord: true }))
       .catch((err) => log.error(err));
   }
 
@@ -177,9 +187,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     db.putSetting('summary.last', day);
     const text = await brain.summary(now() - 24 * 3600_000);
     if (!text) return null;
-    db.addChat('bot', s.name, text, now());
-    await Promise.all([chat.post({ text: `📋 Daily summary: ${text}`, as: s.name }),
-      game.act({ type: 'say', text: `Daily summary: ${text}`, from: s.name })]);
+    const teller = host();
+    db.addChat('bot', teller.name, text, now());
+    await Promise.all([chat.post({ text: `📋 Daily summary: ${text}`, as: teller.name }),
+      game.act({ type: 'say', text: `Daily summary: ${text}`, from: teller.name, by: teller.id, color: teller.chatColor })]);
     return text;
   }
   if (daily) setInterval(() => { dailySummary().catch((err) => log.error('daily summary failed:', err)); }, 10 * 60_000).unref();
@@ -234,7 +245,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         connected: game.connected, seenAt: game.seenAt || null, items: game.items.length,
         timeOfDay: game.time === null ? null : Math.round(game.time * 240) / 10, process: luanti?.status() ?? null },
       players: game.players,
-      bot: { ready: brain.ready, name: s.name, model: s.model, enabled: s.enabled },
+      bot: { ready: brain.ready, name: characters().map((c) => c.name).join(', '), model: s.model, enabled: s.enabled },
       discord: { mode: chat.mode, problem: chat.problem, listening: chat.listening, channelIds: chat.channelIds,
         hasBot: chat.hasBot, invite: inviteUrl() },
     };
@@ -311,7 +322,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'GET /api/admin') {
       return send(res, 200, {
         you, ...status(), settings: botSettings(db, config), relay: relay(), models: MODELS, efforts: EFFORTS,
-        character: characterSheet(db, now()), people: db.people(100), memories: db.allMemories(60),
+        characters: castOf(db, config, now()), people: db.people(100), memories: db.allMemories(80),
         policyTools: TOOLS.filter((t) => t.permission && t.permission !== 'admin').map((t) => ({ name: t.name, permission: t.permission })),
         missing: config.missing, chat: db.chat(80), usage: db.usage(14),
         mcp: { url: `${config.publicUrl}/mcp`, hasToken: Boolean(config.mcpToken || db.setting('mcp.token')) },
@@ -373,24 +384,26 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (!chat.mode) return send(res, 400, { error: chat.problem });
       return send(res, 200, await chat.news('bot', `Radio check from the admin page, by ${you.name}. This channel is wired up.`));
     }
+    // A character's sheet: { id, ...fields } changes one (a new id adds it), { id, remove: true } removes it.
     if (route === 'POST /api/admin/character') {
-      const saved = db.json('character', {});
-      const next = { ...saved };
-      for (const k of Object.keys(DEFAULT_CHARACTER)) if (typeof body[k] === 'string') next[k] = body[k].slice(0, 3000);
-      if (body.resetMood) delete next.mood;
-      if (typeof body.goal === 'string') next.goal = body.goal.trim().slice(0, 200) || null;
-      db.putJson('character', next);
-      return send(res, 200, { character: characterSheet(db, now()) });
+      if (body.remove) {
+        return removeCharacter(db, String(body.id), config) ? send(res, 200, { removed: true })
+          : send(res, 400, { error: 'The last character cannot be removed.' });
+      }
+      const c = saveCharacter(db, String(body.id ?? ''), body, config);
+      return c ? send(res, 200, { character: c }) : send(res, 400, { error: 'A new character needs a name (2 to 20 letters).' });
     }
-    // Set how the bot feels about someone, or forget them: { id, affinity?, trust?, nickname?, forget? }.
+    // Set how a character feels about someone, or forget them: { id, character, affinity?, trust?, nickname?, forget? }.
     if (route === 'POST /api/admin/person') {
       const p = typeof body.id === 'string' ? db.person(body.id) : null;
       if (!p) return send(res, 404, { error: 'No such person.' });
       if (body.forget) return send(res, 200, { forgotten: db.forget(p.id) });
-      db.feel(p.id, Number.isFinite(Number(body.affinity)) ? Number(body.affinity) : p.affinity,
-        Number.isFinite(Number(body.trust)) ? Number(body.trust) : p.trust);
-      if (typeof body.nickname === 'string') db.nickname(p.id, body.nickname.trim() || null);
-      return send(res, 200, { person: db.person(p.id) });
+      const ch = String(body.character ?? host().id);
+      const b = db.bond(ch, p.id);
+      db.feel(ch, p.id, Number.isFinite(Number(body.affinity)) ? Number(body.affinity) : b.affinity,
+        Number.isFinite(Number(body.trust)) ? Number(body.trust) : b.trust);
+      if (typeof body.nickname === 'string') db.nickname(ch, p.id, body.nickname.trim() || null);
+      return send(res, 200, { bond: db.bond(ch, p.id) });
     }
     // Join two people into one, as !link does: { keep, other } (ids); `other` becomes an alias of `keep`.
     if (route === 'POST /api/admin/link') {
@@ -398,7 +411,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       const b = typeof body.other === 'string' ? db.person(body.other) : null;
       if (!a || !b) return send(res, 404, { error: 'No such person.' });
       if (!db.link(a.id, b.id)) return send(res, 400, { error: 'They are already one person.' });
-      db.remember(a.id, `Learned that ${b.name} is also ${a.name}.`, 2, now());
+      for (const c of characters()) db.remember(c.id, a.id, `Learned that ${b.name} is also ${a.name}.`, 2, now());
       return send(res, 200, { person: db.person(a.id) });
     }
     if (route === 'POST /api/admin/forget-memory') {
@@ -429,7 +442,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       }
       const body = await readBody(req, SYNC_MAX);
       if (!body) return send(res, 400, { error: 'Not JSON.' });
-      return send(res, 200, { ...game.sync(body), bot: botName() });
+      return send(res, 200, { ...game.sync(body), bot: host().name, characters: bodies() });
     }
 
     const ip = req.headers['fly-client-ip'] ?? req.socket.remoteAddress ?? '';

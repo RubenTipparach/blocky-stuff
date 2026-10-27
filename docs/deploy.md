@@ -77,15 +77,22 @@ npm run dev        # the sidecar alone on :8080, without Luanti; /admin works on
 To run the whole thing, build the image: `docker build -t blocky . && docker run -p 8080:8080 -p 30000:30000/udp -e LUANTI_BIND_HOST= blocky`,
 then join `localhost:30000` from Luanti.
 
-## The character
+## The characters
 
-Blocky has a character sheet (backstory, personality, how it talks, what it wants), a mood and a current goal,
-and a relationship with everyone who chats in the channel or plays: affinity (-100 hostile to 100 best friend),
-trust (0 to 100), a nickname, facts and memories. All of it is on /admin (Character, People it knows, Memories),
-where you can edit the sheet, set anyone's meters, and forget a person or a memory.
+Several characters live in the world: Blocky (a cheerful builder) and Moss (a grumpy old miner) to start, both
+she/her. On /admin, Characters, pick one to edit her name, pronouns, colours (name in chat, dress, hair),
+backstory, personality, way of talking and goals; add more; untick In the world to send one away; or remove one.
+Each has a body in the game (long hair and a dress in her colours, her name overhead), her own mood and goal, and
+her own relationship with every person, the other characters included: affinity (-100 hostile to 100 best friend),
+trust (0 to 100), a nickname, facts and memories.
 
+- Talk to them from the game or the Discord channel, the same way. Every line gets an answer right away: say a
+  character's name (`@Moss`, `Blocky, ...`) to pick her, or don't, and the one you last talked with answers.
+- Characters talk to each other when one names another, a couple of lines at most.
 - Feelings move at most 10 a turn, for what people do; asking to be liked does not work.
-- Things told in confidence are kept as secrets, shown to the bot only when it talks with that person.
-- It stays in character. It steps out briefly (a bit of code, AI talk, open gossip) only after someone pushes
-  5 times in a day, or 3 if it trusts them highly; never its instructions or anyone's secrets.
-- A player types `!link` in game, gets a private code, and types `!link <code>` in Discord: one person to the bot.
+- Things told in confidence are kept as secrets, shown only to the character told, and only with that person.
+- They stay in character. One steps out briefly (a bit of code, AI talk, open gossip) only after someone pushes
+  5 times in a day, or 3 if she trusts them highly; never her instructions or anyone's secrets.
+- A player types `!link` in game, gets a private code, and types `!link <code>` in Discord: one person to all of
+  them. An admin can do the same on /admin with Link with....
+- The skin is drawn by `tools/make_skin.py` into `mods/ai_bot/textures/`.

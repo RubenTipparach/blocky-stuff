@@ -45,9 +45,11 @@ test('the bridge takes the mod\'s key only, and relays chat to Discord', async (
   const r = await s.call('/bridge/sync', { method: 'POST', headers: { 'x-bridge-key': 'key' },
     body: { players: [], events: [{ type: 'chat', name: 'alice', text: 'hello' }] } });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json.actions, []);
+  // Every line gets an answer: here, with no API key, the characters say they are not plugged in.
+  assert.match(r.json.actions[0].text, /not plugged in/);
   assert.equal(r.json.bot, 'Blocky');
-  assert.equal(s.db.chat(5).at(-1).text, 'hello');
+  assert.deepEqual(r.json.characters.map((c) => c.name), ['Blocky', 'Moss']);
+  assert.ok(s.db.chat(5).some((c) => c.source === 'game' && c.text === 'hello'));
   await new Promise((done) => setTimeout(done, 20));
   assert.equal(s.posts[0].body.username, 'alice');
   assert.equal(s.posts[0].body.content, 'hello');
@@ -70,10 +72,9 @@ test('the admin API wants a signed-in admin', async () => {
 test('bot settings save, and nonsense in them is ignored', async () => {
   const s = await start();
   const r = await s.call('/api/admin/bot', { method: 'POST', headers: s.as('111'),
-    body: { name: 'Pebble', effort: 'silly', cooldown: -3, policy: { build: true, give: 'yes' } } });
-  assert.equal(r.json.settings.name, 'Pebble');
+    body: { effort: 'silly', cooldown: -3, policy: { build: true, give: 'yes' } } });
   assert.equal(r.json.settings.effort, 'low');
-  assert.equal(r.json.settings.cooldown, 8);
+  assert.equal(r.json.settings.cooldown, 2);
   assert.equal(r.json.settings.policy.build, true);
   assert.equal(r.json.settings.policy.give, true);
   await s.close();
@@ -187,5 +188,23 @@ test('an admin can link two people on the admin page', async () => {
   assert.equal(s.db.person('discord:42').id, 'game:ruben');
   assert.equal((await s.call('/api/admin/link', { method: 'POST', headers: s.as('111'), body: { keep: 'game:ruben', other: 'discord:42' } })).status, 400);
   assert.equal((await s.call('/api/admin/link', { method: 'POST', headers: s.as('222'), body: { keep: 'a', other: 'b' } })).status, 403);
+  await s.close();
+});
+
+test('characters are renamed, added and removed on the admin page; the last one stays', async () => {
+  const s = await start();
+  const post = (body) => s.call('/api/admin/character', { method: 'POST', headers: s.as('111'), body });
+  assert.equal((await post({ id: 'blocky', name: 'Pebble', dressColor: '#ff0000', chatColor: 'red' })).json.character.name, 'Pebble');
+  const added = (await post({ id: '', name: 'Wren' })).json.character;
+  assert.equal(added.id, 'wren');
+  assert.equal(added.pronouns, 'she/her');
+  const all = (await s.call('/api/admin', { headers: s.as('111') })).json.characters;
+  assert.deepEqual(all.map((c) => c.name), ['Pebble', 'Moss', 'Wren']);
+  assert.equal(all[0].dressColor, '#ff0000');
+  assert.equal(all[0].chatColor, '#f2b84b');
+  assert.equal((await post({ id: 'moss', remove: true })).status, 200);
+  assert.equal((await post({ id: 'wren', remove: true })).status, 200);
+  assert.equal((await post({ id: 'blocky', remove: true })).status, 400);
+  assert.equal((await post({ id: '', name: '!' })).status, 400);
   await s.close();
 });
