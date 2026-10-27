@@ -74,14 +74,14 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   };
 
   /** A picture of the area around (x, z): { png, scan } or { error }. y: about the ground there, if known. */
-  async function render({ x, z, y = null, r = RADIUS }) {
+  async function render({ x, z, y = null, r = RADIUS, focus = null }) {
     const rr = Math.max(8, Math.min(64, Math.round(r)));
     const yy = Number.isFinite(y) ? Math.round(y) : null;
     // Down to 48 blocks under her, whole columns to there (owner: "this should scan down to the lower depths").
     const scan = await area(Math.round(x) - rr, Math.round(z) - rr, 2 * rr, 2 * rr,
       yy === null ? ISO.YMIN : yy - 48, yy === null ? 120 : yy + 50);
     if (!scan) return { error: 'There is no map of that spot yet: the game has not been there, or is not answering.' };
-    return { png: renderIso(scan, { markColors: colorsByMark(), markNames: namesByMark() }).png, scan };
+    return { png: renderIso(scan, { markColors: colorsByMark(), markNames: namesByMark(), focus }).png, scan };
   }
 
   /**
@@ -102,7 +102,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   async function snapshot(ch) {
     const spot = spotOf(ch);
     if (!spot || !game.connected) return null;
-    const out = await render(spot);
+    const out = await render({ ...spot, focus: ch.id });
     if (out.error) { log.error(`map of ${ch.name}: ${out.error}`); return null; }
     await mkdir(dir, { recursive: true });
     const file = `${ch.id.replace(/[^a-z0-9-]/g, '')}.png`;

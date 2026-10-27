@@ -224,3 +224,13 @@ test('what still needs reading survives a restart, and Refresh reads the area in
     await new Promise((r) => server.close(r));
   }
 });
+
+test('in a character\'s picture her own pin and name are on top, and names never cover each other', () => {
+  const base = { x1: 0, z1: 0, w: 4, d: 4, y1: 0, names: ['default:dirt_with_grass'], cols: Array(16).fill([0, 0]) };
+  const marks = [{ id: 'blocky', x: 1, y: 0, z: 1 }, { id: 'moss', x: 1, y: 0, z: 2 }];
+  const opts = { markColors: { blocky: '#4aa3df', moss: '#4f7a34' }, markNames: { blocky: 'Blocky', moss: 'Moss' } };
+  const plain = renderIso({ ...base, marks }, opts).png;
+  const blocky = renderIso({ ...base, marks }, { ...opts, focus: 'blocky' }).png;
+  assert.notDeepEqual(blocky, plain); // the order changed what is on top
+  assert.deepEqual(renderIso({ ...base, marks: [...marks].reverse() }, { ...opts, focus: 'blocky' }).png, blocky); // focus decides, not the list
+});
