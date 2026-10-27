@@ -411,6 +411,19 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     return { type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'), ...(r.ok ? {} : { is_error: true }) };
   }
 
+  /**
+   * What goes back after a reply whose tool calls will not be run (it was cut off, or the harness pushes back): a
+   * result for each of them, so none is left unanswered (the API refuses that: "tool_use ids were found without
+   * tool_result blocks"), and then the harness's words. Owner, 2026-10-27: "There's lots of errors".
+   */
+  const followUp = (content, text) => [
+    ...content.filter((b) => b.type === 'tool_use').map((b) => ({ type: 'tool_result', tool_use_id: b.id, is_error: true,
+      content: 'Not run: your message was cut off before this call was complete. Send it again in smaller parts (fewer blocks per call).' })),
+    { type: 'text', text },
+  ];
+  const CUT_OFF = '[Harness] Your last message was too long and was cut off. Go on from where you were, with smaller tool '
+    + 'calls: at most a few hundred blocks in one place_blocks, and fill_box for big plain areas.';
+
   // The harness's push back to an open task, when a turn tries to end with it unfinished.
   const nudge = (task) => `[Not finished] Your task "${task.goal}" for ${task.by} is still open. Keep at it: do the next part, `
     + `then check it (${task.check}) with inspect_area, then call finish_task. If it truly cannot be done, call task_blocked with why.`;
@@ -437,6 +450,12 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         if (task.rounds + 1 >= TASK_ROUNDS_MAX) runTaskTool(ch, 'task_blocked', { reason: 'It took too long; ask again in smaller parts.' }, turn);
       }
       const uses = response.content.filter((b) => b.type === 'tool_use');
+      // Cut off in the middle of a tool call: its input is incomplete, so it is not run; she goes on in smaller steps.
+      if (response.stop_reason === 'max_tokens' && round < MAX_ROUNDS - 1) {
+        messages.push({ role: 'assistant', content: response.content });
+        messages.push({ role: 'user', content: followUp(response.content, CUT_OFF) });
+        continue;
+      }
       if (response.stop_reason !== 'tool_use' || !uses.length) {
         const out = finalText(response.content);
         // Only a character may be met with silence: a person always gets an answer.
@@ -447,7 +466,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         if (person && still && nudges < NUDGES && round < MAX_ROUNDS - 1) {
           nudges++;
           messages.push({ role: 'assistant', content: response.content });
-          messages.push({ role: 'user', content: nudge(still) });
+          messages.push({ role: 'user', content: followUp(response.content, nudge(still)) });
           continue;
         }
         // A promise with nothing behind it (owner, 2026-10-27: "I asked them to make me a farm ... they seem to have
@@ -455,9 +474,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         if (person && !still && !turn.acted && !promised && PROMISE.test(said ?? '') && round < MAX_ROUNDS - 1) {
           promised = true;
           messages.push({ role: 'assistant', content: response.content });
-          messages.push({ role: 'user', content: '[Harness] You said you will do something for them, but you have not started it. '
+          messages.push({ role: 'user', content: followUp(response.content, '[Harness] You said you will do something for them, but you have not started it. '
             + 'If you will, call start_task now and begin in this turn (decide the details you can yourself, and say what '
-            + 'you chose); a request comes before your own project. If you will not, say so plainly instead.' });
+            + 'you chose); a request comes before your own project. If you will not, say so plainly instead.') });
           continue;
         }
         return said;
@@ -504,11 +523,16 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
           if (current.rounds + 1 >= TASK_ROUNDS_MAX) runTaskTool(ch, 'task_blocked', { reason: 'It took too long; ask again in smaller parts.' }, turn);
         }
         const uses = response.content.filter((b) => b.type === 'tool_use');
+        if (response.stop_reason === 'max_tokens' && round < MAX_ROUNDS - 1) {
+          messages.push({ role: 'assistant', content: response.content });
+          messages.push({ role: 'user', content: followUp(response.content, CUT_OFF) });
+          continue;
+        }
         if (response.stop_reason !== 'tool_use' || !uses.length) {
           said = finalText(response.content);
           if (openTask(ch.id) && round < MAX_ROUNDS - 1) {
             messages.push({ role: 'assistant', content: response.content });
-            messages.push({ role: 'user', content: nudge(openTask(ch.id)) });
+            messages.push({ role: 'user', content: followUp(response.content, nudge(openTask(ch.id))) });
             continue;
           }
           break;
@@ -564,7 +588,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   async function call(s, system, tools, messages, model = s.model) {
     const response = await llm.beta.messages.create({
       model,
-      max_tokens: 4000,
+      // Building turns write long lists of blocks: room for them (a reply cut off mid-call is handled, but costs a round).
+      max_tokens: tools ? 16000 : 4000,
       system,
       ...(tools ? { tools } : {}),
       messages,
@@ -933,6 +958,11 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         const response = await call(s, systemPrompt(ch), tools, messages, s.buildModel); // her own work or a gift: building
         if (response.stop_reason === 'refusal') return null;
         const uses = response.content.filter((b) => b.type === 'tool_use');
+        if (response.stop_reason === 'max_tokens' && round < MAX_ROUNDS - 1) {
+          messages.push({ role: 'assistant', content: response.content });
+          messages.push({ role: 'user', content: followUp(response.content, CUT_OFF) });
+          continue;
+        }
         if (response.stop_reason !== 'tool_use' || !uses.length) {
           const out = finalText(response.content);
           if (gift) {
