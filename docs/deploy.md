@@ -48,7 +48,7 @@ One Discord application does both the admin sign-in and the bot.
    and the bot's answers to both; "Joins, leaves and server start" posts the news.
 
 People in the channel talk to the bot the same way as in game: `@Blocky …` (a Discord mention of the bot works
-too) or `!ai …`. On Discord only the ids in `ADMIN_DISCORD_ID` are admins to the bot (Discord vouches for an id,
+too). On Discord only the ids in `ADMIN_DISCORD_ID` are admins to the bot (Discord vouches for an id,
 not a name), so from your own account you can ask it for anything, building included: `@Blocky build a stone
 hut next to <player>`. Everyone else gets what the bot card on /admin allows players.
 
@@ -93,6 +93,14 @@ trust (0 to 100), a nickname, facts and memories.
 - Things told in confidence are kept as secrets, shown only to the character told, and only with that person.
 - They stay in character. One steps out briefly (a bit of code, AI talk, open gossip) only after someone pushes
   5 times in a day, or 3 if she trusts them highly; never her instructions or anyone's secrets.
-- A player types `!link` in game, gets a private code, and types `!link <code>` in Discord: one person to all of
-  them. An admin can do the same on /admin with Link with....
+- A player types `/link` in the game, gets a private code, and types `/link code:<code>` in Discord: one person to all
+  of them. An admin can do the same on /admin with Link with....
 - The skin is drawn by `tools/make_skin.py` into `mods/ai_bot/textures/`.
+
+## Commands
+
+Discord (slash commands, registered in each server the bot is in): `/picture` (all characters), `/picture who:Moss`,
+`/picture who:120 -40` (a spot), `/map`, `/link code:<code>`, `/help`.
+
+In the game: `/talk <name> <message>`, `/follow <name>`, `/come <name>`, `/stay <name>`, `/rel`, `/link`.
+Talking to the characters is plain chat in either place: say a name, look at one in the game, or just talk.

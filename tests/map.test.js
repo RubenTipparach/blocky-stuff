@@ -32,7 +32,7 @@ test('an area renders to an isometric PNG', () => {
   assert.equal(png.readUInt32BE(16), width);
 });
 
-test('the public map page, a render on request held to its pace, and !map posting a picture', async () => {
+test('the public map page, a render on request held to its pace, and /picture taking a picture', async () => {
   const config = loadConfig({ PUBLIC_URL: 'http://localhost', DATA_DIR: mkdtempSync(join(tmpdir(), 'blocky-map-')) });
   const db = openDb(':memory:');
   const pictures = [];
@@ -57,10 +57,12 @@ test('the public map page, a render on request held to its pace, and !map postin
     assert.deepEqual([...new Uint8Array(await r.arrayBuffer()).subarray(0, 4)], PNG);
     assert.equal((await fetch(`${base}/map/render?x=0&z=0`)).status, 429);
     assert.equal((await fetch(`${base}/map/render?x=a`)).status, 400);
-    await server.maps.command('!picture blocky');
-    assert.equal(pictures.length, 1);
-    assert.equal(pictures[0].as, 'Blocky');
-    assert.deepEqual([...pictures[0].png.subarray(0, 4)], PNG);
+    const shot = await server.maps.pictures('blocky');
+    assert.equal(shot.pictures.length, 1);
+    assert.equal(shot.pictures[0].ch.name, 'Blocky');
+    assert.deepEqual([...shot.pictures[0].png.subarray(0, 4)], PNG);
+    assert.match((await server.maps.pictures('')).error, /a moment/); // one ask every 30 seconds
+    await server.maps.postNow('blocky');
     assert.equal((await fetch(`${base}/map/img/blocky.png`)).status, 200);
     // The tile map: a tile is a PNG, drawn once and kept; where.json says who is where; every post links the map.
     const t = await fetch(`${base}/map/tiles/0/-1.png`);

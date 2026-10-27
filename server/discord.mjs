@@ -15,6 +15,17 @@ const isChannel = (id) => /^\d{5,25}$/.test(String(id));
 const INTENTS = (1 << 0) | (1 << 9) | (1 << 15);
 export const COLORS = { up: 0x84e3b5, down: 0xfe6420, join: 0x1096c3, leave: 0x6b6b6b, bot: 0xfaaf5c };
 
+// The bot's slash commands (owner, 2026-10-27: "/ is the standard for discord bots"), registered in each server it is
+// in when it connects, so they show up in Discord's command menu at once.
+export const SLASH_COMMANDS = [
+  { name: 'picture', description: 'A picture of what the characters are up to',
+    options: [{ type: 3, name: 'who', description: 'A character, or x z coordinates (leave empty for everyone)', required: false }] },
+  { name: 'map', description: 'The live map of the world' },
+  { name: 'link', description: 'Join your game account to your Discord account',
+    options: [{ type: 3, name: 'code', description: 'The code from /link in the game', required: true }] },
+  { name: 'help', description: 'What the bot and the characters can do' },
+];
+
 /**
  * @param {{ token?: string, channelIds?: string[], webhookUrls?: string[], api?: string, fetchImpl?: typeof fetch,
  *           WebSocketImpl?: typeof WebSocket, onMessage?: (m: { channelId: string, userId: string, name: string, text: string }) => void,
@@ -23,7 +34,7 @@ export const COLORS = { up: 0x84e3b5, down: 0xfe6420, join: 0x1096c3, leave: 0x6
 export function createDiscord(opts = {}) {
   const {
     api = 'https://discord.com/api/v10', fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket, log = console,
-    onMessage = () => {}, botName = () => 'Blocky',
+    onMessage = () => {}, botName = () => 'Blocky', onCommand = () => {},
   } = opts;
   const token = opts.token?.trim() ?? '';
   const webhooks = (opts.webhookUrls ?? []).filter((u) => WEBHOOK_URL.test(u));
@@ -120,6 +131,8 @@ export function createDiscord(opts = {}) {
   let beat = null;
   let seq = null;
   let selfId = null;
+  let appId = null;
+  const registered = new Set();
   let stopped = true;
   let retry = 0;
   let connectedAt = 0;
@@ -148,11 +161,17 @@ export function createDiscord(opts = {}) {
         ws.close(4000);
       } else if (m.op === 0 && m.t === 'READY') {
         selfId = m.d.user.id;
+        appId = m.d.application?.id ?? m.d.user.id;
         retry = 0;
         connectedAt = Date.now();
         log.log(`Discord bot connected as ${m.d.user.username}.`);
+        registerCommands((m.d.guilds ?? []).map((g) => g.id)).catch((err) => log.error('slash commands:', err.message));
+      } else if (m.op === 0 && m.t === 'GUILD_CREATE') {
+        registerCommands([m.d.id]).catch((err) => log.error('slash commands:', err.message));
       } else if (m.op === 0 && m.t === 'MESSAGE_CREATE') {
         heard(m.d);
+      } else if (m.op === 0 && m.t === 'INTERACTION_CREATE' && m.d.type === 2) {
+        command(m.d);
       }
     };
     ws.onclose = (ev) => {
@@ -173,6 +192,50 @@ export function createDiscord(opts = {}) {
     if (stopped) return;
     retry = Math.min(retry + 1, 6);
     setTimeout(connect, 1000 * 2 ** retry);
+  }
+
+  // Register the slash commands in these servers (once each per connection; a PUT replaces the set, so it stays in step).
+  async function registerCommands(guildIds) {
+    for (const g of guildIds) {
+      if (!appId || registered.has(g)) continue;
+      const res = await fetchImpl(`${api}/applications/${appId}/guilds/${g}/commands`, {
+        method: 'PUT', headers: { authorization: `Bot ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(SLASH_COMMANDS),
+      });
+      if (res.ok) registered.add(g);
+      else log.error(`slash commands in ${g}: ${res.status}`);
+    }
+  }
+
+  // A slash command: handed on with ways to answer it (the answer goes where it was typed).
+  function command(d) {
+    const user = d.member?.user ?? d.user ?? {};
+    const options = Object.fromEntries((d.data?.options ?? []).map((o) => [o.name, o.value]));
+    const respond = (type, data) => fetchImpl(`${api}/interactions/${d.id}/${d.token}/callback`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type, ...(data ? { data } : {}) }),
+    });
+    const followup = async ({ text, png, filename = 'picture.png', as, color, link, ephemeral }) => {
+      const payload = { allowed_mentions: { parse: [] }, ...(ephemeral ? { flags: 64 } : {}) };
+      if (png) {
+        const name = String(filename).replace(/[^\w.-]/g, '') || 'picture.png';
+        payload.embeds = [{ color: parseInt(String(color ?? '#8fd16a').slice(1), 16) || 0x8fd16a, description: clean(text ?? '', 1900),
+          ...(as ? { author: { name: clean(as, 64) } } : {}), ...(link ? { url: link, title: 'See the map' } : {}), image: { url: `attachment://${name}` } }];
+        payload.attachments = [{ id: 0, filename: name }];
+        const form = new FormData();
+        form.append('payload_json', JSON.stringify(payload));
+        form.append('files[0]', new Blob([png], { type: 'image/png' }), name);
+        return fetchImpl(`${api}/webhooks/${appId}/${d.token}`, { method: 'POST', body: form });
+      }
+      return fetchImpl(`${api}/webhooks/${appId}/${d.token}`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...payload, content: clean(text ?? '', 1900) }) });
+    };
+    onCommand({
+      name: d.data?.name, options, channelId: String(d.channel_id ?? ''), userId: String(user.id ?? ''),
+      userName: clean(d.member?.nick ?? user.global_name ?? user.username ?? 'someone', 32),
+      // reply: answer now; defer: "thinking...", then followup (up to 15 minutes later) with text or a picture.
+      reply: (text, { ephemeral = false } = {}) => respond(4, { content: clean(text, 1900), allowed_mentions: { parse: [] }, ...(ephemeral ? { flags: 64 } : {}) }),
+      defer: ({ ephemeral = false } = {}) => respond(5, ephemeral ? { flags: 64 } : null),
+      followup,
+    });
   }
 
   function heard(d) {

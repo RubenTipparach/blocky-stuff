@@ -6,7 +6,7 @@
 // it and whoever is around, and has tools to remember, to change how it feels, and to recall.
 //
 // People are kept in server/db.mjs by where they were met (game:<name>, discord:<id>, char:<character id>); a
-// player who types !link in game and the code in Discord joins the two (server/app.mjs).
+// player who types /link in the game and then /link with the code in Discord joins the two (server/app.mjs).
 
 const DAY = 86_400_000;
 // How far feelings about one person may move in one turn, all tool calls together: a relationship is built

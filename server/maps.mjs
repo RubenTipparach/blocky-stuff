@@ -3,7 +3,7 @@
 // bot can post"). Isometric snapshots (server/map.mjs) of each character's project site, or of where she stands, kept
 // on the volume and shown on a public page; renders on request; and posts to Discord every half hour while someone
 // is in the game (owner, 2026-10-27: "post this only every once every 30 mins on the server IF theres anyone
-// online"), and on !map.
+// online"), and on /picture in Discord.
 //
 //   GET /map                         the public page: a zoomable isometric map of the world (owner, 2026-10-27: "a google
 //                                    style map", "I wanted the isometric look on that map") with a depth slider, the
@@ -30,7 +30,7 @@ import { renderIso, renderTile, colorOf } from './map.mjs';
 const RADIUS = 64; // a snapshot covers 128 by 128 blocks (owner, 2026-10-27: "I'd double the block resolution 128x128")
 const EVERY_MS = 20 * 60_000; // a character's picture is refreshed this often while she is about
 const RENDER_GAP_MS = 15_000; // one on-request render per address this often
-const MAP_COMMAND_GAP_MS = 30_000; // !map at most this often
+const MAP_COMMAND_GAP_MS = 30_000; // /picture at most this often
 const TILE = 64; // blocks a side, per tile
 const TILE_KEEP_MS = 30 * 60_000; // a drawn tile is good for this long
 // A chunk's block data for the browser is kept less long than the page's 5 minutes, so a page's refresh is current.
@@ -306,34 +306,28 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   }
 
   /**
-   * !map, !map <name>, !map <x> <z> in the Discord channel, and the same as !picture, !pic, !photo or !snap (owner,
-   * 2026-10-27: "add discord bot command to take pictures too"). Returns true when the line was one.
+   * The pictures `who` asks for: everyone (empty), a character by (the start of) her name, or a spot as "x z". Returns
+   * { pictures: [{ png, file, text, ch }] } or { error }, at most one ask every 30 seconds.
    */
-  async function command(text) {
-    const m = /^!(?:map|picture|pic|photo|snap)(?:\s+(.+))?$/i.exec(String(text ?? '').trim());
-    if (!m) return false;
-    if (now() - lastMapCommand < MAP_COMMAND_GAP_MS) {
-      await chat.post({ text: 'Give the camera a moment: one picture every 30 seconds.' });
-      return true;
-    }
+  async function pictures(who = '') {
+    if (now() - lastMapCommand < MAP_COMMAND_GAP_MS) return { error: 'Give the camera a moment: one picture every 30 seconds.' };
     lastMapCommand = now();
-    const arg = (m[1] ?? '').trim();
+    const arg = String(who ?? '').trim();
     const xz = /^(-?\d+)[\s,]+(-?\d+)$/.exec(arg);
     if (xz) {
       const out = await render({ x: Number(xz[1]), z: Number(xz[2]) });
-      if (out.error) await chat.post({ text: `No picture: ${out.error}` });
-      else await chat.postImage?.({ png: out.png, filename: 'map.png', text: `Around ${xz[1]}, ${xz[2]}\n${MORE(config.publicUrl)}`, link: `${config.publicUrl}/map` });
-      return true;
+      return out.error ? { error: `No picture: ${out.error}` }
+        : { pictures: [{ png: out.png, file: 'spot.png', text: `Around ${xz[1]}, ${xz[2]}\n${MORE(config.publicUrl)}` }] };
     }
     const all = characters();
     const pick = arg ? all.filter((c) => c.name.toLowerCase().startsWith(arg.toLowerCase())) : all;
-    if (!pick.length) { await chat.post({ text: `Nobody called ${arg}. Try !picture, !picture <name> or !picture <x> <z>.` }); return true; }
+    if (!pick.length) return { error: `Nobody called ${arg}. Try /picture, /picture who:<name> or /picture who:<x> <z>.` };
+    const out = [];
     for (const ch of pick.slice(0, 3)) {
       const snap = await snapshot(ch);
-      if (snap) await postPicture(snap, snap.title, ch);
-      else await chat.post({ text: `${ch.name} is not in the world right now.` });
+      if (snap) out.push({ png: snap.png, file: snap.file, ch, text: `${snap.title}\n${MORE(config.publicUrl)}` });
     }
-    return true;
+    return out.length ? { pictures: out } : { error: `${pick.map((c) => c.name).join(' and ')} ${pick.length === 1 ? 'is' : 'are'} not in the world right now.` };
   }
 
   /** The /map routes. Returns true when it answered. */
@@ -493,7 +487,7 @@ ${view === 'iso' ? isoScript(first) : flatScript(first)}
 </script></body></html>`;
   }
 
-  return { render, snapshot, tick, command, handle, settings, page, postNow, tile, isoChunk, chunkRuns, where };
+  return { render, snapshot, tick, pictures, handle, settings, page, postNow, tile, isoChunk, chunkRuns, where };
 }
 
 // The flat map's script: one map unit is one block, x east and z north as the map's up; tiles are 64 blocks at zoom 2.

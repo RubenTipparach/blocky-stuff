@@ -28,7 +28,7 @@ import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, c
 
 // The characters keep working on their own for this long after anyone last said or did anything.
 const WORK_AFTER_MS = 60 * 60_000;
-// A !link code lasts this long.
+// A /link code lasts this long.
 const LINK_MS = 10 * 60_000;
 // Where new players get the game, in the "server is up" post.
 const LUANTI_URL = 'https://www.luanti.org/en/';
@@ -70,6 +70,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     channelIds: config.discordChannelIds.length ? config.discordChannelIds : (db.setting('discord.channels') ?? '').split(',')
       .filter(Boolean),
     onMessage: (m) => fromDiscord(m),
+    onCommand: (c) => { slash(c).catch((err) => log.error(`/${c.name} failed:`, err)); },
   });
   const brain = bot ?? createBot({ db, game, config, now, log });
   const maps = createMaps({ db, game, config, characters: () => characters(), chat, now, log });
@@ -110,7 +111,6 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (e.type === 'chat' && typeof e.name === 'string' && typeof e.text === 'string') {
       // Everyone who chats is someone the bot knows, whether or not it answers.
       db.meet(personId('game', e.name), e.name, { at: now() });
-      if (/^!link\s*$/i.test(e.text.trim())) return linkCode(e.name);
       db.addChat('game', e.name, e.text, now());
       if (relay().chat) chat.post({ text: e.text, as: e.name, color: db.colorOf(personId('game', e.name)) });
       const admin = game.player(e.name)?.privs.includes('server') ?? false;
@@ -119,6 +119,9 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         target: typeof e.target === 'string' ? e.target : undefined },
         (t, ch) => botSays(t, ch, { near: e.name }))
         .catch((err) => log.error(err));
+    } else if (e.type === 'linkcode' && typeof e.name === 'string') {
+      db.meet(personId('game', e.name), e.name, { at: now(), talked: false });
+      linkCode(e.name);
     } else if (e.type === 'order' && typeof e.name === 'string' && typeof e.target === 'string') {
       // /follow, /come, /stay: done in game at once; the character remembers being asked.
       db.meet(personId('game', e.name), e.name, { at: now() });
@@ -162,7 +165,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   }
   if (daily) setInterval(() => { idleTick().catch((err) => log.error('idle turn failed:', err)); }, 5000).unref();
 
-  // ---- One person in two places: !link in game gives a private code; !link <code> in Discord joins them ----
+  // ---- One person in two places: /link in the game gives a private code; /link in Discord with it joins them ----
   const linkCodes = new Map(); // code -> { gameId, name, at }
 
   function linkCode(name) {
@@ -170,41 +173,46 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     const code = randomBytes(4).toString('hex').slice(0, 6).toUpperCase();
     linkCodes.set(code, { gameId: personId('game', name), name, at: now() });
     // Whispered: only the player sees it, so nobody else can claim their name on Discord.
-    game.act({ type: 'say', to: name, from: host().name, color: host().chatColor, text: `Type  !link ${code}  in the Discord channel within 10 minutes `
+    game.act({ type: 'say', to: name, from: host().name, color: host().chatColor, text: `In Discord, type  /link code:${code}  within 10 minutes `
       + 'and I will know you are the same person there.' });
   }
 
-  function linkDiscord(m, code) {
-    const entry = linkCodes.get(code.toUpperCase());
-    if (!entry || now() - entry.at > LINK_MS) {
-      chat.post({ text: 'That code is not one I gave out (or it ran out). Type !link in game for a new one.', as: host().name });
-      return;
-    }
-    linkCodes.delete(code.toUpperCase());
-    const discordId = personId('discord', m.userId);
-    db.meet(discordId, m.name, { at: now(), talked: false });
+  /** Join a Discord user to the game player who was given `code`. Returns the answer to give them. */
+  function linkWithCode(userId, userName, code) {
+    const entry = linkCodes.get(String(code ?? '').trim().toUpperCase());
+    if (!entry || now() - entry.at > LINK_MS) return 'That code is not one I gave out (or it ran out). Type /link in the game for a new one.';
+    linkCodes.delete(String(code).trim().toUpperCase());
+    const discordId = personId('discord', userId);
+    db.meet(discordId, userName, { at: now(), talked: false });
     db.link(entry.gameId, discordId);
-    for (const c of characters()) db.remember(c.id, entry.gameId, `Learned that ${m.name} on Discord is ${entry.name} in game.`, 2, now());
-    chat.post({ text: `Got it, ${m.name}: you and ${entry.name} in game are one and the same to us now.`, as: host().name });
+    for (const c of characters()) db.remember(c.id, entry.gameId, `Learned that ${userName} on Discord is ${entry.name} in game.`, 2, now());
+    return `Got it, ${userName}: you and ${entry.name} in the game are one and the same to us now.`;
+  }
+
+  const helpText = () => `Talk to ${characters().map((c) => c.name).join(' or ')} here or in the game: say a name, or just talk. `
+    + 'Commands: /picture (everyone), /picture who:<name>, /picture who:<x> <z> (a spot); /map; /link code:<code> joins your '
+    + `game account (type /link in the game for the code). In the game: /talk, /follow, /come, /stay, /rel, /link. Maps: ${config.publicUrl}/map`;
+
+  // Discord's slash commands (server/discord.mjs registers them): answered where they were typed.
+  async function slash(c) {
+    if (c.userId) db.meet(personId('discord', c.userId), c.userName, { at: now(), talked: false });
+    if (c.name === 'help') return c.reply(helpText(), { ephemeral: true });
+    if (c.name === 'map') return c.reply(`The live map of the world: ${config.publicUrl}/map`);
+    if (c.name === 'link') return c.reply(linkWithCode(c.userId, c.userName, c.options.code), { ephemeral: true });
+    if (c.name === 'picture') {
+      await c.defer();
+      const r = await maps.pictures(c.options.who ?? '');
+      if (r.error) return c.followup({ text: r.error });
+      for (const p of r.pictures) {
+        await c.followup({ png: p.png, filename: p.file, text: p.text, as: p.ch?.name, color: p.ch?.chatColor, link: `${config.publicUrl}/map` });
+      }
+    }
+    return undefined;
   }
 
   function fromDiscord(m) {
     lastActivity = now();
     if (m.userId) db.meet(personId('discord', m.userId), m.name, { at: now() });
-    const linking = /^!link\s+([0-9a-f]{6})\s*$/i.exec(m.text.trim());
-    if (linking && m.userId) return linkDiscord(m, linking[1]);
-    if (/^!(?:map|picture|pic|photo|snap)\b/i.test(m.text.trim())) {
-      maps.command(m.text).catch((err) => log.error('picture command failed:', err));
-      return undefined;
-    }
-    if (/^!help\s*$/i.test(m.text.trim())) {
-      const names = characters().map((c) => c.name);
-      chat.post({ as: host().name, text: `Talk to ${names.join(' or ')} here: say a name, or just talk. Commands: `
-        + '!picture (everyone), !picture <name>, !picture <x> <z> (a spot), all also as !map; '
-        + '!link <code> joins your game self (type !link in game for the code). '
-        + `Maps: ${config.publicUrl}/map` }).catch((err) => log.error(err));
-      return undefined;
-    }
     db.addChat('discord', m.name, m.text, now());
     if (relay().chat) game.act({ type: 'say', text: m.text, from: `[Discord] ${m.name}` });
     // An admin on Discord is known by their Discord id, which Discord vouches for; a name anyone can type.
@@ -382,12 +390,13 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         characters: castOf(db, config, now()), people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
         memories: db.allMemories(80),
         activity: brain.activity?.() ?? [],
-        // Game accounts not yet part of anyone who is also on Discord: what Players can link a Discord user to.
-        gameAccounts: gameAccounts().filter((a) => {
+        // Every account on the game server, each saying who on Discord it is linked to, if anyone (Players lists them all
+        // in its dropdown; owner: "drop down of users unlinked on the game server side").
+        gameAccounts: gameAccounts().map((a) => {
           const p = db.person(personId('game', a.name));
-          if (!p) return true;
-          const all = [p.id, ...(db.people().find((x) => x.id === p.id)?.aliases ?? []).map((x) => x.id)];
-          return !all.some((id) => id.startsWith('discord:'));
+          const row = p && db.people().find((x) => x.id === p.id);
+          const discord = row && [{ id: row.id, name: row.name }, ...row.aliases].find((x) => x.id.startsWith('discord:'));
+          return { ...a, linkedTo: discord ? discord.name : null };
         }),
         maps: { url: `${config.publicUrl}/map`, settings: maps.settings(), kept: db.json('maps', {}) },
         policyTools: TOOLS.filter((t) => t.permission && t.permission !== 'admin').map((t) => ({ name: t.name, permission: t.permission })),
@@ -476,7 +485,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (['none', 'dating', 'ex'].includes(body.status)) db.setStatus(ch, p.id, body.status);
       return send(res, 200, { bond: db.bond(ch, p.id) });
     }
-    // Join two people into one, as !link does: { keep, other } (ids); `other` becomes an alias of `keep`.
+    // Join two people into one, as /link does: { keep, other } (ids); `other` becomes an alias of `keep`.
     if (route === 'POST /api/admin/link') {
       const a = typeof body.keep === 'string' ? db.person(body.keep) : null;
       // A game name typed on /admin: that player, made now if they have not joined yet.
@@ -591,5 +600,6 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   server.idleTick = idleTick;
   server.fromDiscord = fromDiscord;
   server.maps = maps;
+  server.slash = slash;
   return server;
 }

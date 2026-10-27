@@ -75,6 +75,12 @@ export const ADMIN_PAGE = `<!doctype html>
   .rel .facts { font-size: 12px; color: var(--muted); }
   .rel details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   .rel details[open] { display: grid; gap: 8px; }
+  .row.nowrap { flex-wrap: nowrap; }
+  button.small { min-height: 32px; padding: 4px 12px; font-size: 14px; }
+  input.swatch { width: 40px; min-height: 32px; height: 32px; padding: 2px; flex: none; }
+  .linker { display: grid; gap: 6px; } .linker select { width: auto; max-width: 280px; min-height: 32px; padding: 4px 8px; }
+  .linker input { min-height: 32px; padding: 4px 8px; max-width: 220px; }
+  #players2 td { vertical-align: middle; }
   @media (max-width: 560px) { .two, .three { grid-template-columns: 1fr; } .meter { grid-template-columns: 52px 1fr 96px; } }
 </style></head>
 <body><main>
@@ -176,23 +182,27 @@ function renderPlayers(force) {
     const k = kindOf(p);
     const missing = k.game && !k.discord ? 'discord' : k.discord && !k.game ? 'game' : null;
     const pool = missing ? people.filter((o) => o.id !== p.id && (() => { const ok = kindOf(o); return missing === 'discord' ? ok.discord && !ok.game : ok.game && !ok.discord; })()) : [];
-    // A Discord user without a game account: every account on the game server not yet linked to Discord (they need
-    // not have met the characters), or a typed name. A game player without Discord: the Discord users on their own.
-    const gameOptions = (state.gameAccounts || []).filter((a) => !accounts(p).some((x) => x.id === 'game:' + a.name.toLowerCase()));
-    const options = missing === 'game' ? gameOptions.map((a) => '<option value="name:' + esc(a.name) + '">' + esc(a.name)
-      + (a.lastLogin ? ' (last on ' + agoOf(a.lastLogin) + ')' : '') + '</option>').join('')
-      : pool.map((o) => '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>').join('');
-    const picker = missing ? '<div class="row" style="margin-top:6px">' + (options ? '<select class="linkWith" style="width:auto;min-height:32px">'
-      + '<option value="">Link a ' + (missing === 'game' ? 'game account' : 'Discord user') + '...</option>' + options + '</select>' : '')
-      + (missing === 'game' ? '<input class="gameName" maxlength="32" placeholder="or type a game name" style="width:150px;min-height:32px">' : '')
-      + ((options || missing === 'game') ? '<button class="quiet" data-link style="min-height:32px">Link</button>'
-        : '<span class="muted note" style="margin:0">no Discord users on their own yet</span>') + '</div>' : '';
-    const cell = (prefix) => (list(p, prefix) || '<span class="muted">none</span>') + (missing === (prefix === 'game:' ? 'game' : 'discord') ? picker : '');
+    // A Discord user without a game account: a dropdown of every account on the game server (the linked ones shown, but
+    // not pickable), or a typed name. A game player without Discord: the Discord users on their own.
+    const gameAll = state.gameAccounts || [];
+    const free = gameAll.filter((a) => !a.linkedTo);
+    const options = missing === 'game'
+      ? (free.length ? '' : '<option value="" disabled>No unlinked game accounts yet; they appear once someone joins</option>')
+        + gameAll.map((a) => '<option value="name:' + esc(a.name) + '"' + (a.linkedTo ? ' disabled' : '') + '>' + esc(a.name)
+          + (a.linkedTo ? ' (linked to ' + esc(a.linkedTo) + ')' : a.lastLogin ? ' (last on ' + agoOf(a.lastLogin) + ')' : '') + '</option>').join('')
+      : (pool.length ? '' : '<option value="" disabled>No Discord users on their own yet</option>')
+        + pool.map((o) => '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>').join('');
+    const picker = missing ? '<div class="linker"><div class="row nowrap"><select class="linkWith">'
+      + '<option value="">' + (missing === 'game' ? 'Game accounts on the server (' + gameAll.length + ')' : 'Discord users') + '...</option>'
+      + options + '</select><button class="quiet small" data-link>Link</button></div>'
+      + (missing === 'game' ? '<input class="gameName" maxlength="32" placeholder="or type a game name">' : '') + '</div>' : '';
+    const cell = (prefix) => (list(p, prefix) || (missing === (prefix === 'game:' ? 'game' : 'discord') ? '' : '<span class="muted">none</span>'))
+      + (missing === (prefix === 'game:' ? 'game' : 'discord') ? picker : '');
     return '<tr data-id="' + esc(p.id) + '" data-name="' + esc(p.name) + '"><td><span class="dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:'
       + esc(p.color || '#9aa8ff') + '"></span><b>' + esc(p.name) + '</b></td><td>' + cell('game:') + '</td><td>' + cell('discord:') + '</td><td>' + p.talks
-      + '</td><td class="muted">' + agoOf(p.last_at) + '</td><td class="row"><input type="color" class="color" style="width:46px;min-height:32px;padding:2px" value="'
-      + esc(p.color || '#9aa8ff') + '"><button class="quiet" data-color style="min-height:32px">Save</button></td>'
-      + '<td><button class="danger" data-forget style="min-height:32px">Forget</button></td></tr>';
+      + '</td><td class="muted">' + agoOf(p.last_at) + '</td><td><div class="row nowrap"><input type="color" class="color swatch" value="'
+      + esc(p.color || '#9aa8ff') + '"><button class="quiet small" data-color>Save</button></div></td>'
+      + '<td><button class="danger small" data-forget>Forget</button></td></tr>';
   }).join('') : '<tr><td colspan="7" class="muted">Nobody yet: people show up here once they chat.</td></tr>';
 }
 let built = false;
@@ -273,7 +283,7 @@ function build() {
     <label class="check"><input type="checkbox" id="r_chat"> Chat both ways (game, Discord, bot)</label>
     <label class="check"><input type="checkbox" id="r_news"> Joins, leaves and server start</label>
     <h2 style="margin-top:16px">Map pictures</h2>
-    <p class="muted note" style="margin:0 0 8px">A picture of each character, aimed at where she is, goes to Discord every so often while someone is in the game (a finished project gets a mention). Anyone in the channel can ask with <code>!map</code>, <code>!map Moss</code> or <code>!map 120 -40</code>.</p>
+    <p class="muted note" style="margin:0 0 8px">A picture of each character, aimed at where she is, goes to Discord every so often while someone is in the game (a finished project gets a mention). Anyone in the channel can ask with <code>/picture</code>, <code>/picture who:Moss</code> or <code>/picture who:120 -40</code>.</p>
     <div class="row"><label class="field" style="margin:0;flex:1 1 200px">Every (minutes, while someone is online; 0 = never by themselves)<input id="m_every" type="number" min="0" max="1440"></label>
       <button type="button" class="quiet" id="m_save" style="align-self:end">Save</button>
       <button type="button" class="quiet" id="m_post" style="align-self:end">Post everyone's picture now</button><span id="m_note" class="note muted"></span></div>
@@ -324,7 +334,7 @@ function build() {
 <div class="tab" data-panel="players">
 <section><h2>Players</h2>
   <p class="muted note" style="margin:0 0 12px">Each person once, with the game and Discord accounts that are theirs. Someone with only one kind can be linked to a
-  person who has only the other kind (players can also do it themselves: <code>!link</code> in game, then the code in Discord). Unlink undoes a wrong link.</p>
+  person who has only the other kind (players can also do it themselves: <code>/link</code> in the game, then <code>/link</code> with the code in Discord). Unlink undoes a wrong link.</p>
   <div class="scroll"><table><thead><tr><th>Person</th><th>In game</th><th>On Discord</th><th>Talks</th><th>Last seen</th><th>Colour on Discord</th><th></th></tr></thead>
   <tbody id="players2"></tbody></table></div>
   <p class="note muted" id="playersNote"></p>

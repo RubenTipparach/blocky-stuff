@@ -167,23 +167,27 @@ test('the bot answers any chat by default, and its body walks to whoever it answ
   assert.deepEqual([actions[0].type, actions[0].near, actions[0].text], ['say', 'alice', 'Hi there!']);
 });
 
-test('!link in game whispers a code; !link <code> in Discord joins the two people', async () => {
+test('/link in the game whispers a code; /link with it in Discord joins the two people', async () => {
   const config = loadConfig({ PUBLIC_URL: 'http://localhost', ANTHROPIC_API_KEY: '' });
   const db = openDb(':memory:');
-  const posts = [];
-  const discord = { post: async (m) => { posts.push(m); return { ok: true }; }, news: async () => ({}), mode: null,
+  const discord = { post: async () => ({ ok: true }), news: async () => ({}), mode: null,
     channelIds: [], setChannels: () => true, start() {}, stop() {} };
   const bot = { ready: true, hear: async () => null };
   const server = makeApp({ config, db, bridgeKey: 'key', discord, bot, log: quiet });
   server.game.sync({ players: [{ name: 'Ruben', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
-  const { actions } = server.game.sync({ events: [{ type: 'chat', name: 'Ruben', text: '!link' }] });
+  // The mod sends a linkcode event for /link in the game.
+  const { actions } = server.game.sync({ events: [{ type: 'linkcode', name: 'Ruben' }] });
   assert.equal(actions[0].to, 'Ruben');
-  const code = /!link (\w{6})/.exec(actions[0].text)[1];
+  const code = /\/link code:(\w{6})/.exec(actions[0].text)[1];
   assert.equal(db.chat(5).length, 0); // the code is never in the public log
-  server.discord.post({ text: 'x' });
-  await server.fromDiscord({ channelId: '1', userId: '42', name: 'PscifieX', text: `!link ${code.toLowerCase()}` });
-  assert.match(posts.at(-1).text, /one and the same/);
+  const replies = [];
+  await server.slash({ name: 'link', options: { code: code.toLowerCase() }, userId: '42', userName: 'PscifieX',
+    reply: async (t, o) => replies.push([t, o]) });
+  assert.match(replies[0][0], /one and the same/);
+  assert.equal(replies[0][1].ephemeral, true);
   assert.equal(db.person('discord:42').id, 'game:ruben');
+  await server.slash({ name: 'link', options: { code: 'ZZZZZZ' }, userId: '43', userName: 'x', reply: async (t) => replies.push([t]) });
+  assert.match(replies[1][0], /not one I gave out/);
 });
 
 test('an admin can link two people on the admin page', async () => {
@@ -225,7 +229,7 @@ test('an admin can link a Discord user to a game name typed in, before that play
   await s.close();
 });
 
-test('the game server\'s accounts not yet linked to Discord are offered for linking', async () => {
+test('every game server account is listed, saying who on Discord it is linked to', async () => {
   const { DatabaseSync } = await import('node:sqlite');
   const { mkdtempSync, mkdirSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
@@ -241,7 +245,7 @@ test('the game server\'s accounts not yet linked to Discord are offered for link
   s.db.meet('discord:42', 'PscifieX');
   s.db.link('discord:42', 'game:ruben');
   const r = await s.call('/api/admin', { headers: s.as('111') });
-  assert.deepEqual(r.json.gameAccounts.map((a) => a.name), ['sudo', 'alice']);
+  assert.deepEqual(r.json.gameAccounts.map((a) => [a.name, a.linkedTo]), [['ruben', 'PscifieX'], ['sudo', null], ['alice', null]]);
   assert.ok(!JSON.stringify(r.json.gameAccounts).includes('secret'));
   await s.close();
 });

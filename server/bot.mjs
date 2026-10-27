@@ -110,10 +110,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     if (events.length > 80) events.shift();
   };
 
-  /** True when `text` names the character called `name` (or starts with !ai, which any character may take). */
+  /** True when `text` names the character called `name`. */
   function addressed(text, name) {
     const t = String(text ?? '').trim();
-    if (/^!ai\b/i.test(t)) return true;
     const n = String(name).replace(/[^\w]/g, '');
     return n.length > 0 && new RegExp(`(^|[^\\w])@?${n}\\b`, 'i').test(t);
   }
@@ -133,7 +132,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     if (byName.length) return byName;
     const facing = msg.target && all.find((c) => c.id === msg.target);
     if (facing) return [facing];
-    if (s.listen !== 'all' && !/^!ai\b/i.test(String(msg.text ?? '').trim())) return [];
+    if (s.listen !== 'all') return [];
     const pid = msg.personId;
     const last = pid && lastWith.get(pid);
     const sticky = last && now() - last.at < STICKY_MS && all.find((c) => c.id === last.id);
@@ -176,7 +175,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       await reply(off, chosen[0]);
       return off;
     }
-    const direct = named(m.text, chosen).length > 0 || /^!ai\b/i.test(String(m.text).trim()) || Boolean(m.only);
+    const direct = named(m.text, chosen).length > 0 || Boolean(m.only);
     let first = null;
     for (const ch of chosen) {
       if (m.source !== 'character') {

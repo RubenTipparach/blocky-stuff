@@ -703,6 +703,15 @@ for _, cmd in ipairs({ "follow", "come", "stay" }) do
 	})
 end
 
+core.register_chatcommand("link", {
+	description = "Get a code to join your game account to your Discord account (then /link in Discord)",
+	privs = { shout = true },
+	func = function(name)
+		push({ type = "linkcode", name = name })
+		return true, "Asking for your code: it comes in a moment, only to you."
+	end,
+})
+
 core.register_chatcommand("rel", {
 	description = "How each character feels about you",
 	func = function(name)

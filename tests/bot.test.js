@@ -27,12 +27,12 @@ function setup(script, { t = 0 } = {}) {
   return { db, game, bot, client, tick: (ms) => { clock += ms; } };
 }
 
-test('the bot hears its name, @name and !ai, and nothing else', () => {
+test('a character hears her name and @name, and nothing else', () => {
   const { bot } = setup([]);
-  for (const t of ['@Blocky hi', 'blocky, how do I craft a pick?', 'hey Blocky', '!ai what time is it']) {
+  for (const t of ['@Blocky hi', 'blocky, how do I craft a pick?', 'hey Blocky']) {
     assert.equal(bot.addressed(t, 'Blocky'), true, t);
   }
-  for (const t of ['blockyness', 'hello all', 'ai is cool']) assert.equal(bot.addressed(t, 'Blocky'), false, t);
+  for (const t of ['blockyness', 'hello all', '!ai is not a command']) assert.equal(bot.addressed(t, 'Blocky'), false, t);
 });
 
 test('a question gets an answer, with the chat and who is online as context', async () => {
@@ -80,7 +80,7 @@ test('a quick second question waits its turn instead of being dropped, and the h
   const { db, bot } = setup([text('one'), text('two')]);
   db.putJson('bot', { perHour: 2, cooldown: 0.05 });
   const said = [];
-  const ask = () => bot.hear({ source: 'game', name: 'alice', text: '!ai hi' }, (t) => said.push(t));
+  const ask = () => bot.hear({ source: 'game', name: 'alice', text: 'Blocky, hi' }, (t) => said.push(t));
   assert.equal(await ask(), 'one');
   assert.equal(await ask(), 'two');
   assert.match(await ask(), /a lot this hour/);
@@ -89,16 +89,16 @@ test('a quick second question waits its turn instead of being dropped, and the h
 
 test('a refusal is answered kindly, and a switched-off bot stays quiet', async () => {
   const { db, bot } = setup([() => ({ stop_reason: 'refusal', content: [], usage: {} })]);
-  assert.match(await bot.hear({ source: 'game', name: 'a', text: '!ai x' }, () => {}), /can't help/);
+  assert.match(await bot.hear({ source: 'game', name: 'a', text: 'Blocky, x' }, () => {}), /can't help/);
   db.putJson('bot', { enabled: false });
-  assert.equal(await bot.hear({ source: 'game', name: 'b', text: '!ai x' }, () => {}), null);
+  assert.equal(await bot.hear({ source: 'game', name: 'b', text: 'Blocky, x' }, () => {}), null);
 });
 
 test('without an API key the bot says so instead of failing', async () => {
   const db = openDb(':memory:');
   const bot = createBot({ db, game: createGame(), config: loadConfig({}), log: quiet });
   assert.equal(bot.ready, false);
-  assert.match(await bot.hear({ source: 'game', name: 'a', text: '!ai hi' }, () => {}), /ANTHROPIC_API_KEY/);
+  assert.match(await bot.hear({ source: 'game', name: 'a', text: 'Blocky, hi' }, () => {}), /ANTHROPIC_API_KEY/);
 });
 
 test('the reply is one chat line, cut to length', () => {
