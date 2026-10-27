@@ -493,18 +493,50 @@ function load() {
   const mid = map.getCenter();
   want.sort((a, b) => { const [ax, ay] = origin(...a), [bx, by] = origin(...b);
     return Math.hypot(ax + W / 2 - mid.lng, -(ay + H / 2) - mid.lat) - Math.hypot(bx + W / 2 - mid.lng, -(by + H / 2) - mid.lat); });
-  const keep = new Set();
   for (const [cx, cz] of want.slice(0, 60)) {
     const key = cx + ',' + cz + ',' + cutAt;
-    keep.add(key);
     if (shown.has(key)) continue;
-    const [ox, oy] = origin(cx, cz);
-    const img = L.imageOverlay('/map/iso/' + cx + '/' + cz + '.png?top=' + cutAt, [[-oy, ox], [-(oy + H), ox + W]],
-      { zIndex: 1000 + cx + cz, interactive: false }).addTo(map);
-    shown.set(key, img);
+    shown.set(key, null); // being fetched
+    picture(cx, cz, cutAt).then((src) => {
+      if (!src || !shown.has(key)) { shown.delete(key); return; }
+      const [ox, oy] = origin(cx, cz);
+      shown.set(key, L.imageOverlay(src, [[-oy, ox], [-(oy + H), ox + W]], { zIndex: 1000 + cx + cz, interactive: false }).addTo(map));
+    });
   }
-  for (const [key, img] of shown) if (!keep.has(key)) { map.removeLayer(img); shown.delete(key); }
 }
+// Each chunk's picture is fetched once and kept in the page (owner: "cache these locally ... only fetch from server
+// every 5 mins"): a chunk stays on the map once loaded, and is fetched again only when it is over 5 minutes old and in
+// view. At most four fetches at a time.
+const pictures = new Map(); // key -> { src, at }
+const FRESH = 5 * 60 * 1000;
+let fetching = 0;
+const queue = [];
+const turn = () => (fetching < 4 ? (fetching++, Promise.resolve()) : new Promise((r) => queue.push(r)));
+const done = () => { fetching--; const next = queue.shift(); if (next) { fetching++; next(); } };
+async function picture(cx, cz, top, again) {
+  const key = cx + ',' + cz + ',' + top;
+  const had = pictures.get(key);
+  if (had && !again && Date.now() - had.at < FRESH) return had.src;
+  await turn();
+  try {
+    const r = await fetch('/map/iso/' + cx + '/' + cz + '.png?top=' + top);
+    if (!r.ok) return had ? had.src : null;
+    const src = URL.createObjectURL(await r.blob());
+    if (had) setTimeout(() => URL.revokeObjectURL(had.src), 2000);
+    pictures.set(key, { src, at: Date.now() });
+    return src;
+  } catch { return had ? had.src : null; } finally { done(); }
+}
+// Every minute: chunks in view whose picture is over 5 minutes old are fetched again and swapped in place.
+setInterval(() => {
+  const b = map.getBounds();
+  for (const [key, img] of shown) {
+    if (!img || !b.intersects(img.getBounds())) continue;
+    const [cx, cz, top] = key.split(',').map(Number);
+    const had = pictures.get(key);
+    if (had && Date.now() - had.at >= FRESH) picture(cx, cz, top, true).then((src) => { if (src && src !== had.src) img.setUrl(src); });
+  }
+}, 60 * 1000);
 map.on('moveend', load);
 load();
 const cut = document.getElementById('cut'), cutOut = document.getElementById('cutOut');
@@ -513,7 +545,7 @@ cut.addEventListener('input', () => {
   cutAt = Number(cut.value);
   cutOut.textContent = cutAt >= YMAX ? 'everything' : 'y ' + cutAt + ' and below';
   clearTimeout(wait);
-  wait = setTimeout(() => { for (const img of shown.values()) map.removeLayer(img); shown.clear(); load(); }, 250);
+  wait = setTimeout(() => { for (const img of shown.values()) if (img) map.removeLayer(img); shown.clear(); load(); }, 250);
 });
 ${markersScript()}`;
 }
