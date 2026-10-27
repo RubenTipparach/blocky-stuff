@@ -21,6 +21,9 @@ export const ACTIONS = {
   heal: ['player'],
   ground: ['columns'],
   walk: ['x', 'y', 'z'],
+  follow: ['player'],
+  come: ['player'],
+  stay: [],
 };
 
 // No word from the mod for this long and the game counts as down.

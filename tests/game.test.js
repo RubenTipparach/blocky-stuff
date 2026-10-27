@@ -76,3 +76,18 @@ test('a box is its blocks, hollow is its shell, and a box too big is refused', (
   assert.equal(boxNodes({ item: 'default:wood', x1: 2, y1: 2, z1: 2, x2: 0, y2: 0, z2: 0, hollow: true }).length, 26);
   assert.equal(boxNodes({ item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 19, y2: 19, z2: 19 }), null);
 });
+
+test('a character follows, comes to and stays for players who ask, each only for themselves', async () => {
+  const game = createGame();
+  game.sync({ players: [alice, boss] });
+  const asker = { name: 'alice', admin: false };
+  assert.match((await runTool('follow_player', { player: 'Boss' }, { game, asker })).message, /themselves/);
+  const g = Object.create(game);
+  g.act = (a) => game.act({ ...a, by: 'moss' });
+  const pending = [runTool('follow_player', { player: 'alice' }, { game: g, asker }), runTool('stay_put', {}, { game: g, asker }),
+    runTool('come_to', { player: 'alice' }, { game: g, asker })];
+  const { actions } = game.sync({});
+  assert.deepEqual(actions.map((a) => [a.type, a.by]), [['follow', 'moss'], ['stay', 'moss'], ['come', 'moss']]);
+  game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: 'ok' })) });
+  assert.ok((await Promise.all(pending)).every((r) => r.ok));
+});

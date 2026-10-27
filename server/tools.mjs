@@ -122,9 +122,29 @@ export const TOOLS = [
     run: ({ game }, { blocks }) => game.act({ type: 'place', nodes: blocks.slice(0, BUILD_MAX) }),
   },
   {
+    name: 'follow_player',
+    self: 'player',
+    description: 'Start following a player around with your body, until they ask you to stop (stay_put). Only when '
+      + 'they ask you to follow them, or come along.',
+    input_schema: { type: 'object', properties: { player }, required: ['player'], additionalProperties: false },
+    run: ({ game }, { player: name }) => game.act({ type: 'follow', player: name }),
+  },
+  {
+    name: 'come_to',
+    self: 'player',
+    description: 'Walk over to a player once and stay there (when they say come here, or want you near).',
+    input_schema: { type: 'object', properties: { player }, required: ['player'], additionalProperties: false },
+    run: ({ game }, { player: name }) => game.act({ type: 'come', player: name }),
+  },
+  {
+    name: 'stay_put',
+    description: 'Stop following anyone and stay where you are.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+    run: ({ game }) => game.act({ type: 'stay' }),
+  },
+  {
     name: 'walk_to',
-    permission: 'admin',
-    description: 'Walk your body in the world to a spot and stand there a while (to look at something, or join someone).',
+    description: 'Walk your body in the world to a spot and stay there (to look at something, or to go somewhere asked).',
     input_schema: { type: 'object', properties: { x: pos, y: pos, z: pos }, required: ['x', 'y', 'z'], additionalProperties: false },
     run: ({ game }, { x, y, z }) => game.act({ type: 'walk', x, y, z }),
   },

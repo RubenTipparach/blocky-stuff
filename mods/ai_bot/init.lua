@@ -179,17 +179,23 @@ end
 
 -- ---- The characters' bodies ----
 -- Each character the sidecar names (server/character.mjs) has a body: a woman in a dress and long hair, in her
--- own colours, her name over her head. She is in the world whenever a player is online or she has work to do:
--- she walks after whoever she is talking to and goes to what she builds. Bodies are never saved with the map
--- (static_save off), so a world never fills with stale copies: when an area unloads they are gone, and the next
--- sync puts them back by a player.
+-- own colours, her name over her head. She is in the world while a player is online, and stays where she is
+-- (owner, 2026-10-26: "bots shouldnt follow me unless I asked"): she turns to face whoever she answers, and walks
+-- only to what she builds, to hand something over, or when asked (follow, come, walk; stay stops her). Bodies keep
+-- apart: each takes her own place around a shared goal, and two that end up close step away from each other
+-- ("they shouldnt be standing insside of eachotehr"). Bodies are never saved with the map (static_save off); when
+-- an area unloads they are gone, and the next sync puts them back where they stood, or by a player.
 
 local cast = {} -- id -> { name, chat, dress, hair }, as the sidecar last sent it
 local order = {} -- the ids, in the sidecar's order
-local bodies = {} -- id -> { obj, follow, work_pos, work_until, work_anim, look }
+local bodies = {} -- id -> { obj, follow, go, go_until, go_anim, face, face_until, home, look }
 local has_model = core.get_modpath("player_api") ~= nil
 local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 } }
-local WALK_SPEED, NEAR, FAR = 4, 3, 40
+local WALK_SPEED, FAR = 4, 40
+local ARRIVE = 1.2 -- close enough to her place
+local APART = 1.4 -- nearer than this to another body, and they step apart
+local RING = 2.5 -- how far from a shared goal each takes her place
+local HOME_NEAR = 64 -- she comes back where she stood when a player is this near it
 
 -- Her skin: the base (face, hands, boots) with the dress and hair masks tinted in her colours.
 local function skin(c)
@@ -203,10 +209,28 @@ local function body(id)
 end
 local function alive(b) return b.obj ~= nil and b.obj:get_pos() ~= nil end
 
+-- Her place around a goal: each character a different angle on a ring, so two never aim for the same spot.
+local function place_for(id, goal)
+	local n, i = #order, 1
+	for k, x in ipairs(order) do if x == id then i = k end end
+	local angle = (i - 1) / math.max(n, 1) * 2 * math.pi + math.pi / 4
+	return { x = goal.x + math.cos(angle) * RING, y = goal.y, z = goal.z + math.sin(angle) * RING }
+end
+
 local function anim(self, which)
 	if not has_model or self._anim == which then return end
 	self._anim = which
 	self.object:set_animation(ANIM[which], which == "walk" and 30 or 20, 0)
+end
+
+-- Where she is headed now: a place she was sent (for a while), else the player she follows, else nowhere.
+local function goal_of(b)
+	local now = core.get_us_time()
+	if b.go and now < b.go_until then return b.go, b.go_anim end
+	b.go = nil
+	local p = b.follow and core.get_player_by_name(b.follow)
+	if p then return p:get_pos(), "stand" end
+	return nil
 end
 
 core.register_entity("ai_bot:npc", {
@@ -243,86 +267,132 @@ core.register_entity("ai_bot:npc", {
 		end
 		local obj = self.object
 		local pos = obj:get_pos()
-		local goal
-		if b.work_pos and core.get_us_time() < b.work_until then
-			goal = b.work_pos
-		else
-			b.work_pos = nil
-			local p = b.follow and core.get_player_by_name(b.follow)
-			goal = p and p:get_pos()
-		end
 		local vel = obj:get_velocity()
-		if not goal then
-			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
-			anim(self, "stand")
-			return
-		end
-		local to = vector.subtract(goal, pos)
-		local flat = math.sqrt(to.x * to.x + to.z * to.z)
-		if flat > FAR or math.abs(to.y) > 12 then
-			obj:set_pos(vector.add(goal, { x = 2, y = 0.5, z = 2 }))
-			self._stuck = 0
-			return
-		end
-		if flat > 0.01 then obj:set_yaw(core.dir_to_yaw({ x = to.x, y = 0, z = to.z })) end
-		if flat > NEAR then
-			obj:set_velocity({ x = to.x / flat * WALK_SPEED, y = vel.y, z = to.z / flat * WALK_SPEED })
-			anim(self, "walk")
-			-- Walking into a wall she cannot step over: hop to the goal after a couple of seconds.
-			if math.abs(vel.x) + math.abs(vel.z) < 0.5 then self._stuck = self._stuck + dtime else self._stuck = 0 end
-			if self._stuck > 2 then
-				obj:set_pos(vector.add(goal, { x = 2, y = 0.5, z = 2 }))
-				self._stuck = 0
+		b.home = pos
+		-- Step away from any other body standing too close.
+		local push = { x = 0, z = 0 }
+		for id, other in pairs(bodies) do
+			if id ~= self._cid and alive(other) then
+				local op = other.obj:get_pos()
+				local dx, dz = pos.x - op.x, pos.z - op.z
+				local d = math.sqrt(dx * dx + dz * dz)
+				if d < APART and math.abs(pos.y - op.y) < 2 then
+					if d < 0.05 then dx, dz, d = math.random() - 0.5, math.random() - 0.5, 0.5 end
+					push.x, push.z = push.x + dx / d * 2, push.z + dz / d * 2
+				end
 			end
-		else
-			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
-			anim(self, b.work_pos and b.work_anim or "stand")
 		end
+		local goal, how = goal_of(b)
+		local place = goal and place_for(self._cid, goal)
+		if place then
+			local to = vector.subtract(place, pos)
+			local flat = math.sqrt(to.x * to.x + to.z * to.z)
+			if flat > FAR or math.abs(to.y) > 12 then
+				obj:set_pos(vector.add(place, { x = 0, y = 0.5, z = 0 }))
+				self._stuck = 0
+				return
+			end
+			if flat > ARRIVE then
+				obj:set_yaw(core.dir_to_yaw({ x = to.x, y = 0, z = to.z }))
+				obj:set_velocity({ x = to.x / flat * WALK_SPEED + push.x, y = vel.y, z = to.z / flat * WALK_SPEED + push.z })
+				anim(self, "walk")
+				-- Walking into a wall she cannot step over: hop to her place after a couple of seconds.
+				if math.abs(vel.x) + math.abs(vel.z) < 0.5 then self._stuck = self._stuck + dtime else self._stuck = 0 end
+				if self._stuck > 2 then
+					obj:set_pos(vector.add(place, { x = 0, y = 0.5, z = 0 }))
+					self._stuck = 0
+				end
+				return
+			end
+		end
+		-- Arrived, or nowhere to go: stand (or work), facing what she is about.
+		obj:set_velocity({ x = push.x, y = vel.y, z = push.z })
+		local face = b.face and core.get_us_time() < b.face_until and core.get_player_by_name(b.face)
+		local at = face and face:get_pos() or goal
+		if at then
+			local d = vector.subtract(at, pos)
+			if math.abs(d.x) + math.abs(d.z) > 0.1 then obj:set_yaw(core.dir_to_yaw({ x = d.x, y = 0, z = d.z })) end
+		end
+		anim(self, (push.x ~= 0 or push.z ~= 0) and "walk" or (goal and how) or "stand")
 	end,
 })
 
--- Put a character's body in the world near `near`, a little apart from the others, dressed in her colours.
-local function spawn(id, near)
+-- Put a character's body in the world at `at` (her place around it), dressed in her colours.
+local function spawn(id, at)
 	local c = cast[id]
 	if not c then return end
-	local i = 0
-	for n, x in ipairs(order) do if x == id then i = n end end
-	local obj = core.add_entity(vector.add(near, { x = 2 + i, y = 0.5, z = 2 - i }), "ai_bot:npc")
+	local obj = core.add_entity(vector.add(place_for(id, at), { x = 0, y = 0.5, z = 0 }), "ai_bot:npc")
 	if not obj then return end
 	local ent = obj:get_luaentity()
 	if ent then ent._cid = id end
 	local b = body(id)
-	b.obj, b.look = obj, nil
+	b.obj = obj
 	obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
 	if has_model then obj:set_properties({ textures = { skin(c) } }) end
 	b.look = c.name .. skin(c)
 end
 
--- Walk after a player (and appear by them when not in the world).
-local function follow(id, name)
+-- Into the world near `at` if she is not in it.
+local function ensure(id, at)
+	if cast[id] and not alive(body(id)) and at then spawn(id, at) end
+end
+
+-- Walk to a spot and be there a while (`how`: the animation while there), then stand, or go back to following
+-- whoever asked her to.
+local function go(id, pos, how)
+	if not cast[id] or not pos then return end
+	local b = body(id)
+	b.go, b.go_until, b.go_anim = pos, core.get_us_time() + 15 * 1000000, how or "stand"
+	ensure(id, pos)
+end
+
+-- Turn to face a player for a while (she answered them).
+local function face(id, name)
 	local p = name and core.get_player_by_name(name)
 	if not p or not cast[id] then return end
 	local b = body(id)
-	b.follow = name
-	if not alive(b) then spawn(id, p:get_pos()) end
+	b.face, b.face_until = name, core.get_us_time() + 20 * 1000000
+	ensure(id, p:get_pos())
 end
 
--- Go to a site and work (or stand) there a while, appearing there if need be.
-local function work(id, pos, how)
-	if not cast[id] then return end
-	local b = body(id)
-	b.work_pos, b.work_until, b.work_anim = pos, core.get_us_time() + 10 * 1000000, how or "mine"
-	if not alive(b) then spawn(id, pos) end
+local function player_pos(name)
+	local p = name and core.get_player_by_name(name)
+	return p and p:get_pos()
 end
 
 function actions.walk(a)
 	if not in_world(a.x, a.y, a.z) then return false, "That position is outside the world." end
-	work(a.by or order[1], vector.new(a.x, a.y, a.z), "stand")
+	body(a.by or order[1]).follow = nil -- sent somewhere: she stays there
+	go(a.by or order[1], vector.new(a.x, a.y, a.z))
 	return true, "Walking to " .. a.x .. ", " .. a.y .. ", " .. a.z .. "."
 end
 
--- Each sync: the cast as the sidecar has it, each in the world while anyone is, by the player she last followed
--- or one of those online (spread among them).
+function actions.follow(a)
+	local id = a.by or order[1]
+	local at = player_pos(a.player)
+	if not at then return false, tostring(a.player) .. " is not online." end
+	local b = body(id)
+	b.follow, b.go = a.player, nil
+	ensure(id, at)
+	return true, "Following " .. a.player .. " until they say stay."
+end
+
+function actions.come(a)
+	local at = player_pos(a.player)
+	if not at then return false, tostring(a.player) .. " is not online." end
+	go(a.by or order[1], at)
+	face(a.by or order[1], a.player)
+	return true, "Walking over to " .. a.player .. "."
+end
+
+function actions.stay(a)
+	local b = body(a.by or order[1])
+	b.follow, b.go = nil, nil
+	return true, "Staying put."
+end
+
+-- Each sync: the cast as the sidecar has it; each in the world while anyone is, where she last stood if a player
+-- is near it, else by a player (spread among them). Nobody online and nothing to do: gone until someone comes.
 local function tend(list)
 	if type(list) == "table" then
 		local fresh, ids = {}, {}
@@ -345,9 +415,8 @@ local function tend(list)
 		local b = body(id)
 		local c = cast[id]
 		if b.follow and not core.get_player_by_name(b.follow) then b.follow = nil end
-		if not b.follow and #players > 0 then b.follow = players[(i - 1) % #players + 1]:get_player_name() end
 		if alive(b) then
-			if not b.follow and not b.work_pos then
+			if #players == 0 and not b.go then
 				b.obj:remove()
 				b.obj = nil
 			elseif b.look ~= c.name .. skin(c) then
@@ -355,23 +424,45 @@ local function tend(list)
 				if has_model then b.obj:set_properties({ textures = { skin(c) } }) end
 				b.look = c.name .. skin(c)
 			end
-		elseif b.follow then
-			follow(id, b.follow)
+		elseif #players > 0 then
+			local near_home = false
+			if b.home then
+				for _, p in ipairs(players) do
+					if vector.distance(p:get_pos(), b.home) < HOME_NEAR then near_home = true end
+				end
+			end
+			if near_home then
+				local obj = core.add_entity(vector.add(b.home, { x = 0, y = 0.5, z = 0 }), "ai_bot:npc")
+				if obj then
+					local ent = obj:get_luaentity()
+					if ent then ent._cid = id end
+					b.obj = obj
+					obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
+					if has_model then obj:set_properties({ textures = { skin(c) } }) end
+					b.look = c.name .. skin(c)
+				end
+			else
+				spawn(id, players[(i - 1) % #players + 1]:get_pos())
+			end
 		end
 	end
 end
 
--- What each action does to the body of the character who did it.
+-- What each action does to the body of the character who did it: she goes over to hand something to a player,
+-- works at what she builds, and faces whoever she answers.
 local function after(a)
 	local id = a.by or order[1]
 	if not id then return end
-	if (a.type == "give" or a.type == "heal" or a.type == "teleport") and a.player then
-		core.after(a.type == "teleport" and 0.5 or 0, follow, id, a.player)
+	if (a.type == "give" or a.type == "heal") and a.player then
+		go(id, player_pos(a.player))
+		face(id, a.player)
+	elseif a.type == "teleport" and a.player then
+		core.after(0.5, function() face(id, a.player) end)
 	elseif a.type == "say" and a.near then
-		follow(id, a.near)
+		face(id, a.near)
 	elseif a.type == "place" and type(a.nodes) == "table" and a.nodes[1] then
 		local n = a.nodes[1]
-		work(id, vector.new(n.x, n.y, n.z))
+		go(id, vector.new(n.x, n.y, n.z), "mine")
 	end
 end
 
