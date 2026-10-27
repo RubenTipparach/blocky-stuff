@@ -127,6 +127,8 @@ const STICKY_MS = 15 * 60_000;
 // Characters answering characters: at most this many in a row, so two of them cannot talk forever.
 // How many lines characters say to each other in a row, one answering the other (a chat of three each, at most).
 const CHAIN_MAX = 6;
+// The share of the day's calls the characters may spend on their own turns (work, chats, kindness).
+const OWN_SHARE = 0.8;
 
 /** The bot's settings as kept on /admin, with the first values filled in. */
 export function botSettings(db, config) {
@@ -244,6 +246,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   async function hear(msg, reply) {
     const s = botSettings(db, config);
     if (!s.enabled) return null;
+    // Characters talking among themselves share their own turns' part of the day's calls.
+    if (msg.source === 'character' && s.perDay && todayCalls() >= s.perDay * OWN_SHARE) return null;
     const pid = msg.personId ?? personId(msg.source, msg.name);
     const m = { ...msg, personId: pid };
     const chosen = responders(m, s);
@@ -307,7 +311,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
    * themselves, fillers and reactions, no. A cheap call with no tools; when in doubt (or it fails), she answers.
    */
   async function worth(ch, m, s) {
-    if (s.perDay && todayCalls() >= s.perDay) return { answer: false, why: 'the daily limit is reached' };
+    // Past the daily limit: answered anyway, so the asker hears "resting for today" (limited, in hear) and not silence
+    // (owner, 2026-10-27: "Aw nobody woke up").
+    if (s.perDay && todayCalls() >= s.perDay) return { answer: true, why: 'the daily limit is reached' };
     const names = cast().map((c) => c.name);
     const lines = db.chat(12).map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.source === 'bot' ? `${c.name} (character)` : c.name}: ${c.text}`);
     const last = m.personId && lastWith.get(m.personId);
@@ -768,7 +774,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     idleTimes = idleTimes.filter((x) => t - x < 3_600_000);
     const all = cast();
     if (!llm || !all.length || !s.enabled || !s.idle.enabled || busy >= MAX_BUSY - 1 || !game.connected) return null;
-    if (idleTimes.length >= s.idle.perHour || (s.perDay && todayCalls() >= s.perDay)) return null;
+    // Their own turns stop at 80% of the day's calls: the rest is kept for people asking them things.
+    if (idleTimes.length >= s.idle.perHour || (s.perDay && todayCalls() >= s.perDay * OWN_SHARE)) return null;
     let ch = null;
     for (let k = 0; k < all.length && !ch; k++) {
       const c = all[(idleNext + k) % all.length];

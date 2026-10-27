@@ -328,3 +328,15 @@ test('between work, a character may turn to another for a chat, and they talk', 
   assert.equal(bot.activity()[0].kind, 'chat');
   assert.deepEqual(bot.answerers(said[0][1], bot.cast()[0]).map((c) => c.name), ['Moss']); // she will answer
 });
+
+test('past the daily limit a person still hears back; the characters\' own turns stop at 80% of it', async () => {
+  const { db, bot, game } = setup([]);
+  db.putJson('bot', { cooldown: 0, perDay: 10 });
+  for (let i = 0; i < 8; i++) db.addUsage(10, 5, 0);
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  assert.equal(await bot.idle(() => {}), null); // 8 of 10: own turns are done for today
+  for (let i = 0; i < 2; i++) db.addUsage(10, 5, 0);
+  const said = [];
+  await bot.hear({ source: 'discord', name: 'ruben', text: 'can you make a bridge' }, (t) => said.push(t));
+  assert.match(said[0], /resting for today/);
+});
