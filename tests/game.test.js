@@ -171,3 +171,20 @@ test('a door item hangs as the door and a hidden block above it, facing the way 
     { x: 0, y: 0, z: 0, item: 'default:wood' }]);
   assert.equal(withDoors([{ x: 0, y: 0, z: 0, item: 'doors:door_wood_a' }]).length, 1); // already a block
 });
+
+test('the style catalogue: over a hundred styles, searchable, with roofs build_roof can make', async () => {
+  const { STYLES, findStyles } = await import('../server/styles.mjs');
+  const { ROOF_STYLES } = await import('../server/tools.mjs');
+  assert.ok(STYLES.length >= 100, `${STYLES.length} styles`);
+  for (const s of STYLES) {
+    assert.ok(s.name && s.region && s.era && s.type && s.walls && s.roof && s.features, s.name);
+    assert.ok(['none', ...ROOF_STYLES].includes(s.roof.split(' ')[0]), `${s.name}: ${s.roof}`);
+  }
+  assert.ok(findStyles({ words: 'japanese' }).every((s) => /japan/i.test(`${s.name} ${s.region}`)));
+  assert.ok(findStyles({ type: 'castle' }).length >= 3);
+  const picks = findStyles({ random: true, count: 3, avoid: ['Log cabin'] });
+  assert.equal(picks.length, 3);
+  const game = createGame();
+  game.sync({ players: [] });
+  assert.match((await runTool('browse_styles', { words: 'viking' }, { game, asker: { name: 'x', admin: false }, policy: DEFAULT_POLICY })).message, /Viking longhouse/);
+});

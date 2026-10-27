@@ -10,6 +10,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxCount } from './tools.mjs';
+import { findStyles, styleText } from './styles.mjs';
 import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, activeCast, characterSystem, characterContext, runCharacterTool,
   personId, characterPersonId, setState, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
 import { randomBytes } from 'node:crypto';
@@ -101,8 +102,10 @@ const STYLE_GUIDE = '- Build with style, never a plain box with a flat lid. Ever
   + 'ranches and villas, pyramid over square towers and pavilions, gambrel for barns, shed for lean-tos and modern '
   + 'wings, dome for temples and observatories, cone over round towers, castle (crenellations) for keeps and walls. '
   + 'Mix them on one building: a gable main house with a shed porch, a keep with cone-roofed corner towers.\n'
-  + '- Vary the style; each house should look unlike the last (yours and the others\'). Some styles and their '
-  + 'blocks: timber-frame (default:wood or pine_wood walls between default:tree posts and beams, cobble base, '
+  + '- Vary the style; each building should look unlike the last (yours and the others\'). browse_styles has a '
+  + 'catalogue of over a hundred styles from every culture and time (Egyptian temples, Roman villas, Viking longhouses, '
+  + 'Gothic cathedrals, Japanese castles, Mughal tombs, Pueblo villages, Art Deco towers, fantasy wizard towers...): '
+  + 'look one up and follow its walls, roof and features. A few to start with: timber-frame (default:wood or pine_wood walls between default:tree posts and beams, cobble base, '
   + 'stair_wood steep gable); brick townhouse (default:brick, stonebrick trims, lots of glass, two storeys, '
   + 'stair_stonebrick gable or hip); log cabin (default:pine_tree or default:tree walls, stair_pine_wood gable, '
   + 'stone chimney); stone cottage (default:cobble with mossycobble, wood trims, stair_wood gable, flower beds); '
@@ -116,7 +119,7 @@ const STYLE_GUIDE = '- Build with style, never a plain box with a flat lid. Ever
 // "I'll clear it", "I will plant", "let me build", "I'm going to start": a promise of work.
 const PROMISE = /\b(i'?ll|i will|i'?m going to|let me|i can)\s+(\w+\s+){0,3}?(clear|build|make|plant|sow|dig|lay|fell|cut|start|put|fix|add|do|get|set|level|craft|farm|plow|till)\b/i;
 // What a character may use on its own: look, build, walk. Never anything done to a player.
-const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'fill_box', 'place_blocks', 'build_roof', 'clear_area', 'farm', 'harvest', 'walk_to']);
+const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'browse_styles', 'fill_box', 'place_blocks', 'build_roof', 'clear_area', 'farm', 'harvest', 'walk_to']);
 // Most blocks one idle turn may place, all its tool calls together.
 export const IDLE_BLOCKS = 20_000; // blocks a character may set in one turn of her own
 // A person keeps talking to the character they last talked with for this long, without naming it.
@@ -717,6 +720,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
               + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, clear it if trees are '
               + 'in the way, pick a style from the guide and call plan_project with it, then build the first step.'
               + (lately.length ? ` Styles built lately: ${[...new Set(lately)].join(', ')}; choose a different one.` : '')
+              // A few from the catalogue for ideas, ones not built lately (browse_styles has the rest).
+              + ` Some ideas from the catalogue: ${findStyles({ random: true, count: 3, avoid: lately, rnd: random }).map(styleText).join(' ')}`
               + (joinable.length && random() < 0.35 ? ` Or, if it suits you, lend a hand instead: join_project with ${joinable.map((c) => `${c.name} `
                 + `(${c.project.title})`).join(' or ')}, taking a part she has not built (a garden, an interior, a path, a matching annex).` : '');
       const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { others: onlineIds(), cast: all, now: t })}`

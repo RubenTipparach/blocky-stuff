@@ -3,6 +3,8 @@
 // in game, or whoever holds the MCP token) may use every tool; other players only the ones switched on for
 // them on /admin (the policy), and only on themselves.
 
+import { STYLES, findStyles, styleText } from './styles.mjs';
+
 // The first policy: what players who are not admins may ask the bot for. Changed on /admin.
 export const DEFAULT_POLICY = { give: true, teleport: true, time: true, heal: true, build: false };
 // Most blocks one request may place.
@@ -34,6 +36,20 @@ export const TOOLS = [
     run: ({ game }, { query }) => {
       const found = game.findItems(query);
       return { ok: true, message: found.length ? found.join(', ') : 'No items match.' };
+    },
+  },
+  {
+    name: 'browse_styles',
+    description: `The catalogue of ${STYLES.length} building styles from many cultures and times (prehistoric to future, `
+      + 'and fantasy): each with its walls, accents, roof (a build_roof shape, pitch and stairs) and the features that make '
+      + 'it recognisable, in this game\'s blocks. Search by words (a culture, a period, a kind of building, a feature), '
+      + 'by type, or ask for random ones for ideas.',
+    input_schema: { type: 'object', properties: { words: { type: 'string', description: 'e.g. "japanese", "roman", "medieval castle", "1800".' },
+      type: { type: 'string', description: 'e.g. house, temple, tower, castle, church, mill, palace, cottage.' },
+      random: { type: 'boolean' }, count: { type: 'integer', minimum: 1, maximum: 12 } }, additionalProperties: false },
+    run: (ctx, { words = '', type = '', random = false, count = 6 }) => {
+      const found = findStyles({ words, type, random, count });
+      return { ok: true, message: found.length ? found.map(styleText).join('\n') : 'No style matches; try fewer words, or random.' };
     },
   },
   {
