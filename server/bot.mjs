@@ -12,7 +12,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxCount } from './tools.mjs';
 import { findStyles, styleText } from './styles.mjs';
 import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, activeCast, characterSystem, characterContext, runCharacterTool,
-  personId, characterPersonId, setState, traitsOf, nudgeTrait, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
+  personId, characterPersonId, setState, traitsOf, needsOf, changeNeeds, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
 import { randomBytes } from 'node:crypto';
 
 // The character tools, as sent to the model.
@@ -286,7 +286,11 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         note(answer ? 'answered' : 'quiet', ch, m.name, `${m.source === 'discord' ? '[Discord] ' : ''}"${m.text}"`
           + `${m.target === ch.id ? ' (looking at her)' : ''} -> ${answer ?? '(stayed quiet)'}`);
         if (m.source !== 'character') lastWith.set(pid, { id: ch.id, at: now() });
-        if (answer) db.social(ch.id, pid, { talked: true, at: now() }); // one more talk between them
+        if (answer) {
+          db.social(ch.id, pid, { talked: true, at: now() }); // one more talk between them
+          // Talking fills her up a little; banter with another character more so.
+          changeNeeds(db, ch, m.source === 'character' ? { energy: 3, connection: 10, fun: 8 } : { connection: 5, fun: 2 }, now());
+        }
         if (answer) await reply(answer, ch);
         first ??= answer;
       } catch (err) {
@@ -681,7 +685,6 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
    * then, through `reply(text, ch)`. Returns the line, or null (no turn, or she worked quietly).
    */
   // ---- Talking with each other ----
-  const buildsSinceChat = new Map(); // character id -> own turns of work since her last chat
   // Each with the trait that makes her likelier to bring it up.
   const CHAT_TOPICS = [
     ['her latest build: how it looks, its style, what you like about it (or would tease her about)', 'ambitious'],
@@ -727,8 +730,13 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     const t = now();
     // Both known as people, so feelings and talks between them can be kept even before either has said a word.
     for (const c of [ch, mate]) db.meet(characterPersonId(c.id), c.name, { at: t, talked: false });
+    // What she brings up: her personality leans one way, and her needs another (bored: a laugh; tired: the day;
+    // lonely: feelings and memories).
     const tr = traitsOf(ch);
-    const weights = CHAT_TOPICS.map(([, trait]) => 20 + tr[trait]);
+    const nd = needsOf(ch, t);
+    const need = (i) => (i === 3 && nd.fun < 45 ? 50 : 0) + (i === 1 && nd.energy < 40 ? 50 : 0)
+      + ((i === 4 || i === 6) && nd.connection < 40 ? 35 : 0);
+    const weights = CHAT_TOPICS.map(([, trait], i) => 20 + tr[trait] + need(i));
     let pick = random() * weights.reduce((a, b) => a + b, 0);
     const [topic] = CHAT_TOPICS.find((_, i) => (pick -= weights[i]) < 0) ?? CHAT_TOPICS[0];
     const look = new Set(['inspect_area', 'find_ground', 'browse_styles']);
@@ -788,20 +796,27 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     try {
       // Not all work (owner, 2026-10-27: "The bots work too hard, over time they should have more friendly
       // conversations"): now and then a turn is a talk with another character, the likelier the longer she has worked.
-      // Her temperament scales it: a sociable one chats more, a generous one does more for others.
+      // What she feels like doing comes from her needs, scaled by her personality (owner, 2026-10-27: "Social sliders
+      // should drive the conversation ... Tired workers need to banter"): worn out, she rests (no call at all); tired,
+      // lonely or bored, she goes to talk, the more so the more sociable she is.
       const tr = traitsOf(ch);
+      const nd = needsOf(ch, t);
       const mates = all.filter((c) => c.id !== ch.id && !openTask(c.id));
-      const worked = buildsSinceChat.get(ch.id) ?? 0;
-      if (mates.length && random() < Math.min(0.85, (s.idle.social / 100 + 0.08 * worked) * (tr.sociable / 50))) {
-        buildsSinceChat.set(ch.id, 0);
+      if (nd.energy < 12 && !mates.length) {
+        changeNeeds(db, ch, { energy: 25 }, t);
+        note('rest', ch, null, `too tired to build (energy ${nd.energy}): a rest`);
+        return null;
+      }
+      const pull = s.idle.social / 100 + Math.max(0, 60 - nd.energy) / 100 + Math.max(0, 50 - nd.connection) / 100 + Math.max(0, 50 - nd.fun) / 120;
+      if (mates.length && (nd.energy < 12 || random() < Math.min(0.9, pull * (tr.sociable / 50)))) {
         // The one she talks to: the fonder and more familiar, the likelier.
         const mate = mates.map((c) => { const b = db.bond(ch.id, characterPersonId(c.id)); return [b.affinity + b.familiarity + 60 * random(), c]; })
           .sort((a, b) => b[0] - a[0])[0][1];
         const said = await chatTurn(ch, mate, all, s, reply);
-        if (said) nudgeTrait(db, ch, 'sociable', 1);
+        // A chat is a rest and a joy: some energy back, company, fun.
+        changeNeeds(db, ch, said ? { energy: 8, connection: 18, fun: 14 } : { energy: 5 }, now());
         return said;
       }
-      buildsSinceChat.set(ch.id, worked + 1);
       // Now and then something nice for someone (owner, 2026-10-27: "They should also sometimes do something nice for
       // other, like make things for their friends or who ever is online. Including other bots"): a friend she is fond
       // of, a character or a player in the game, near where they are.
@@ -871,15 +886,19 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
           const out = finalText(response.content);
           if (gift) {
             note('kindness', ch, gift.name, `${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
-            // A gift counts both ways, and giving makes her a little more generous.
+            // A gift counts both ways.
             db.meet(gift.pid, gift.name, { at: now(), talked: false });
             db.meet(characterPersonId(ch.id), ch.name, { at: now(), talked: false });
             db.social(ch.id, gift.pid, { gave: true });
             if (!gift.player) db.social(gift.id, characterPersonId(ch.id), { got: true });
-            nudgeTrait(db, ch, 'generous', 1);
+            // Giving warms her (company, fun) and costs a little energy.
+            changeNeeds(db, ch, { energy: -4 - Math.min(8, placed / 50), connection: 10, fun: 6 }, now());
+          } else {
+            note('own turn', ch, null, `${ch.project ? `${ch.project.title}: ${ch.project.done}/${ch.project.steps.length} steps` : 'no project'}`
+              + `, ${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
+            // Work spends energy (more for bigger builds) and, done alone, wears down company and fun.
+            changeNeeds(db, ch, { energy: -6 - Math.min(14, placed / 250), connection: -4, fun: -3 }, now());
           }
-          else note('own turn', ch, null, `${ch.project ? `${ch.project.title}: ${ch.project.done}/${ch.project.steps.length} steps` : 'no project'}`
-            + `, ${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
           if (!out || out.replace(/[^A-Z]/g, '') === QUIET) return null;
           await reply(out, ch);
           return out;

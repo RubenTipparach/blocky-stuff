@@ -24,7 +24,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { TOOLS } from './tools.mjs';
 import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId, affinityWord,
-  trustWord } from './character.mjs';
+  trustWord, needsOf, traitsOf } from './character.mjs';
 
 // A /link code lasts this long.
 const LINK_MS = 10 * 60_000;
@@ -464,7 +464,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'GET /api/admin') {
       return send(res, 200, {
         you, ...status(), settings: botSettings(db, config), relay: relay(), models: MODELS, efforts: EFFORTS,
-        characters: castOf(db, config, now()), people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
+        characters: castOf(db, config, now()).map((c) => ({ ...c, needsNow: needsOf(c, now()), traitsNow: traitsOf(c) })),
+        people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
         memories: db.allMemories(80),
         activity: db.activity({ limit: 40 }),
         // Every account on the game server, each saying who on Discord it is linked to, if anyone (Players lists them all

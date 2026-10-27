@@ -11,6 +11,7 @@ import { openSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TOOLS, runTool } from './tools.mjs';
+import { needsOf, traitsOf } from './character.mjs';
 
 const REPO = process.env.REPO || 'RubenTipparach/blocky-stuff';
 // What a hot update may change: the bot's code, tests and notes. The launcher, Luanti's runner, hotdeploy itself, the
@@ -133,7 +134,8 @@ const OPERATOR_TOOLS = [
         .map((b) => ({ name: b.name, affinity: b.affinity, trust: b.trust, respect: b.respect, talks: b.familiarity,
           gifts: `${b.gifts_given} given, ${b.gifts_got} got`, jokes: b.jokes.length ? b.jokes : undefined, status: b.status,
           nickname: b.nickname || undefined }));
-      return { ok: true, message: JSON.stringify({ ...c, memories: db.recentMemories(c.id, 25).map((m) => m.text), people }, null, 1) };
+      return { ok: true, message: JSON.stringify({ ...c, needsNow: needsOf(c), personality: traitsOf(c),
+        memories: db.recentMemories(c.id, 25).map((m) => m.text), people }, null, 1) };
     },
   },
   {

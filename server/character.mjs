@@ -122,6 +122,10 @@ export function saveCharacter(db, id, patch, config = {}) {
     backstory: text(patch.backstory, 3000), personality: text(patch.personality, 3000), speech: text(patch.speech, 3000),
     goals: text(patch.goals, 3000),
     goal: typeof patch.goal === 'string' ? patch.goal.trim().slice(0, 200) || null : undefined,
+    // The personality sliders, set on /admin (0 to 100 each).
+    traits: patch.traits && typeof patch.traits === 'object'
+      ? { ...traitsOf(c), ...Object.fromEntries(TRAITS.filter((k) => Number.isFinite(Number(patch.traits[k])))
+        .map((k) => [k, Math.max(0, Math.min(100, Math.round(Number(patch.traits[k]))))])) } : undefined,
   };
   for (const [k, v] of Object.entries(fields)) if (v !== undefined) c[k] = v;
   if (patch.resetMood) delete c.mood;
@@ -139,25 +143,47 @@ export function removeCharacter(db, id, config = {}) {
 }
 
 // Set a character's own state (mood, goal, tasks), keeping everything else.
-// ---- Temperament: how a character tends to spend her time and talk, 0 to 100 each, drifting with what she does ----
+// ---- Personality sliders: how a character tends to spend her time and talk, 0 to 100 each ----
 // (owner, 2026-10-27: "track various social attributes so that their internal memories and personalities can better
-// drive their behaviors"). sociable: chats instead of working; generous: does nice things for others; playful: jokes
-// and teasing; ambitious: big builds and ideas; sensitive: talks about feelings. Saved on the character as `traits`.
+// drive their behaviors"; "personality sliders. This will be more static. But the admin can change them whenever").
+// sociable: chats instead of working; generous: does nice things for others; playful: jokes and teasing; ambitious:
+// big builds and ideas; sensitive: talks about feelings. Saved on the character as `traits`; changed on /admin only.
 export const TRAITS = ['sociable', 'generous', 'playful', 'ambitious', 'sensitive'];
 const TRAIT_START = {
   blocky: { sociable: 70, generous: 65, playful: 75, ambitious: 60, sensitive: 55 },
   moss: { sociable: 35, generous: 45, playful: 40, ambitious: 80, sensitive: 35 },
 };
-/** Her temperament now (as saved, else where she starts). */
+/** Her personality sliders (as set on /admin, else where she starts). */
 export const traitsOf = (ch) => ({ ...Object.fromEntries(TRAITS.map((k) => [k, 50])), ...(TRAIT_START[ch.id] ?? {}), ...(ch.traits ?? {}) });
-/** Move one trait a little (by `by`, kept between 5 and 95), saved. */
-export function nudgeTrait(db, ch, trait, by = 1) {
-  const t = traitsOf(ch);
-  t[trait] = Math.max(5, Math.min(95, Math.round(t[trait] + by)));
-  ch.traits = t;
-  setState(db, ch.id, { traits: t });
-  return t;
+// ---- Needs: her social battery, which what she does drains and fills (owner, 2026-10-27: "Things they do drain
+// certain aspects of their social brain. More energy they spend to build, the more tired they become. Tired workers
+// need to banter") ----
+// energy: building spends it, rest and chats give it back; connection: working alone wears it down, talking and
+// kindness fill it; fun: long work wears it down, jokes and banter fill it. 0 to 100, saved as `needs` with the time
+// they were last changed; with time they come back toward rested (energy) and drift down (connection, fun).
+export const NEEDS = ['energy', 'connection', 'fun'];
+const NEEDS_START = { energy: 80, connection: 60, fun: 60 };
+const PER_HOUR = { energy: 12, connection: -4, fun: -3 };
+/** Her needs now: as last saved, moved on by the time since. */
+export function needsOf(ch, now = Date.now()) {
+  const saved = ch.needs ?? { ...NEEDS_START, at: now };
+  const hours = Math.max(0, (now - (saved.at ?? now)) / 3_600_000);
+  return Object.fromEntries(NEEDS.map((k) => [k, Math.max(0, Math.min(100, Math.round((saved[k] ?? NEEDS_START[k]) + PER_HOUR[k] * hours)))]));
 }
+/** Change her needs by `delta` ({ energy: -8, ... }), saved; returns them. */
+export function changeNeeds(db, ch, delta, now = Date.now()) {
+  const n = needsOf(ch, now);
+  for (const k of NEEDS) if (Number.isFinite(delta[k])) n[k] = Math.max(0, Math.min(100, Math.round(n[k] + delta[k])));
+  ch.needs = { ...n, at: now };
+  setState(db, ch.id, { needs: ch.needs });
+  return n;
+}
+const needLine = (n) => [
+  n.energy < 20 ? 'exhausted' : n.energy < 40 ? 'tired' : n.energy > 80 ? 'full of energy' : 'fine for energy',
+  n.connection < 25 ? 'lonely, longing for company' : n.connection < 45 ? 'a bit lonely' : n.connection > 80 ? 'well connected' : null,
+  n.fun < 25 ? 'bored stiff, in need of a laugh' : n.fun < 45 ? 'could do with some fun' : n.fun > 80 ? 'in high spirits' : null,
+].filter(Boolean).join(', ');
+
 const traitWord = (v) => (v >= 80 ? 'very' : v >= 60 ? 'rather' : v >= 40 ? 'somewhat' : v >= 20 ? 'not very' : 'not at all');
 const respectWord = (v) => (v >= 60 ? 'you admire their work' : v >= 25 ? 'you respect their work' : v > -25 ? 'no strong view of their work'
   : 'you think little of their work');
@@ -276,7 +302,10 @@ export function characterContext(db, ch, { speakerId = null, others = [], cast: 
   const tr = traitsOf(ch);
   const parts = [`Your mood: ${ch.mood.label}${ch.mood.reason ? ` (${ch.mood.reason})` : ''}.`
     + `${ch.goal ? ` What you are working on: ${ch.goal}.` : ''}`,
-  `Your temperament lately (let it colour what you do and say): ${TRAITS.map((k) => `${traitWord(tr[k])} ${k}`).join(', ')}.`];
+  `Your personality (let it colour what you do and say): ${TRAITS.map((k) => `${traitWord(tr[k])} ${k}`).join(', ')}.`];
+  const nd = needsOf(ch, now);
+  parts.push(`How you feel in yourself right now: ${needLine(nd)} (energy ${nd.energy}, connection ${nd.connection}, fun ${nd.fun}). `
+    + 'Let it show: tired, you say so and slow down; lonely or bored, you seek company and a laugh.');
   if (ch.project) parts.push(projectLine(ch.project, now));
   const card = speakerId && personCard(db, ch, speakerId, now, { speaker: true });
   if (card) parts.push(`Who is talking to you:\n${card}`);
@@ -571,9 +600,9 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
           db.remember(m.id, null, `Finished ${others.length ? `with ${others.join(' and ')} ` : 'my project '}${p.title} at `
             + `(${p.site.x}, ${p.site.y}, ${p.site.z}). ${p.notes.slice(-3).join('; ')}`, 4, now);
           setState(db, m.id, { project: null, goal: null, lastProject: { title: p.title, style: p.style ?? null, site: p.site, at: now } });
-          // A finished build makes her a little more ambitious; built together, they know each other a little better.
+          // A finished build is a joy (fun); built together, they know each other a little better.
           const me = fresh(db, m.id);
-          if (me) nudgeTrait(db, me, 'ambitious', 1);
+          if (me) changeNeeds(db, me, { fun: 15, connection: crew.length > 1 ? 10 : 0 }, now);
           for (const o of crew) if (o.id !== m.id) db.social(m.id, characterPersonId(o.id), { talked: true, at: now });
         }
         ch.project = null;
