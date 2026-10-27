@@ -18,7 +18,7 @@ const db = openDb(config.dbPath);
 // A new key each start: only this process and the Luanti it starts know it.
 const bridgeKey = process.env.BRIDGE_KEY || randomBytes(24).toString('base64url');
 const luanti = config.luantiManaged ? createLuanti({ config, bridgeKey }) : null;
-const server = makeApp({ config, db, bridgeKey, luanti });
+const server = makeApp({ config, db, bridgeKey, luanti, daily: true });
 
 server.listen(config.port, '0.0.0.0', async () => {
   console.log(`Sidecar on :${config.port}, ${config.publicUrl}/admin`);

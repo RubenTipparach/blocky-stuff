@@ -109,3 +109,35 @@ test('the reply is one chat line, cut to length', () => {
   assert.ok(finalText([{ type: 'text', text: 'x'.repeat(1000) }]).length <= 450);
   assert.equal(finalText([]), null);
 });
+
+test('listening to everything, the bot joins in or stays QUIET, and never nags about limits', async () => {
+  const { db, bot, tick } = setup([text('QUIET'), text('Welcome back, alice!')]);
+  db.putJson('bot', { listen: 'all', cooldown: 1 });
+  const said = [];
+  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'lol' }, (t) => said.push(t)), null);
+  tick(2000);
+  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'im back' }, (t) => said.push(t)), 'Welcome back, alice!');
+  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'ok' }, (t) => said.push(t)), null); // cooldown, quietly
+  assert.deepEqual(said, ['Welcome back, alice!']);
+  db.putJson('bot', { listen: 'mentions' });
+  tick(2000);
+  assert.equal(await bot.hear({ source: 'game', name: 'alice', text: 'hello all' }, () => {}), null);
+});
+
+test('what the bot does is kept, and the daily summary tells of it', async () => {
+  const { db, game, bot, client } = setup([
+    () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 't1', name: 'heal_player', input: { player: 'alice' } }] }),
+    text('Healed!'),
+    text('Today I patched up alice.'),
+  ], { t: 1000 });
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 3, privs: [] }] });
+  const pending = bot.hear({ source: 'game', name: 'alice', text: '@blocky heal me' }, () => {});
+  await new Promise((r) => setTimeout(r, 10));
+  const { actions } = game.sync({});
+  game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Healed alice.' }] });
+  await pending;
+  assert.equal(db.deeds(0)[0].tool, 'heal_player');
+  assert.equal(await bot.summary(0), 'Today I patched up alice.');
+  assert.match(client.calls[2].messages[0].content, /heal_player/);
+  assert.equal(await setup([]).bot.summary(0), null);
+});

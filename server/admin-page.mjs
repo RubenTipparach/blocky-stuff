@@ -133,12 +133,17 @@ function build() {
     <label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label></div>
     <label class="field">Model<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label>
     <label class="field">Persona<textarea id="b_persona" maxlength="2000"></textarea></label>
+    <div class="two"><label class="field">Listens to<select id="b_listen"><option value="mentions">Only messages that say its name</option>
+      <option value="all">Every chat message (it joins in when it has something to say)</option></select></label>
+    <label class="field">Daily summary at (UTC hour, -1 = off)<input id="b_summaryHour" type="number" min="-1" max="23"></label></div>
     <div class="three"><label class="field">Cooldown (s)<input id="b_cooldown" type="number" min="0"></label>
     <label class="field">Per player / hour<input id="b_perHour" type="number" min="0"></label>
     <label class="field">Calls / day (0 = no limit)<input id="b_perDay" type="number" min="0"></label></div>
     <div class="muted note" style="margin:0 0 6px">Players who are not admins may ask for:</div>
     <div id="policy"></div>
-    <div class="row" style="margin-top:10px"><button>Save</button><span id="botNote" class="note muted"></span></div>
+    <div class="row" style="margin-top:10px"><button>Save</button><button type="button" class="quiet" id="summaryNow">Post today's summary now</button>
+      <span id="botNote" class="note muted"></span></div>
+    <p class="note muted">Listening to every message makes an LLM call per chat line, held to the limits above.</p>
     <p class="note muted">Admins (the <code>server</code> privilege in game) may ask for anything, for anyone. On Discord, only the ids in ADMIN_DISCORD_ID count as admins.</p>
   </form></section>
   <section><h2>Discord</h2><dl class="status" id="discord"></dl>
@@ -162,6 +167,7 @@ function build() {
 
   $('b_enabled').checked = s.enabled; $('b_name').value = s.name; $('b_model').value = s.model; $('b_effort').value = s.effort;
   $('b_persona').value = s.persona; $('b_cooldown').value = s.cooldown; $('b_perHour').value = s.perHour; $('b_perDay').value = s.perDay;
+  $('b_listen').value = s.listen; $('b_summaryHour').value = s.summaryHour;
   const perms = [...new Map(state.policyTools.map((t) => [t.permission, t])).keys()];
   const label = { give: 'Items for themselves', teleport: 'Teleporting themselves', heal: 'Healing themselves', time: 'Changing the time of day', build: 'Building (placing blocks)' };
   $('policy').innerHTML = perms.map((p) => '<label class="check"><input type="checkbox" data-perm="' + p + '"' + (s.policy[p] ? ' checked' : '')
@@ -175,9 +181,13 @@ function build() {
     try {
       await api('/api/admin/bot', { enabled: $('b_enabled').checked, name: $('b_name').value, model: $('b_model').value,
         effort: $('b_effort').value, persona: $('b_persona').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
-        perDay: $('b_perDay').value, policy });
+        perDay: $('b_perDay').value, listen: $('b_listen').value, summaryHour: Number($('b_summaryHour').value), policy });
       $('botNote').textContent = 'Saved.';
     } catch (e) { $('botNote').textContent = e.message; }
+  };
+  $('summaryNow').onclick = async () => {
+    $('botNote').textContent = 'Writing...';
+    try { await api('/api/admin/summary', {}); $('botNote').textContent = 'Posted.'; refreshSoon(); } catch (e) { $('botNote').textContent = e.message; }
   };
   const saveRelay = () => api('/api/admin/relay', { chat: $('r_chat').checked, news: $('r_news').checked }).catch(() => {});
   $('r_chat').onchange = saveRelay; $('r_news').onchange = saveRelay;

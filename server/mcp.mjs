@@ -82,6 +82,7 @@ export async function mcpCall(msg, ctx) {
       if (op) r = await op.run(ctx, args);
       else if (TOOLS.some((t) => t.name === name)) {
         r = await runTool(name, args, { game: ctx.game, asker: { name: 'MCP', admin: true } });
+        if (r.ok && TOOLS.find((t) => t.name === name)?.permission) ctx.db.addDeed('MCP', name, args, r.message);
       } else return fail(-32602, `Unknown tool ${name}.`);
       return reply({ content: [{ type: 'text', text: r.message || (r.ok ? 'Done.' : 'Failed.') }], isError: !r.ok });
     }

@@ -35,7 +35,7 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * bridgeKey: the secret the mod sends, written into its config by server/luanti.mjs.
  */
 export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetch, now = () => Date.now(),
-  game = createGame({ now }), discord = null, bot = null, log = console }) {
+  game = createGame({ now }), discord = null, bot = null, log = console, daily = false }) {
   const sessionSecret = config.sessionSecret || db.secret('session');
   const redirectUri = `${config.publicUrl}/auth/discord/callback`;
   const relay = () => ({ chat: true, news: true, ...db.json('relay', {}) });
@@ -95,6 +95,23 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     brain.hear({ source: 'discord', name: m.name, text: m.text, admin }, (t) => botSays(t, { toDiscord: true }))
       .catch((err) => log.error(err));
   }
+
+  // ---- The daily summary: once a day at the bot's summary hour (UTC), to Discord and the game ----
+
+  async function dailySummary({ force = false } = {}) {
+    const s = botSettings(db, config);
+    const t = new Date(now());
+    const day = t.toISOString().slice(0, 10);
+    if (!force && (s.summaryHour < 0 || t.getUTCHours() < s.summaryHour || db.setting('summary.last') === day)) return null;
+    db.putSetting('summary.last', day);
+    const text = await brain.summary(now() - 24 * 3600_000);
+    if (!text) return null;
+    db.addChat('bot', s.name, text, now());
+    await Promise.all([chat.post({ text: `📋 Daily summary: ${text}`, as: s.name }),
+      game.act({ type: 'say', text: `Daily summary: ${text}`, from: s.name })]);
+    return text;
+  }
+  if (daily) setInterval(() => { dailySummary().catch((err) => log.error('daily summary failed:', err)); }, 10 * 60_000).unref();
 
   // ---- Plumbing ----
 
@@ -241,6 +258,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       for (const k of ['cooldown', 'perHour', 'perDay']) {
         if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
       }
+      if (body.listen === 'all' || body.listen === 'mentions') next.listen = body.listen;
+      if (Number.isInteger(Number(body.summaryHour)) && Number(body.summaryHour) >= -1 && Number(body.summaryHour) <= 23) {
+        next.summaryHour = Number(body.summaryHour);
+      }
       if (body.policy && typeof body.policy === 'object') {
         next.policy = Object.fromEntries(Object.entries(body.policy).filter(([, v]) => typeof v === 'boolean'));
       }
@@ -274,6 +295,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'POST /api/admin/discord-test') {
       if (!chat.mode) return send(res, 400, { error: chat.problem });
       return send(res, 200, await chat.news('bot', `Radio check from the admin page, by ${you.name}. This channel is wired up.`));
+    }
+    if (route === 'POST /api/admin/summary') {
+      const text = await dailySummary({ force: true });
+      return send(res, text ? 200 : 400, text ? { ok: true, text } : { error: 'Nothing happened in the last day, or the bot is off.' });
     }
     if (route === 'POST /api/admin/mcp-token') {
       const token = `blk_${randomBytes(24).toString('base64url')}`;
@@ -344,5 +369,6 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   server.game = game;
   server.discord = chat;
   server.announce = announce;
+  server.dailySummary = dailySummary;
   return server;
 }

@@ -20,6 +20,10 @@ export function openDb(path) {
       id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, source TEXT NOT NULL, name TEXT NOT NULL,
       text TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS deeds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, who TEXT NOT NULL, tool TEXT NOT NULL,
+      input TEXT NOT NULL, result TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS usage (
       day TEXT PRIMARY KEY, calls INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL
     );
@@ -36,6 +40,9 @@ export function openDb(path) {
     addUsage: db.prepare(`INSERT INTO usage (day, calls, input, output) VALUES (?, 1, ?, ?)
       ON CONFLICT(day) DO UPDATE SET calls = calls + 1, input = input + excluded.input, output = output + excluded.output`),
     usage: db.prepare('SELECT day, calls, input, output FROM usage ORDER BY day DESC LIMIT ?'),
+    addDeed: db.prepare('INSERT INTO deeds (at, who, tool, input, result) VALUES (?, ?, ?, ?, ?)'),
+    deeds: db.prepare('SELECT at, who, tool, input, result FROM deeds WHERE at >= ? ORDER BY id LIMIT 500'),
+    chatSince: db.prepare('SELECT at, source, name, text FROM chat WHERE at >= ? ORDER BY id LIMIT 400'),
   };
   let added = 0;
   return {
@@ -63,6 +70,12 @@ export function openDb(path) {
       q.addUsage.run(new Date(at).toISOString().slice(0, 10), input | 0, output | 0);
     },
     usage: (days = 14) => q.usage.all(days),
+    /** Something the AI did in the world, for the daily summary. */
+    addDeed(who, tool, input, result, at = Date.now()) {
+      q.addDeed.run(at, String(who).slice(0, 64), tool, JSON.stringify(input ?? {}).slice(0, 2000), String(result).slice(0, 500));
+    },
+    deeds: (since) => q.deeds.all(since),
+    chatSince: (since) => q.chatSince.all(since),
     close: () => db.close(),
   };
 }
