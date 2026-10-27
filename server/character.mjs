@@ -139,6 +139,29 @@ export function removeCharacter(db, id, config = {}) {
 }
 
 // Set a character's own state (mood, goal, tasks), keeping everything else.
+// ---- Temperament: how a character tends to spend her time and talk, 0 to 100 each, drifting with what she does ----
+// (owner, 2026-10-27: "track various social attributes so that their internal memories and personalities can better
+// drive their behaviors"). sociable: chats instead of working; generous: does nice things for others; playful: jokes
+// and teasing; ambitious: big builds and ideas; sensitive: talks about feelings. Saved on the character as `traits`.
+export const TRAITS = ['sociable', 'generous', 'playful', 'ambitious', 'sensitive'];
+const TRAIT_START = {
+  blocky: { sociable: 70, generous: 65, playful: 75, ambitious: 60, sensitive: 55 },
+  moss: { sociable: 35, generous: 45, playful: 40, ambitious: 80, sensitive: 35 },
+};
+/** Her temperament now (as saved, else where she starts). */
+export const traitsOf = (ch) => ({ ...Object.fromEntries(TRAITS.map((k) => [k, 50])), ...(TRAIT_START[ch.id] ?? {}), ...(ch.traits ?? {}) });
+/** Move one trait a little (by `by`, kept between 5 and 95), saved. */
+export function nudgeTrait(db, ch, trait, by = 1) {
+  const t = traitsOf(ch);
+  t[trait] = Math.max(5, Math.min(95, Math.round(t[trait] + by)));
+  ch.traits = t;
+  setState(db, ch.id, { traits: t });
+  return t;
+}
+const traitWord = (v) => (v >= 80 ? 'very' : v >= 60 ? 'rather' : v >= 40 ? 'somewhat' : v >= 20 ? 'not very' : 'not at all');
+const respectWord = (v) => (v >= 60 ? 'you admire their work' : v >= 25 ? 'you respect their work' : v > -25 ? 'no strong view of their work'
+  : 'you think little of their work');
+
 export function setState(db, id, patch) {
   const list = db.json('characters', []);
   const c = list.find((x) => x.id === id);
@@ -234,6 +257,9 @@ export function personCard(db, ch, id, now = Date.now(), { speaker = false } = {
       : `First seen ${ago(now - p.first_at)}; they have talked ${p.talks} times here; last seen ${ago(now - p.last_at)}.`,
     `How you feel: ${affinityWord(b.affinity)} (affinity ${b.affinity}), trust ${trustWord(b.trust)} (${b.trust}).`
       + `${b.status === 'dating' ? ' You are dating them.' : b.status === 'ex' ? ' They are your ex.' : ''}`,
+    `Between you: ${b.familiarity} talk${b.familiarity === 1 ? '' : 's'}${b.last_talk ? `, the last ${ago(now - b.last_talk)}` : ''}; `
+      + `${respectWord(b.respect)} (respect ${b.respect}); gifts: you gave ${b.gifts_given}, they gave ${b.gifts_got}.`
+      + `${b.jokes.length ? ` Your inside jokes: ${b.jokes.join('; ')}.` : ''}`,
     b.facts.length ? `What you know about them: ${b.facts.join('; ')}.` : 'You know nothing about them yet.',
     mems.length ? `Your memories with them:\n${mems.join('\n')}` : 'No memories together yet.',
     ...(speaker && pushed ? [`They have pushed you out of character ${pushed} time${pushed === 1 ? '' : 's'} lately`
@@ -247,8 +273,10 @@ export function personCard(db, ch, id, now = Date.now(), { speaker = false } = {
  * speakerId: the person talking (or null on its own turns); others: ids of the rest; cast: every active character.
  */
 export function characterContext(db, ch, { speakerId = null, others = [], cast: all = [], now = Date.now() } = {}) {
+  const tr = traitsOf(ch);
   const parts = [`Your mood: ${ch.mood.label}${ch.mood.reason ? ` (${ch.mood.reason})` : ''}.`
-    + `${ch.goal ? ` What you are working on: ${ch.goal}.` : ''}`];
+    + `${ch.goal ? ` What you are working on: ${ch.goal}.` : ''}`,
+  `Your temperament lately (let it colour what you do and say): ${TRAITS.map((k) => `${traitWord(tr[k])} ${k}`).join(', ')}.`];
   if (ch.project) parts.push(projectLine(ch.project, now));
   const card = speakerId && personCard(db, ch, speakerId, now, { speaker: true });
   if (card) parts.push(`Who is talking to you:\n${card}`);
@@ -261,6 +289,8 @@ export function characterContext(db, ch, { speakerId = null, others = [], cast: 
     const b = db.bond(ch.id, p.id);
     lines.push(`- ${p.name}${p.id.startsWith('char:') ? ' (a fellow character)' : ''}${b.nickname ? ` ("${b.nickname}")` : ''}: `
       + `${affinityWord(b.affinity)}, trust ${trustWord(b.trust)}${b.status === 'dating' ? ', your partner' : b.status === 'ex' ? ', your ex' : ''}`
+      + `${b.familiarity ? `, ${b.familiarity} talks` : ''}${b.respect >= 25 || b.respect <= -25 ? `, ${respectWord(b.respect)}` : ''}`
+      + `${b.jokes.length ? `, an inside joke: ${b.jokes.at(-1)}` : ''}`
       + `${b.facts.length ? `; ${b.facts.slice(-3).join('; ')}` : ''}`);
   }
   if (lines.length) parts.push(`Others around:\n${lines.join('\n')}`);
@@ -322,6 +352,7 @@ export const CHARACTER_TOOLS = [
         person,
         affinity: { type: 'integer', minimum: -FEEL_STEP, maximum: FEEL_STEP, description: 'Change in affinity.' },
         trust: { type: 'integer', minimum: -FEEL_STEP, maximum: FEEL_STEP, description: 'Change in trust.' },
+        respect: { type: 'integer', minimum: -FEEL_STEP, maximum: FEEL_STEP, description: 'Change in how much you respect their work and skill.' },
         reason: { type: 'string', maxLength: 200 },
       },
       required: ['person', 'reason'], additionalProperties: false,
@@ -412,6 +443,13 @@ export const CHARACTER_TOOLS = [
       required: ['what', 'why'], additionalProperties: false },
   },
   {
+    name: 'inside_joke',
+    description: 'Keep a joke, a teasing nickname for a thing, or a running gag that only you and this person share, to '
+      + 'bring back later.',
+    input_schema: { type: 'object', properties: { person, joke: { type: 'string', maxLength: 120 } }, required: ['person', 'joke'],
+      additionalProperties: false },
+  },
+  {
     name: 'recall',
     description: 'Search your memories for words (a place, a build, a name).',
     input_schema: { type: 'object', properties: { query: { type: 'string', maxLength: 100 } }, required: ['query'],
@@ -460,6 +498,7 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       const dt = step(input.trust, used.trust);
       turn.moved.set(p.id, { affinity: used.affinity + da, trust: used.trust + dt });
       db.feel(ch.id, p.id, b.affinity + da, b.trust + dt);
+      if (input.respect) db.social(ch.id, p.id, { respect: b.respect + Math.max(-FEEL_STEP, Math.min(FEEL_STEP, Math.round(Number(input.respect) || 0))) });
       if (Math.abs(da) + Math.abs(dt) >= 6 && input.reason) {
         db.remember(ch.id, p.id, input.reason, Math.abs(da) >= 8 ? 3 : 2, now);
       }
@@ -532,6 +571,10 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
           db.remember(m.id, null, `Finished ${others.length ? `with ${others.join(' and ')} ` : 'my project '}${p.title} at `
             + `(${p.site.x}, ${p.site.y}, ${p.site.z}). ${p.notes.slice(-3).join('; ')}`, 4, now);
           setState(db, m.id, { project: null, goal: null, lastProject: { title: p.title, style: p.style ?? null, site: p.site, at: now } });
+          // A finished build makes her a little more ambitious; built together, they know each other a little better.
+          const me = fresh(db, m.id);
+          if (me) nudgeTrait(db, me, 'ambitious', 1);
+          for (const o of crew) if (o.id !== m.id) db.social(m.id, characterPersonId(o.id), { talked: true, at: now });
         }
         ch.project = null;
         return { ok: true, message: `${p.title} is finished! Tell everyone, proudly, in one line.` };
@@ -550,6 +593,12 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       const rest = (p.crew ?? []).filter((m) => m.id !== ch.id);
       if (rest.length) shareProject(db, { ...p, crew: rest });
       return { ok: true, message: rest.length ? `Dropped; ${rest.map((m) => m.name).join(' and ')} carries on.` : 'Dropped.' };
+    }
+    case 'inside_joke': {
+      const p = who(input.person);
+      if (!p) return { ok: false, message: `You do not know anyone called ${input.person}.` };
+      db.social(ch.id, p.id, { joke: String(input.joke ?? '').trim(), at: now });
+      return { ok: true, message: `Kept: you can bring it up with ${p.name} again.` };
     }
     case 'request_tool': {
       // (owner, 2026-10-27: "Bots can also request via mcp server for new tools to be added too"; "You will check the

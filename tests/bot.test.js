@@ -23,7 +23,8 @@ function setup(script, { t = 0 } = {}) {
   const config = loadConfig({ ANTHROPIC_API_KEY: 'k' });
   const client = fakeClient(script);
   let clock = t;
-  const bot = createBot({ db, game, config, client, now: () => clock, log: quiet });
+  // Chance never picks a chat or a kind deed unless a test asks (random: 0.99 is above every threshold).
+  const bot = createBot({ db, game, config, client, now: () => clock, log: quiet, random: () => 0.99 });
   return { db, game, bot, client, tick: (ms) => { clock += ms; } };
 }
 
@@ -148,7 +149,7 @@ test('a character naming another may get an answer, but not forever', () => {
   const { bot } = setup([]);
   const [blocky, moss] = bot.cast();
   assert.deepEqual(bot.answerers('Moss, look at this!', blocky).map((c) => c.id), ['moss']);
-  assert.deepEqual(bot.answerers('Moss, look at this!', blocky, 2), []);
+  assert.deepEqual(bot.answerers('Moss, look at this!', blocky, 6), []); // a chat of three lines each, at most
   assert.deepEqual(bot.answerers('I talk about myself, Moss', moss), []);
 });
 
@@ -312,4 +313,18 @@ test('a promise with nothing done is sent back once: start it now or say no', as
   assert.match(client.calls[0].system, /comes before your own project/);
   assert.match(client.calls[0].system, /request_tool/);
   assert.match(client.calls[0].system, /no axe/);
+});
+
+test('between work, a character may turn to another for a chat, and they talk', async () => {
+  const db = openDb(':memory:');
+  const game = createGame();
+  const client = fakeClient([text('Moss, your tower makes my cottage look like a biscuit tin!')]);
+  const bot = createBot({ db, game, config: loadConfig({ ANTHROPIC_API_KEY: 'k' }), client, now: () => 10_000_000, log: quiet, random: () => 0.01 });
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  const said = [];
+  assert.equal(await bot.idle((t, ch) => said.push([ch.name, t])), 'Moss, your tower makes my cottage look like a biscuit tin!');
+  assert.match(client.calls[0].messages[0].content, /Take a break from building and talk with Moss/);
+  assert.equal(db.bond('blocky', 'char:moss').familiarity, 1);
+  assert.equal(bot.activity()[0].kind, 'chat');
+  assert.deepEqual(bot.answerers(said[0][1], bot.cast()[0]).map((c) => c.name), ['Moss']); // she will answer
 });

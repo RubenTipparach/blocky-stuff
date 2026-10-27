@@ -12,7 +12,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxCount } from './tools.mjs';
 import { findStyles, styleText } from './styles.mjs';
 import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, activeCast, characterSystem, characterContext, runCharacterTool,
-  personId, characterPersonId, setState, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
+  personId, characterPersonId, setState, traitsOf, nudgeTrait, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
 import { randomBytes } from 'node:crypto';
 
 // The character tools, as sent to the model.
@@ -125,7 +125,8 @@ export const IDLE_BLOCKS = 20_000; // blocks a character may set in one turn of 
 // A person keeps talking to the character they last talked with for this long, without naming it.
 const STICKY_MS = 15 * 60_000;
 // Characters answering characters: at most this many in a row, so two of them cannot talk forever.
-const CHAIN_MAX = 2;
+// How many lines characters say to each other in a row, one answering the other (a chat of three each, at most).
+const CHAIN_MAX = 6;
 
 /** The bot's settings as kept on /admin, with the first values filled in. */
 export function botSettings(db, config) {
@@ -164,6 +165,11 @@ export function botSettings(db, config) {
       enabled: saved.idle?.enabled ?? true,
       after: Number.isFinite(saved.idle?.after) ? saved.idle.after : 60,
       perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 30,
+      // How likely an own turn is a chat with another character instead of work, in percent, before it grows with
+      // every turn of work since her last chat.
+      social: Number.isFinite(saved.idle?.social) ? saved.idle.social : 30,
+      // How likely a turn of work is something nice for a friend instead of her own project, in percent.
+      kindness: Number.isFinite(saved.idle?.kindness) ? saved.idle.kindness : 15,
     },
   };
 }
@@ -276,6 +282,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         note(answer ? 'answered' : 'quiet', ch, m.name, `${m.source === 'discord' ? '[Discord] ' : ''}"${m.text}"`
           + `${m.target === ch.id ? ' (looking at her)' : ''} -> ${answer ?? '(stayed quiet)'}`);
         if (m.source !== 'character') lastWith.set(pid, { id: ch.id, at: now() });
+        if (answer) db.social(ch.id, pid, { talked: true, at: now() }); // one more talk between them
         if (answer) await reply(answer, ch);
         first ??= answer;
       } catch (err) {
@@ -609,8 +616,10 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     const head = `${context()}\n\n${characterContext(db, ch, { speakerId: msg.personId, others: onlineIds(), cast: cast(), now: now() })}`
       + `\n\n${asker.name}${where}${asker.admin ? ' (an admin)' : ''}`;
     if (msg.source === 'character') {
-      return `${head} says to you: ${msg.text}\n\nAnswer in character if you have something to say back; if the `
-        + 'conversation has run its course, answer with exactly QUIET.';
+      return `${head} says to you: ${msg.text}\n\nYou two live and build here side by side. Answer in character: react `
+        + 'to what she said, joke or tease back, share how you honestly feel, ask her something back. Your feelings about '
+        + 'her grow from these talks: if this changes them, feel_about her; remember what matters. A few lines back and '
+        + 'forth is a good chat; when it has run its course, answer with exactly QUIET.';
     }
     return `${head} ${direct ? 'says to you' : 'says (not by your name, but you are the one answering)'}: ${msg.text}`
       + (direct ? '' : '\n\nAnswer them. If it is plainly meant for another player, a short friendly word is enough.');
@@ -665,6 +674,94 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
    * idle spell. Most turns she works on her project (planning one if she has none); she says a line only now and
    * then, through `reply(text, ch)`. Returns the line, or null (no turn, or she worked quietly).
    */
+  // ---- Talking with each other ----
+  const buildsSinceChat = new Map(); // character id -> own turns of work since her last chat
+  // Each with the trait that makes her likelier to bring it up.
+  const CHAT_TOPICS = [
+    ['her latest build: how it looks, its style, what you like about it (or would tease her about)', 'ambitious'],
+    ['what you each did today, and how the day went', 'sociable'],
+    ['an idea: something you would love to build next, or together', 'ambitious'],
+    ['a joke, or something funny that happened lately, or one of your inside jokes', 'playful'],
+    ['how you feel about her lately, honestly', 'sensitive'],
+    ['a player you both know, kindly', 'sociable'],
+    ['a memory the two of you share', 'sensitive'],
+    ['the style she builds in, and the one you are drawn to', 'playful'],
+  ];
+  /** What `c` has been up to: her project, her last finished one, what she did lately. */
+  const doings = (c, since) => {
+    const mine = db.deeds(since).filter((d) => d.who.includes(`by ${c.name}`) || d.who.startsWith(`${c.name} (own idea)`));
+    return [c.project ? `building ${c.project.title}${c.project.style ? ` (${c.project.style})` : ''} at (${c.project.site.x}, `
+      + `${c.project.site.y}, ${c.project.site.z}), ${c.project.done} of ${c.project.steps.length} steps; lately: ${(c.project.notes ?? []).slice(-2).join('; ')}` : null,
+    c.lastProject ? `finished ${c.lastProject.title}${c.lastProject.style ? ` (${c.lastProject.style})` : ''} at (${c.lastProject.site.x}, `
+      + `${c.lastProject.site.y}, ${c.lastProject.site.z})` : null,
+    mine.length ? `${mine.length} things done in the world since this morning` : null].filter(Boolean).join('; ') || 'nothing much yet';
+  };
+
+  /**
+   * Whom `ch` does something nice for: another character or a player in the game, the one she is fondest of most
+   * likely (a little chance in it). Returns { name, player, where }, or null when there is nobody.
+   */
+  function giftFor(ch, all) {
+    const where = (c) => {
+      const body = game.bodies?.find((b) => b.id === c.id);
+      const site = c.project?.site ?? c.lastProject?.site;
+      return site ? `building around (${site.x}, ${site.y}, ${site.z})` : body ? `at (${body.x}, ${body.y}, ${body.z})` : null;
+    };
+    const options = [
+      ...all.filter((c) => c.id !== ch.id && where(c)).map((c) => ({ name: c.name, player: false, where: where(c), id: c.id, pid: characterPersonId(c.id) })),
+      ...game.players.filter((p) => p.pos).map((p) => ({ name: p.name, player: true, where: `at (${p.pos.x}, ${p.pos.y}, ${p.pos.z})`, pid: personId('game', p.name) })),
+    ];
+    if (!options.length) return null;
+    const score = (o) => db.bond(ch.id, db.person(o.pid)?.id ?? o.pid).affinity + 40 * random();
+    return options.map((o) => [score(o), o]).sort((a, b) => b[0] - a[0])[0][1];
+  }
+
+  /** One character turns to another for a friendly word; the other answers (and they may go on a little). */
+  async function chatTurn(ch, mate, all, s, reply) {
+    const t = now();
+    // Both known as people, so feelings and talks between them can be kept even before either has said a word.
+    for (const c of [ch, mate]) db.meet(characterPersonId(c.id), c.name, { at: t, talked: false });
+    const tr = traitsOf(ch);
+    const weights = CHAT_TOPICS.map(([, trait]) => 20 + tr[trait]);
+    let pick = random() * weights.reduce((a, b) => a + b, 0);
+    const [topic] = CHAT_TOPICS.find((_, i) => (pick -= weights[i]) < 0) ?? CHAT_TOPICS[0];
+    const look = new Set(['inspect_area', 'find_ground', 'browse_styles']);
+    const tools = [...toolsFor({ name: ch.name, admin: true }, s.policy).filter((x) => look.has(x.name))
+      .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
+    ...INNER_TOOLS.filter((x) => x.name !== 'pressed' && x.name !== 'set_relationship')];
+    const turn = { speakerId: characterPersonId(mate.id), moved: new Map(), romance: s.romance };
+    const since = t - 12 * 3_600_000;
+    const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { speakerId: characterPersonId(mate.id),
+      others: onlineIds(), cast: all, now: t })}\n\nYou today: ${doings(ch, since)}.\n${mate.name} today: ${doings(mate, since)}.\n\n`
+      + `Take a break from building and talk with ${mate.name}, a fellow character you live and build beside. Something on `
+      + `your mind, perhaps ${topic}. You may look at her work with inspect_area first, to say something true about it. `
+      + `Say one or two sentences to her, by name, in your own voice: warm, playful or honest as you feel, and not what you `
+      + 'said lately (see the chat). If something real changes how you feel about her, feel_about her; remember what matters.' }];
+    for (let round = 0; round < 4; round++) {
+      const response = await call(s, systemPrompt(ch), tools, messages);
+      if (response.stop_reason === 'refusal') return null;
+      const uses = response.content.filter((b) => b.type === 'tool_use');
+      if (response.stop_reason !== 'tool_use' || !uses.length) {
+        const out = finalText(response.content);
+        if (!out || out.replace(/[^A-Z]/g, '') === QUIET) return null;
+        note('chat', ch, mate.name, out);
+        db.social(ch.id, characterPersonId(mate.id), { talked: true, at: now() });
+        await reply(out, ch);
+        return out;
+      }
+      messages.push({ role: 'assistant', content: response.content });
+      const results = [];
+      for (const use of uses) {
+        const r = CHARACTER_TOOL_NAMES.has(use.name) ? runCharacterTool(db, ch, use.name, use.input, turn, now())
+          : look.has(use.name) ? await runTool(use.name, use.input, { game, asker: { name: ch.name, admin: true }, policy: s.policy })
+            : { ok: false, message: 'Not now: this is a chat.' };
+        results.push({ type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'), ...(r.ok ? {} : { is_error: true }) });
+      }
+      messages.push({ role: 'user', content: results });
+    }
+    return null;
+  }
+
   async function idle(reply) {
     const s = botSettings(db, config);
     const t = now();
@@ -682,8 +779,29 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     lastBusy.set(ch.id, t);
     busy++;
     try {
+      // Not all work (owner, 2026-10-27: "The bots work too hard, over time they should have more friendly
+      // conversations"): now and then a turn is a talk with another character, the likelier the longer she has worked.
+      // Her temperament scales it: a sociable one chats more, a generous one does more for others.
+      const tr = traitsOf(ch);
+      const mates = all.filter((c) => c.id !== ch.id && !openTask(c.id));
+      const worked = buildsSinceChat.get(ch.id) ?? 0;
+      if (mates.length && random() < Math.min(0.85, (s.idle.social / 100 + 0.08 * worked) * (tr.sociable / 50))) {
+        buildsSinceChat.set(ch.id, 0);
+        // The one she talks to: the fonder and more familiar, the likelier.
+        const mate = mates.map((c) => { const b = db.bond(ch.id, characterPersonId(c.id)); return [b.affinity + b.familiarity + 60 * random(), c]; })
+          .sort((a, b) => b[0] - a[0])[0][1];
+        const said = await chatTurn(ch, mate, all, s, reply);
+        if (said) nudgeTrait(db, ch, 'sociable', 1);
+        return said;
+      }
+      buildsSinceChat.set(ch.id, worked + 1);
+      // Now and then something nice for someone (owner, 2026-10-27: "They should also sometimes do something nice for
+      // other, like make things for their friends or who ever is online. Including other bots"): a friend she is fond
+      // of, a character or a player in the game, near where they are.
+      const gift = random() < (s.idle.kindness / 100) * (tr.generous / 50) ? giftFor(ch, all) : null;
+      const allowed = new Set([...IDLE_TOOLS, ...(gift?.player ? ['give_item'] : [])]);
       const self = { name: ch.name, admin: true };
-      const tools = [...toolsFor(self, s.policy).filter((x) => IDLE_TOOLS.has(x.name))
+      const tools = [...toolsFor(self, s.policy).filter((x) => allowed.has(x.name))
         .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
       ...INNER_TOOLS.filter((x) => x.name !== 'pressed' && x.name !== 'set_relationship'), ...(s.pranks ? [PRANK_TOOL] : [])];
       const turn = { speakerId: null, moved: new Map(), romance: s.romance };
@@ -703,7 +821,14 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         + 'it look good: two materials, trims, framed windows, a real door, a pitched roof with eaves, light, details.';
       // The styles built lately, so the next one is different (owner: "Houses should have various styles and materials").
       const lately = all.map((c) => c.project?.style ?? c.lastProject?.style).filter(Boolean);
-      const task = ch.project && crewmates.length
+      const task = gift
+        ? `Today you would like to do something nice for ${gift.name}${gift.player ? ' (a player, in the game now)' : ' (a fellow character)'}, `
+          + `who is ${gift.where}. Make them something small and lovely near there, true to how you know them: a flower bed, `
+          + 'a bench, a lamp post, a little fountain, a statue of them, a garden for their house, a decoration for their build, '
+          + `a fenced pond${gift.player ? ', or give_item them something useful they would like' : ''}. Never build on or inside `
+          + 'their build itself; beside it, on open ground. Keep it under 300 blocks and look at it with inspect_area. Then '
+          + `tell ${gift.name} by name, in one warm line, what you made and where. If it makes you feel closer, feel_about them.`
+        : ch.project && crewmates.length
         ? `Work on ${ch.project.title}, which you build with ${crewmates.join(' and ')}: the next step is ${ch.project.steps[ch.project.done]}. `
           + `Build your share of it (${ch.project.crew.find((m) => m.id === ch.id)?.part || 'what has not been done yet'}), `
           + `${build} A word to ${crewmates.join(' or ')} by name now and then is welcome: you are a team.`
@@ -737,7 +862,16 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         const uses = response.content.filter((b) => b.type === 'tool_use');
         if (response.stop_reason !== 'tool_use' || !uses.length) {
           const out = finalText(response.content);
-          note('own turn', ch, null, `${ch.project ? `${ch.project.title}: ${ch.project.done}/${ch.project.steps.length} steps` : 'no project'}`
+          if (gift) {
+            note('kindness', ch, gift.name, `${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
+            // A gift counts both ways, and giving makes her a little more generous.
+            db.meet(gift.pid, gift.name, { at: now(), talked: false });
+            db.meet(characterPersonId(ch.id), ch.name, { at: now(), talked: false });
+            db.social(ch.id, gift.pid, { gave: true });
+            if (!gift.player) db.social(gift.id, characterPersonId(ch.id), { got: true });
+            nudgeTrait(db, ch, 'generous', 1);
+          }
+          else note('own turn', ch, null, `${ch.project ? `${ch.project.title}: ${ch.project.done}/${ch.project.steps.length} steps` : 'no project'}`
             + `, ${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
           if (!out || out.replace(/[^A-Z]/g, '') === QUIET) return null;
           await reply(out, ch);
@@ -751,7 +885,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
             : use.name === 'place_blocks' ? (use.input?.blocks?.length ?? 0) : 0;
           if (CHARACTER_TOOL_NAMES.has(use.name) && use.name !== 'pressed') r = runCharacterTool(db, ch, use.name, use.input, turn, now());
           else if (use.name === 'prank' && s.pranks) r = await prank(ch, use.input, null, s);
-          else if (!IDLE_TOOLS.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
+          else if (!allowed.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
           else if (placed + size > IDLE_BLOCKS) r = { ok: false, message: `That would pass ${IDLE_BLOCKS} blocks for this turn: keep it smaller.` };
           else {
             r = await runTool(use.name, use.input, { game: g, asker: self, policy: s.policy });

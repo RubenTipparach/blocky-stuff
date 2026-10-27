@@ -49,7 +49,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   game = createGame({ now }), discord = null, bot = null, log = console, daily = false }) {
   const sessionSecret = config.sessionSecret || db.secret('session');
   // The Activity feed's filters, as kinds of event.
-  const FEED_KINDS = { talk: ['answered', 'quiet'], work: ['own turn', 'task', 'prank'], skipped: ['skipped', 'ignored'], problems: ['limited', 'error'] };
+  const FEED_KINDS = { talk: ['answered', 'quiet', 'chat'], work: ['own turn', 'task', 'prank', 'kindness'], skipped: ['skipped', 'ignored'], problems: ['limited', 'error'] };
   // Once: "mentions only" was the first version's default and stayed saved; everyone gets an answer now (owner,
   // 2026-10-27: "Someone should reply"). Set it back on /admin after this if wanted.
   if (!db.setting('once.listen-all')) {
@@ -507,7 +507,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (body.idle && typeof body.idle === 'object') {
         const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.floor(Number(v)))) : d);
         next.idle = { enabled: body.idle.enabled !== false, after: num(body.idle.after, 15, 3600, 60),
-          perHour: num(body.idle.perHour, 0, 120, 20) };
+          perHour: num(body.idle.perHour, 0, 120, 20), social: num(body.idle.social, 0, 100, 30), kindness: num(body.idle.kindness, 0, 100, 15) };
       }
       if (Number.isInteger(Number(body.summaryHour)) && Number(body.summaryHour) >= -1 && Number(body.summaryHour) <= 23) {
         next.summaryHour = Number(body.summaryHour);

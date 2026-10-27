@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../server/db.mjs';
 import { runCharacterTool, characterContext, personCard, cast, saveCharacter, removeCharacter, BREAK_AFTER,
-  BREAK_AFTER_TRUSTED } from '../server/character.mjs';
+  BREAK_AFTER_TRUSTED, traitsOf, nudgeTrait } from '../server/character.mjs';
 
 const fresh = () => {
   const db = openDb(':memory:');
@@ -162,4 +162,23 @@ test('a tool a character needs goes on the wish list, counted once per thing', (
   runCharacterTool(db, moss, 'request_tool', { what: 'Paint signs', why: 'a shop sign' }, undefined, 3);
   const list = db.json('tool.requests', []);
   assert.deepEqual(list.map((r) => [r.what, r.count, r.by]), [['Plant trees', 2, ['Blocky', 'Moss']], ['Paint signs', 1, ['Moss']]]);
+});
+
+test('social ties: respect, talks, gifts and inside jokes are kept per bond and shown to her; temperament drifts', () => {
+  const { db, blocky, moss } = fresh();
+  db.meet('char:moss', 'Moss', { at: 0 });
+  const t = { speakerId: 'char:moss', moved: new Map() };
+  runCharacterTool(db, blocky, 'feel_about', { person: 'Moss', affinity: 5, respect: 8, reason: 'her tower is grand' }, t, 10);
+  runCharacterTool(db, blocky, 'inside_joke', { person: 'Moss', joke: 'the rock that would not listen' }, t, 11);
+  db.social('blocky', 'char:moss', { talked: true, at: 12 });
+  db.social('blocky', 'char:moss', { gave: true });
+  const b = db.bond('blocky', 'char:moss');
+  assert.deepEqual([b.respect, b.familiarity, b.gifts_given, b.jokes], [8, 1, 1, ['the rock that would not listen']]);
+  const ctx = characterContext(db, blocky, { speakerId: 'char:moss', cast: [blocky, moss], now: 20 });
+  assert.match(ctx, /1 talk/);
+  assert.match(ctx, /the rock that would not listen/);
+  assert.match(ctx, /Your temperament lately: .*very sociable|rather sociable/);
+  const before = traitsOf(moss).generous;
+  nudgeTrait(db, moss, 'generous', 3);
+  assert.equal(traitsOf(cast(db).find((c) => c.id === 'moss')).generous, before + 3);
 });

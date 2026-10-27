@@ -148,7 +148,8 @@ const agoOf = (t) => { const m = Math.round((Date.now() - t) / 60000); return m 
 // was said. A filter row on top, remembered on this device.
 const KIND = { answered: ['💬 answered', 'ok', 'talk'], quiet: ['🤐 stayed quiet', 'muted', 'talk'], skipped: ['⏭ skipped', 'muted', 'skipped'],
   ignored: ['🚫 ignored', 'warn', 'skipped'], limited: ['⏳ limited', 'warn', 'problems'], error: ['⚠️ error', 'bad', 'problems'],
-  'own turn': ['🔨 own turn', 'muted', 'work'], task: ['📋 task', 'ok', 'work'], prank: ['😈 prank', 'warn', 'work'] };
+  'own turn': ['🔨 own turn', 'muted', 'work'], task: ['📋 task', 'ok', 'work'], prank: ['😈 prank', 'warn', 'work'],
+  chat: ['☕ chat', 'ok', 'talk'], kindness: ['🎁 kindness', 'ok', 'work'] };
 let feedFilter = 'all';
 try { feedFilter = localStorage.getItem('feedFilter') || 'all'; } catch { /* no storage */ }
 // The feed's events, newest first: the newest come with each refresh, older ones a page at a time as it scrolls.
@@ -352,6 +353,8 @@ function build() {
     <label class="check"><input type="checkbox" id="b_idle"> They work on their own projects when nobody is asking them anything (while someone is online, and for an hour after anyone's last word)</label>
     <div class="two"><label class="field">A turn when not asked anything for (seconds)<input id="b_idleAfter" type="number" min="15"></label>
     <label class="field">Own turns per hour, at most (all together)<input id="b_idlePerHour" type="number" min="0"></label></div>
+    <div class="two"><label class="field">Chats with each other (% of own turns; it grows the longer they work)<input id="b_idleSocial" type="number" min="0" max="100"></label>
+    <label class="field">Something nice for a friend (% of work turns)<input id="b_idleKindness" type="number" min="0" max="100"></label></div>
     <div class="muted note" style="margin:0 0 6px">Players who are not admins may ask for:</div>
     <div id="policy"></div>
     <div class="row" style="margin-top:10px"><button>Save</button><button type="button" class="quiet" id="summaryNow">Post today's summary now</button>
@@ -543,6 +546,7 @@ function build() {
     catch (e) { $('botNote').textContent = e.message; }
   };
   $('b_idle').checked = s.idle.enabled; $('b_idleAfter').value = s.idle.after; $('b_idlePerHour').value = s.idle.perHour;
+  $('b_idleSocial').value = s.idle.social; $('b_idleKindness').value = s.idle.kindness;
   const perms = [...new Map(state.policyTools.map((t) => [t.permission, t])).keys()];
   const label = { give: 'Items for themselves', teleport: 'Teleporting themselves', heal: 'Healing themselves', time: 'Changing the time of day', build: 'Building (placing blocks)' };
   $('policy').innerHTML = perms.map((p) => '<label class="check"><input type="checkbox" data-perm="' + p + '"' + (s.policy[p] ? ' checked' : '')
@@ -603,7 +607,8 @@ function build() {
       await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value,
         effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
         perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, sleep: $('b_sleep').checked, sleepAfter: Number($('b_sleepAfter').value), summaryHour: Number($('b_summaryHour').value),
-        idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value }, policy });
+        idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value,
+          social: $('b_idleSocial').value, kindness: $('b_idleKindness').value }, policy });
       $('botNote').textContent = 'Saved.';
     } catch (e) { $('botNote').textContent = e.message; }
   };

@@ -64,6 +64,14 @@ export function openDb(path) {
   const bondCols = db.prepare('PRAGMA table_info(bonds)').all().map((c) => c.name);
   if (!bondCols.includes('status')) db.exec("ALTER TABLE bonds ADD COLUMN status TEXT NOT NULL DEFAULT 'none'");
   if (!bondCols.includes('pranked_at')) db.exec('ALTER TABLE bonds ADD COLUMN pranked_at INTEGER NOT NULL DEFAULT 0');
+  // The social side of a bond (owner, 2026-10-27: "in the db track various social attributes so that their internal
+  // memories and personalities can better drive their behaviors"): how much she respects their work, how many talks
+  // they have had and when the last was, gifts each way, and the jokes only the two of them share.
+  for (const [col, def] of [['respect', 'INTEGER NOT NULL DEFAULT 0'], ['familiarity', 'INTEGER NOT NULL DEFAULT 0'],
+    ['last_talk', 'INTEGER NOT NULL DEFAULT 0'], ['gifts_given', 'INTEGER NOT NULL DEFAULT 0'],
+    ['gifts_got', 'INTEGER NOT NULL DEFAULT 0'], ['jokes', "TEXT NOT NULL DEFAULT '[]'"]]) {
+    if (!bondCols.includes(col)) db.exec(`ALTER TABLE bonds ADD COLUMN ${col} ${def}`);
+  }
   if (!db.prepare('PRAGMA table_info(people)').all().some((c) => c.name === 'color')) db.exec('ALTER TABLE people ADD COLUMN color TEXT');
   // Memories once made by every build step ("Did place blocks for them: ..."): noise, cleared once.
   db.exec("DELETE FROM memories WHERE text LIKE 'Did % for them: %'");
@@ -127,9 +135,11 @@ export function openDb(path) {
     dropCharacterMemories: db.prepare('DELETE FROM memories WHERE character = ? OR about = ?'),
   };
   const facts = (r) => { try { return JSON.parse(r.facts); } catch { return []; } };
+  const jokes = (r) => { try { return JSON.parse(r.jokes ?? '[]'); } catch { return []; } };
   const bondOut = (r) => ({ affinity: r?.affinity ?? 0, trust: r?.trust ?? 20, nickname: r?.nickname ?? null,
     facts: r ? facts(r) : [], pressure: r?.pressure ?? 0, pressure_at: r?.pressure_at ?? 0, status: r?.status ?? 'none',
-    pranked_at: r?.pranked_at ?? 0 });
+    pranked_at: r?.pranked_at ?? 0, respect: r?.respect ?? 0, familiarity: r?.familiarity ?? 0, last_talk: r?.last_talk ?? 0,
+    gifts_given: r?.gifts_given ?? 0, gifts_got: r?.gifts_got ?? 0, jokes: r ? jokes(r) : [] });
   // A person's own row: an alias (a linked Discord or game identity) leads to the one it was linked to.
   const canonical = (id) => {
     const r = q.rawPerson.get(id);
@@ -225,6 +235,27 @@ export function openDb(path) {
       if (!own) return;
       q.addBond.run(ch, own.id);
       q.setFeel.run(Math.max(-100, Math.min(100, Math.round(affinity))), Math.max(0, Math.min(100, Math.round(trust))), ch, own.id);
+    },
+    /**
+     * The social side of `ch`'s bond with a person: respect (-100..100, set), talked (one more talk now), gave (she
+     * gave them something), got (they gave her something), joke (an inside joke, the newest five kept).
+     */
+    social(ch, id, { respect, talked, gave, got, joke, at = Date.now() } = {}) {
+      const own = canonical(id);
+      if (!own) return;
+      q.addBond.run(ch, own.id);
+      const b = bondOut(q.bond.get(ch, own.id));
+      const sets = [];
+      const args = [];
+      if (Number.isFinite(respect)) { sets.push('respect = ?'); args.push(Math.max(-100, Math.min(100, Math.round(respect)))); }
+      if (talked) { sets.push('familiarity = familiarity + 1', 'last_talk = ?'); args.push(at); }
+      if (gave) sets.push('gifts_given = gifts_given + 1');
+      if (got) sets.push('gifts_got = gifts_got + 1');
+      if (joke) {
+        const list = [...b.jokes.filter((j) => j.toLowerCase() !== String(joke).toLowerCase()), String(joke).slice(0, 120)].slice(-5);
+        sets.push('jokes = ?'); args.push(JSON.stringify(list));
+      }
+      if (sets.length) db.prepare(`UPDATE bonds SET ${sets.join(', ')} WHERE character = ? AND person = ?`).run(...args, ch, own.id);
     },
     nickname(ch, id, nick) {
       const own = canonical(id);

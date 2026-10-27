@@ -129,8 +129,10 @@ const OPERATOR_TOOLS = [
       const c = db.json('characters', []).find((x) => x.name.toLowerCase() === String(name).toLowerCase() || x.id === name);
       if (!c) return { ok: false, message: `No character called ${name}.` };
       const people = db.people().map((p) => ({ name: p.name, ...db.bond(c.id, p.id) }))
-        .filter((b) => b.affinity || b.trust || b.status !== 'none')
-        .map((b) => ({ name: b.name, affinity: b.affinity, trust: b.trust, status: b.status, nickname: b.nickname || undefined }));
+        .filter((b) => b.affinity || b.trust || b.status !== 'none' || b.familiarity)
+        .map((b) => ({ name: b.name, affinity: b.affinity, trust: b.trust, respect: b.respect, talks: b.familiarity,
+          gifts: `${b.gifts_given} given, ${b.gifts_got} got`, jokes: b.jokes.length ? b.jokes : undefined, status: b.status,
+          nickname: b.nickname || undefined }));
       return { ok: true, message: JSON.stringify({ ...c, memories: db.recentMemories(c.id, 25).map((m) => m.text), people }, null, 1) };
     },
   },
