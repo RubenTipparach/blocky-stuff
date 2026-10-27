@@ -132,7 +132,6 @@ function build() {
     <div class="two"><label class="field">Name (players say @name)<input id="b_name" maxlength="20"></label>
     <label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label></div>
     <label class="field">Model<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label>
-    <label class="field">Persona<textarea id="b_persona" maxlength="2000"></textarea></label>
     <div class="two"><label class="field">Listens to<select id="b_listen"><option value="mentions">Only messages that say its name</option>
       <option value="all">Every chat message (it joins in when it has something to say)</option></select></label>
     <label class="field">Daily summary at (UTC hour, -1 = off)<input id="b_summaryHour" type="number" min="-1" max="23"></label></div>
@@ -166,10 +165,45 @@ function build() {
   <section><h2>LLM use</h2><div class="scroll"><table><thead><tr><th>Day (UTC)</th><th>Calls</th><th>Input</th><th>Output</th></tr></thead>
     <tbody id="usage"></tbody></table></div></section>
 </div>
+<section style="margin-top:14px"><h2>Character</h2>
+  <p class="muted note" id="moodLine"></p>
+  <form id="character">
+    <label class="field">Backstory<textarea id="c_backstory" maxlength="3000"></textarea></label>
+    <div class="two"><label class="field">Personality<textarea id="c_personality" maxlength="3000"></textarea></label>
+    <label class="field">How it talks<textarea id="c_speech" maxlength="3000"></textarea></label></div>
+    <label class="field">What it wants in life<textarea id="c_goals" maxlength="3000"></textarea></label>
+    <label class="field">Working on now (it changes this itself)<input id="c_goal" maxlength="200"></label>
+    <div class="row"><button>Save character</button><button type="button" class="quiet" id="resetMood">Calm its mood</button>
+      <span id="charNote" class="note muted"></span></div>
+  </form></section>
+<section style="margin-top:14px"><h2>People it knows</h2>
+  <p class="muted note">Affinity runs from -100 (hostile) to 100 (best friend), trust from 0 to 100. The bot moves them a little at a time; you can set them here.
+  Players join their game and Discord selves by typing <code>!link</code> in game.</p>
+  <div class="scroll"><table><thead><tr><th>Person</th><th>Feels</th><th>Affinity</th><th>Trust</th><th>Nickname</th><th>Talks</th><th>Last seen</th><th></th></tr></thead>
+  <tbody id="people"></tbody></table></div></section>
+<section style="margin-top:14px"><h2>Memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
+  <tbody id="memories"></tbody></table></div></section>
 <section style="margin-top:14px"><h2>Luanti log</h2><pre id="log"></pre></section>\`;
+  const ch = state.character;
+  $('c_backstory').value = ch.backstory; $('c_personality').value = ch.personality; $('c_speech').value = ch.speech;
+  $('c_goals').value = ch.goals; $('c_goal').value = ch.goal || '';
+  $('character').onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await api('/api/admin/character', { backstory: $('c_backstory').value, personality: $('c_personality').value,
+        speech: $('c_speech').value, goals: $('c_goals').value, goal: $('c_goal').value });
+      $('charNote').textContent = 'Saved.';
+    } catch (e) { $('charNote').textContent = e.message; }
+  };
+  $('resetMood').onclick = async () => { await api('/api/admin/character', { resetMood: true }).catch(() => {}); refreshSoon(); };
+  document.addEventListener('change', async (ev) => {
+    const el = ev.target.closest('[data-person]');
+    if (!el) return;
+    try { await api('/api/admin/person', { id: el.dataset.person, [el.dataset.field]: el.value }); refreshSoon(); } catch (e) { alert(e.message); }
+  });
 
   $('b_enabled').checked = s.enabled; $('b_name').value = s.name; $('b_model').value = s.model; $('b_effort').value = s.effort;
-  $('b_persona').value = s.persona; $('b_cooldown').value = s.cooldown; $('b_perHour').value = s.perHour; $('b_perDay').value = s.perDay;
+  $('b_cooldown').value = s.cooldown; $('b_perHour').value = s.perHour; $('b_perDay').value = s.perDay;
   $('b_listen').value = s.listen; $('b_summaryHour').value = s.summaryHour;
   $('b_idle').checked = s.idle.enabled; $('b_idleAfter').value = s.idle.after; $('b_idlePerHour').value = s.idle.perHour;
   const perms = [...new Map(state.policyTools.map((t) => [t.permission, t])).keys()];
@@ -184,7 +218,7 @@ function build() {
     for (const el of document.querySelectorAll('[data-perm]')) policy[el.dataset.perm] = el.checked;
     try {
       await api('/api/admin/bot', { enabled: $('b_enabled').checked, name: $('b_name').value, model: $('b_model').value,
-        effort: $('b_effort').value, persona: $('b_persona').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
+        effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
         perDay: $('b_perDay').value, listen: $('b_listen').value, summaryHour: Number($('b_summaryHour').value),
         idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value }, policy });
       $('botNote').textContent = 'Saved.';
@@ -224,6 +258,14 @@ function build() {
     } catch (e) { $('mcpOut').textContent = e.message; }
   };
   document.addEventListener('click', async (ev) => {
+    const f = ev.target.closest('[data-forget]');
+    if (f) {
+      if (!confirm('Forget ' + f.dataset.name + ' completely: feelings, facts and memories?')) return;
+      await api('/api/admin/person', { id: f.dataset.forget, forget: true }).catch((e) => alert(e.message));
+      return refreshSoon();
+    }
+    const m = ev.target.closest('[data-memory]');
+    if (m) { await api('/api/admin/forget-memory', { id: Number(m.dataset.memory) }).catch(() => {}); return refreshSoon(); }
     const b = ev.target.closest('[data-act]');
     if (!b) return;
     const [type, player] = [b.dataset.act, b.dataset.player];
@@ -254,6 +296,25 @@ async function loadChannels() {
 
 function refresh() {
   const st = state;
+  const typing = document.activeElement && document.activeElement.closest && document.activeElement.closest('#people');
+  $('moodLine').textContent = 'Mood: ' + st.character.mood.label + (st.character.mood.reason ? ' (' + st.character.mood.reason + ')' : '')
+    + (st.character.goal ? ' · Working on: ' + st.character.goal : '');
+  const feels = (a) => a <= -60 ? 'hostile' : a <= -25 ? 'dislike' : a < -5 ? 'wary' : a < 15 ? 'neutral' : a < 35 ? 'friendly' : a < 60 ? 'fond' : a < 85 ? 'close friend' : 'best friend';
+  const where = (p) => [p, ...(p.aliases || [])].map((x) => (x.id.startsWith('discord:') ? 'Discord: ' : 'Game: ') + esc(x.name)).join('<br>');
+  const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
+  if (!typing) $('people').innerHTML = st.people.length ? st.people.map((p) => '<tr><td>' + where(p)
+    + (p.facts.length ? '<div class="note muted">' + p.facts.map(esc).join(' · ') + '</div>' : '') + '</td><td>' + feels(p.affinity) + '</td>'
+    + '<td><input type="number" min="-100" max="100" style="width:80px" data-person="' + esc(p.id) + '" data-field="affinity" value="' + p.affinity + '"></td>'
+    + '<td><input type="number" min="0" max="100" style="width:72px" data-person="' + esc(p.id) + '" data-field="trust" value="' + p.trust + '"></td>'
+    + '<td><input style="width:110px" data-person="' + esc(p.id) + '" data-field="nickname" value="' + esc(p.nickname || '') + '"></td>'
+    + '<td>' + p.talks + '</td><td class="muted">' + ago(p.last_at) + '</td>'
+    + '<td><button class="danger" data-forget="' + esc(p.id) + '" data-name="' + esc(p.name) + '">Forget</button></td></tr>').join('')
+    : '<tr><td colspan="8" class="muted">Nobody yet: it meets people as they chat.</td></tr>';
+  const nameOf = (id) => { const p = st.people.find((x) => x.id === id || (x.aliases || []).some((a) => a.id === id)); return p ? p.name : ''; };
+  $('memories').innerHTML = st.memories.length ? st.memories.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'
+    + esc(m.about ? nameOf(m.about) : 'itself') + '</td><td>' + (m.secret ? '<span class="warn">secret</span> ' : '') + esc(m.text) + '</td><td>' + m.weight + '</td>'
+    + '<td><button class="quiet" data-memory="' + m.id + '">Forget</button></td></tr>').join('')
+    : '<tr><td colspan="5" class="muted">No memories yet.</td></tr>';
   const p = st.server.process;
   const yes = (v, t, f) => '<span class="' + (v ? 'ok' : 'bad') + '">' + (v ? t : f) + '</span>';
   const missing = Object.values(st.missing).flat();

@@ -158,3 +158,22 @@ test('the bot answers any chat by default, and its body walks to whoever it answ
   assert.equal(heard[0].text, 'hello');
   assert.deepEqual([actions[0].type, actions[0].near, actions[0].text], ['say', 'alice', 'Hi there!']);
 });
+
+test('!link in game whispers a code; !link <code> in Discord joins the two people', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', ANTHROPIC_API_KEY: '' });
+  const db = openDb(':memory:');
+  const posts = [];
+  const discord = { post: async (m) => { posts.push(m); return { ok: true }; }, news: async () => ({}), mode: null,
+    channelIds: [], setChannels: () => true, start() {}, stop() {} };
+  const bot = { ready: true, hear: async () => null };
+  const server = makeApp({ config, db, bridgeKey: 'key', discord, bot, log: quiet });
+  server.game.sync({ players: [{ name: 'Ruben', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  const { actions } = server.game.sync({ events: [{ type: 'chat', name: 'Ruben', text: '!link' }] });
+  assert.equal(actions[0].to, 'Ruben');
+  const code = /!link (\w{6})/.exec(actions[0].text)[1];
+  assert.equal(db.chat(5).length, 0); // the code is never in the public log
+  server.discord.post({ text: 'x' });
+  await server.fromDiscord({ channelId: '1', userId: '42', name: 'PscifieX', text: `!link ${code.toLowerCase()}` });
+  assert.match(posts.at(-1).text, /one and the same/);
+  assert.equal(db.person('discord:42').id, 'game:ruben');
+});

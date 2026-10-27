@@ -7,6 +7,11 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxNodes } from './tools.mjs';
+import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, characterSheet, characterSystem, characterContext, runCharacterTool,
+  personId } from './character.mjs';
+
+// The character tools, as sent to the model.
+const INNER_TOOLS = CHARACTER_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
 
 // The tools that change the world: what the daily summary tells of.
 export const ACTS = new Set(TOOLS.filter((t) => t.permission).map((t) => t.name));
@@ -136,9 +141,12 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     // msg.admin is decided by the caller: the server privilege in game, ADMIN_DISCORD_ID on Discord (by id).
     const asker = { name: msg.name, admin: msg.admin === true };
     const allowed = toolsFor(asker, s.policy);
-    const tools = allowed.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
+    const tools = [...allowed.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
+      ...INNER_TOOLS];
     const system = systemPrompt(s);
-    const messages = [{ role: 'user', content: situation(msg, asker, direct) }];
+    const speakerId = msg.personId ?? personId(msg.source, msg.name);
+    const turn = { speakerId, moved: new Map() };
+    const messages = [{ role: 'user', content: situation(msg, asker, direct, speakerId) }];
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const response = await llm.beta.messages.create({
         model: s.model,
@@ -158,9 +166,14 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       }
       messages.push({ role: 'assistant', content: response.content });
       const results = await Promise.all(uses.map(async (use) => {
-        const r = await runTool(use.name, use.input, { game, asker, policy: s.policy });
+        const r = CHARACTER_TOOL_NAMES.has(use.name) ? runCharacterTool(db, use.name, use.input, turn, now())
+          : await runTool(use.name, use.input, { game, asker, policy: s.policy });
         log.log(`bot ${use.name} for ${asker.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
-        if (r.ok && ACTS.has(use.name)) db.addDeed(asker.name, use.name, use.input, r.message, now());
+        if (r.ok && ACTS.has(use.name)) {
+          db.addDeed(asker.name, use.name, use.input, r.message, now());
+          // What it did for someone is part of their story together.
+          db.remember(speakerId, `Did ${use.name.replace(/_/g, ' ')} for them: ${r.message}`, 2, now());
+        }
         return { type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'),
           ...(r.ok ? {} : { is_error: true }) };
       }));
@@ -172,7 +185,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   // Stable across requests, so it is cached: what changes goes in the user message.
   function systemPrompt(s) {
     return `Your name is ${s.name}. You are an AI character on a Luanti server (a voxel sandbox game, the Minetest `
-      + `Game). Players talk to you in the game's chat, or from the server's Discord channel.\n\n${s.persona}\n\n`
+      + `Game). Players talk to you in the game's chat, or from the server's Discord channel.\n\n`
+      + `${characterSystem(characterSheet(db, now()))}\n\n`
       + 'How you answer:\n'
       + '- Your reply is shown in a chat box, so keep it short: one to three sentences, plain text, no markdown, '
       + 'no lists, no headings.\n'
@@ -198,8 +212,10 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     return `Recent chat (oldest first):\n${lines.join('\n') || '(none)'}\n\nOnline: ${online}`;
   }
 
-  function situation(msg, asker, direct) {
-    return `${context()}\n\n${asker.name}${msg.source === 'discord' ? ' (on Discord, not in the world)' : ''}`
+  const onlineIds = () => game.players.map((p) => personId('game', p.name));
+
+  function situation(msg, asker, direct, speakerId) {
+    return `${context()}\n\n${characterContext(db, { speakerId, others: onlineIds(), now: now() })}\n\n${asker.name}${msg.source === 'discord' ? ' (on Discord, not in the world)' : ''}`
       + `${asker.admin ? ' (an admin)' : ''} ${direct ? 'says to you' : 'said in chat, not to you'}: ${msg.text}`
       + (direct ? '' : `\n\nJoin in only if you have something worth saying: a question you can answer, help `
         + 'someone needs, a greeting, a moment worth a word. Otherwise answer with exactly QUIET. Do not use tools '
@@ -221,11 +237,11 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     const response = await llm.beta.messages.create({
       model: s.model,
       max_tokens: 4000,
-      system: `Your name is ${s.name}. You are an AI character on a Luanti server.\n\n${s.persona}`,
+      system: `Your name is ${s.name}. You are a character on a Luanti server.\n\n${characterSystem(characterSheet(db, now()))}`,
       messages: [{ role: 'user', content: `Here is the last day on the server.\n\nWhat you did in the world `
         + `(${deeds.length}):\n${did.join('\n') || '(nothing)'}\n\nChat (${lines.length} lines):\n${said.join('\n') || '(none)'}\n\n`
         + 'Write your daily summary for the server\'s Discord channel: what you built and did, for whom and where '
-        + '(coordinates help people find things), and a line on what players got up to. Plain text, at most six '
+        + '(coordinates help people find things), a line on what players got up to, and how you feel about the day. Plain text, at most six '
         + 'short sentences, no markdown, in your own voice.' }],
       output_config: { effort: s.effort },
       ...(FALLBACK_MODELS.has(s.model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
@@ -251,14 +267,17 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     busy++;
     try {
       const self = { name: s.name, admin: true };
-      const tools = toolsFor(self, s.policy).filter((x) => IDLE_TOOLS.has(x.name))
-        .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
+      const tools = [...toolsFor(self, s.policy).filter((x) => IDLE_TOOLS.has(x.name))
+        .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
+      ...INNER_TOOLS.filter((x) => x.name !== 'pressed')];
+      const turn = { speakerId: null, moved: new Map() };
       const mine = db.deeds(t - 7 * 86400_000).slice(-12)
         .map((d) => `${new Date(d.at).toISOString().slice(0, 16)} ${d.tool} ${d.input}`);
-      const messages = [{ role: 'user', content: `${context()}\n\nWhat you built lately (newest last):\n${mine.join('\n') || '(nothing yet)'}\n\n`
+      const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, { others: onlineIds(), now: t })}\n\nWhat you built lately (newest last):\n${mine.join('\n') || '(nothing yet)'}\n\n`
         + 'Nobody has asked you for anything for a while, so do something on your own. Pick ONE: build something '
         + `small and charming near a player (a lamp post, a bench, a little garden, a well, a statue; at most ${IDLE_BLOCKS} `
-        + 'blocks), add a detail to something you built before, or walk over to someone and chat. Check the ground with '
+        + 'blocks), maybe as a gift for someone you are fond of, add a detail to something you built before, chase your '
+        + 'current goal, or walk over to someone and chat (bring up something you remember about them). Check the ground with '
         + 'find_ground first and build on natural ground (dirt, grass, sand, stone), 5 to 15 blocks from players, never '
         + 'on or inside anything a player built. Then say ONE short line in chat about what you are up to, in your own '
         + 'voice. If now is not a good time, answer with exactly QUIET.' }];
@@ -284,7 +303,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
           let r;
           const size = use.name === 'fill_box' ? (boxNodes(use.input ?? {})?.length ?? Infinity)
             : use.name === 'place_blocks' ? (use.input?.blocks?.length ?? 0) : 0;
-          if (!IDLE_TOOLS.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
+          if (CHARACTER_TOOL_NAMES.has(use.name) && use.name !== 'pressed') r = runCharacterTool(db, use.name, use.input, turn, now());
+          else if (!IDLE_TOOLS.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
           else if (placed + size > IDLE_BLOCKS) r = { ok: false, message: `That would pass ${IDLE_BLOCKS} blocks for this turn: keep it smaller.` };
           else {
             r = await runTool(use.name, use.input, { game, asker: self, policy: s.policy });
