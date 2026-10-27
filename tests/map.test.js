@@ -20,6 +20,11 @@ test('the colours from minetestmapper load, and unknown nodes get a steady colou
   assert.equal(colorOf('mymod:water_thing')[2] > 100, true);
 });
 
+test('the same area draws the same wherever it is in the world', () => {
+  const far = { ...scan, x1: -500, z1: 300, marks: [{ id: 'moss', x: -499, y: 3, z: 301 }] };
+  assert.deepEqual(renderIso(far).png, renderIso(scan).png);
+});
+
 test('an area renders to an isometric PNG', () => {
   const { png, width, height } = renderIso(scan, { markColors: { moss: '#4f7a34' } });
   assert.deepEqual([...png.subarray(0, 4)], PNG);

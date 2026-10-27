@@ -103,10 +103,15 @@ export function renderIso(scan, { markColors = {}, scale } = {}) {
   const height = Math.round(((w + d) * a) / 2 + tall * a + 3 * a);
   const px = new Uint8Array(width * height * 3);
   for (let i = 0; i < width * height; i++) px.set(BG, i * 3);
-  // A block at (x, y, z) has its sprite's top-left here: x runs down-right, z down-left, y up.
+  // A block at world (x, y, z) has its sprite's top-left here, placed by where it sits in the area (so the same area
+  // anywhere in the world draws the same): x runs down-right, z down-left, y up.
   const ox = d * a;
   const oy = (hmax - y1 + 2) * a;
-  const at = (x, y, z) => [ox + (x - z) * a, oy + ((x + z) * a) / 2 - (y - y1) * a];
+  const at = (x, y, z) => {
+    const rx = x - x1;
+    const rz = z - z1;
+    return [ox + (rx - rz) * a, oy + ((rx + rz) * a) / 2 - (y - y1) * a];
+  };
   const blit = (sx, sy, rgba) => {
     const alpha = (rgba[3] ?? 255) / 255;
     for (let yy = 0; yy < sp.w; yy++) {
