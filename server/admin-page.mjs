@@ -138,6 +138,8 @@ function build() {
     <div class="three"><label class="field">Cooldown (s)<input id="b_cooldown" type="number" min="0"></label>
     <label class="field">Per player / hour<input id="b_perHour" type="number" min="0"></label>
     <label class="field">Calls / day (0 = no limit)<input id="b_perDay" type="number" min="0"></label></div>
+    <label class="check"><input type="checkbox" id="b_romance"> Romance: characters fond of someone may flirt, and date (always PG)</label>
+    <label class="check"><input type="checkbox" id="b_pranks"> Pranks: characters hostile to someone may drop a few harmless blocks on their build, once a day</label>
     <label class="check"><input type="checkbox" id="b_idle"> They work on their own projects when nobody is asking them anything (while someone is online, and for an hour after anyone's last word)</label>
     <div class="two"><label class="field">A turn when not asked anything for (seconds)<input id="b_idleAfter" type="number" min="15"></label>
     <label class="field">Own turns per hour, at most (all together)<input id="b_idlePerHour" type="number" min="0"></label></div>
@@ -187,7 +189,7 @@ function build() {
 <section style="margin-top:14px"><h2>People they know</h2>
   <p class="muted note">How <b id="peopleFor"></b> feels about each person (pick another character above to see hers). Affinity runs from -100 (hostile) to 100 (best friend), trust from 0 to 100. Characters move them a little at a time; you can set them here.
   Players join their game and Discord selves by typing <code>!link</code> in game, or with Link with... here.</p>
-  <div class="scroll"><table><thead><tr><th>Person</th><th>Feels</th><th>Affinity</th><th>Trust</th><th>Nickname</th><th>Talks</th><th>Last seen</th><th></th></tr></thead>
+  <div class="scroll"><table><thead><tr><th>Person</th><th>Colour</th><th>Feels</th><th>Affinity</th><th>Trust</th><th>Nickname</th><th>Talks</th><th>Last seen</th><th></th></tr></thead>
   <tbody id="people"></tbody></table></div></section>
 <section style="margin-top:14px"><h2>Activity</h2>
   <p class="muted note">What the characters heard and did lately, newest first: who answered, who stayed quiet and why, their own turns, errors.</p>
@@ -246,6 +248,7 @@ function build() {
   $('b_enabled').checked = s.enabled; $('b_model').value = s.model; $('b_effort').value = s.effort;
   $('b_cooldown').value = s.cooldown; $('b_perHour').value = s.perHour; $('b_perDay').value = s.perDay;
   $('b_listen').value = s.listen; $('b_summaryHour').value = s.summaryHour;
+  $('b_romance').checked = s.romance; $('b_pranks').checked = s.pranks;
   $('b_idle').checked = s.idle.enabled; $('b_idleAfter').value = s.idle.after; $('b_idlePerHour').value = s.idle.perHour;
   const perms = [...new Map(state.policyTools.map((t) => [t.permission, t])).keys()];
   const label = { give: 'Items for themselves', teleport: 'Teleporting themselves', heal: 'Healing themselves', time: 'Changing the time of day', build: 'Building (placing blocks)' };
@@ -260,7 +263,7 @@ function build() {
     try {
       await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value,
         effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
-        perDay: $('b_perDay').value, listen: $('b_listen').value, summaryHour: Number($('b_summaryHour').value),
+        perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, summaryHour: Number($('b_summaryHour').value),
         idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value }, policy });
       $('botNote').textContent = 'Saved.';
     } catch (e) { $('botNote').textContent = e.message; }
@@ -342,7 +345,7 @@ function refresh() {
   if (me) $('moodLine').textContent = 'Mood: ' + me.mood.label + (me.mood.reason ? ' (' + me.mood.reason + ')' : '')
     + (me.project ? ' · Project: ' + me.project.title + ' at ' + me.project.site.x + ', ' + me.project.site.y + ', ' + me.project.site.z
       + ' (' + me.project.done + ' of ' + me.project.steps.length + ' steps)' : me.goal ? ' · Working on: ' + me.goal : '');
-  const kinds = { answered: 'ok', quiet: 'muted', ignored: 'warn', limited: 'warn', error: 'bad', 'own turn': 'muted' };
+  const kinds = { answered: 'ok', quiet: 'muted', ignored: 'warn', limited: 'warn', error: 'bad', 'own turn': 'muted', prank: 'warn' };
   $('activity').innerHTML = (st.activity || []).length ? st.activity.map((e) => '<tr><td class="muted">' + clock(e.at) + '</td><td class="'
     + (kinds[e.kind] || '') + '">' + esc(e.kind) + '</td><td>' + esc(e.character || '') + '</td><td>' + esc(e.who || '') + '</td><td>'
     + esc(e.text) + '</td></tr>').join('') : '<tr><td colspan="5" class="muted">Nothing yet.</td></tr>';
@@ -353,7 +356,7 @@ function refresh() {
   const others = st.people.filter((p) => !me || p.id !== 'char:' + me.id);
   const ago = (t) => { const m = Math.round((Date.now() - t) / 60000); return m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' d ago'; };
   if (!typing) $('people').innerHTML = others.length ? others.map((p) => { const b = bondOf(p); return '<tr><td>' + where(p)
-    + (b.facts.length ? '<div class="note muted">' + b.facts.map(esc).join(' · ') + '</div>' : '') + '</td><td>' + feels(b.affinity) + '</td>'
+    + (b.facts.length ? '<div class="note muted">' + b.facts.map(esc).join(' · ') + '</div>' : '') + '</td><td><input type="color" style="width:44px;min-height:32px;padding:2px" data-person="' + esc(p.id) + '" data-field="color" value="' + esc(p.color || '#9aa8ff') + '" title="Name colour on Discord"></td><td>' + feels(b.affinity) + (b.status === 'dating' ? ' <span class="warn">dating</span>' : b.status === 'ex' ? ' <span class="muted">ex</span>' : '') + '</td>'
     + '<td><input type="number" min="-100" max="100" style="width:80px" data-person="' + esc(p.id) + '" data-field="affinity" value="' + b.affinity + '"></td>'
     + '<td><input type="number" min="0" max="100" style="width:72px" data-person="' + esc(p.id) + '" data-field="trust" value="' + b.trust + '"></td>'
     + '<td><input style="width:110px" data-person="' + esc(p.id) + '" data-field="nickname" value="' + esc(b.nickname || '') + '"></td>'
@@ -365,7 +368,7 @@ function refresh() {
         + pool.map((o) => '<option value="' + esc(o.id) + '">' + kind(o.id) + esc(o.name) + '</option>').join('') + '</select>'
         + '<button class="danger" data-forget="' + esc(p.id) + '" data-name="' + esc(p.name) + '">Forget</button>';
     })()) + '</td></tr>'; }).join('')
-    : '<tr><td colspan="8" class="muted">Nobody yet: the characters meet people as they chat.</td></tr>';
+    : '<tr><td colspan="9" class="muted">Nobody yet: the characters meet people as they chat.</td></tr>';
   const nameOf = (id) => { const p = st.people.find((x) => x.id === id || (x.aliases || []).some((a) => a.id === id)); return p ? p.name : ''; };
   const mems = st.memories.filter((m) => !me || m.character === me.id);
   $('memories').innerHTML = mems.length ? mems.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'

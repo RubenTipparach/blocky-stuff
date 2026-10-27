@@ -135,17 +135,20 @@ function actions.place(a)
 	end
 	-- Blocks nobody is near may not be loaded; load them, or set_node does nothing there.
 	core.load_area(lo, hi)
-	local placed, protected = 0, 0
+	local placed, protected, filled = 0, 0, 0
 	for _, n in ipairs(a.nodes) do
 		local pos = vector.new(n.x, n.y, n.z)
 		if core.is_protected(pos, "") then
 			protected = protected + 1
+		elseif a.soft and core.get_node(pos).name ~= "air" then
+			filled = filled + 1 -- a prank only fills empty air: it never removes or replaces a block
 		else
 			core.set_node(pos, { name = n.item })
 			placed = placed + 1
 		end
 	end
-	return true, "Placed " .. placed .. " blocks" .. (protected > 0 and (", skipped " .. protected .. " protected") or "") .. "."
+	return true, "Placed " .. placed .. " blocks" .. (protected > 0 and (", skipped " .. protected .. " protected") or "")
+		.. (filled > 0 and (", " .. filled .. " spots were not empty") or "") .. "."
 end
 
 -- The surface of each column: the highest block a player could stand on, or water.

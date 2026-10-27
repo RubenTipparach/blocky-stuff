@@ -7,6 +7,10 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
+// Colours for people's names on Discord, readable on a dark and a light theme, each person one of them for good.
+export const PALETTE = ['#e06c75', '#e5a046', '#d6c34a', '#7bc96f', '#45b5a0', '#4fa3e0', '#7d8cf0', '#b67be8',
+  '#e57bb5', '#c98a5b', '#8fb83f', '#5bc0de'];
+
 // Chat kept for the admin page and the bot's context; older lines are dropped.
 const CHAT_KEEP = 2000;
 
@@ -50,6 +54,11 @@ export function openDb(path) {
     db.exec(`INSERT OR IGNORE INTO bonds (character, person, affinity, trust, nickname, facts, pressure, pressure_at)
       SELECT 'blocky', id, affinity, trust, nickname, facts, pressure, pressure_at FROM people WHERE link IS NULL`);
   }
+  // Relationship status (dating, ex) and the last prank, added after bonds first shipped.
+  const bondCols = db.prepare('PRAGMA table_info(bonds)').all().map((c) => c.name);
+  if (!bondCols.includes('status')) db.exec("ALTER TABLE bonds ADD COLUMN status TEXT NOT NULL DEFAULT 'none'");
+  if (!bondCols.includes('pranked_at')) db.exec('ALTER TABLE bonds ADD COLUMN pranked_at INTEGER NOT NULL DEFAULT 0');
+  if (!db.prepare('PRAGMA table_info(people)').all().some((c) => c.name === 'color')) db.exec('ALTER TABLE people ADD COLUMN color TEXT');
   const q = {
     setting: db.prepare('SELECT value FROM settings WHERE name = ?'),
     addSetting: db.prepare('INSERT OR IGNORE INTO settings (name, value) VALUES (?, ?)'),
@@ -65,7 +74,8 @@ export function openDb(path) {
     addDeed: db.prepare('INSERT INTO deeds (at, who, tool, input, result) VALUES (?, ?, ?, ?, ?)'),
     deeds: db.prepare('SELECT at, who, tool, input, result FROM deeds WHERE at >= ? ORDER BY id LIMIT 500'),
     chatSince: db.prepare('SELECT at, source, name, text FROM chat WHERE at >= ? ORDER BY id LIMIT 400'),
-    rawPerson: db.prepare('SELECT id, name, link, first_at, last_at, talks FROM people WHERE id = ?'),
+    rawPerson: db.prepare('SELECT id, name, link, first_at, last_at, talks, color FROM people WHERE id = ?'),
+    setColor: db.prepare('UPDATE people SET color = ? WHERE id = ?'),
     addPerson: db.prepare(`INSERT INTO people (id, name, first_at, last_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET name = excluded.name`),
     touchPerson: db.prepare('UPDATE people SET talks = talks + 1, last_at = ? WHERE id = ?'),
@@ -73,7 +83,7 @@ export function openDb(path) {
     setLink: db.prepare('UPDATE people SET link = ? WHERE id = ?'),
     mergeStats: db.prepare(`UPDATE people SET talks = talks + ?, first_at = MIN(first_at, ?), last_at = MAX(last_at, ?)
       WHERE id = ?`),
-    people: db.prepare('SELECT id, name, link, first_at, last_at, talks FROM people WHERE link IS NULL ORDER BY last_at DESC LIMIT ?'),
+    people: db.prepare('SELECT id, name, link, first_at, last_at, talks, color FROM people WHERE link IS NULL ORDER BY last_at DESC LIMIT ?'),
     aliases: db.prepare('SELECT id, name FROM people WHERE link = ?'),
     byName: db.prepare('SELECT id FROM people WHERE lower(name) = lower(?) ORDER BY last_at DESC'),
     byNickname: db.prepare('SELECT person AS id FROM bonds WHERE character = ? AND lower(nickname) = lower(?)'),
@@ -85,6 +95,9 @@ export function openDb(path) {
     setNick: db.prepare('UPDATE bonds SET nickname = ? WHERE character = ? AND person = ?'),
     setFacts: db.prepare('UPDATE bonds SET facts = ? WHERE character = ? AND person = ?'),
     setPressure: db.prepare('UPDATE bonds SET pressure = ?, pressure_at = ? WHERE character = ? AND person = ?'),
+    setStatus: db.prepare('UPDATE bonds SET status = ? WHERE character = ? AND person = ?'),
+    setPranked: db.prepare('UPDATE bonds SET pranked_at = ? WHERE character = ? AND person = ?'),
+    dating: db.prepare("SELECT person FROM bonds WHERE character = ? AND status = 'dating'"),
     moveBond: db.prepare('UPDATE bonds SET person = ? WHERE character = ? AND person = ?'),
     dropBonds: db.prepare('DELETE FROM bonds WHERE person = ?'),
     dropCharacterBonds: db.prepare('DELETE FROM bonds WHERE character = ? OR person = ?'),
@@ -105,7 +118,8 @@ export function openDb(path) {
   };
   const facts = (r) => { try { return JSON.parse(r.facts); } catch { return []; } };
   const bondOut = (r) => ({ affinity: r?.affinity ?? 0, trust: r?.trust ?? 20, nickname: r?.nickname ?? null,
-    facts: r ? facts(r) : [], pressure: r?.pressure ?? 0, pressure_at: r?.pressure_at ?? 0 });
+    facts: r ? facts(r) : [], pressure: r?.pressure ?? 0, pressure_at: r?.pressure_at ?? 0, status: r?.status ?? 'none',
+    pranked_at: r?.pranked_at ?? 0 });
   // A person's own row: an alias (a linked Discord or game identity) leads to the one it was linked to.
   const canonical = (id) => {
     const r = q.rawPerson.get(id);
@@ -240,6 +254,33 @@ export function openDb(path) {
     findMemories: (ch, text, n = 8, asker = null) => q.memoriesFind.all(ch, `%${String(text).replace(/[\\%_]/g, (c) => `\\${c}`)}%`,
       asker ? canonical(asker)?.id ?? asker : '', n),
     allMemories: (n = 100) => q.memoriesAll.all(n),
+    /** A person's colour on Discord: the one an admin picked, else one from PALETTE that stays theirs. */
+    colorOf(id) {
+      const own = canonical(id);
+      if (own?.color) return own.color;
+      let h = 0;
+      for (const ch of String(own?.id ?? id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      return PALETTE[h % PALETTE.length];
+    },
+    setColor(id, color) {
+      const own = canonical(id);
+      if (own && (color === null || /^#[0-9a-f]{6}$/i.test(color))) q.setColor.run(color, own.id);
+    },
+    /** `ch` and a person: 'none', 'dating' or 'ex'. */
+    setStatus(ch, id, status) {
+      const own = canonical(id);
+      if (!own) return;
+      q.addBond.run(ch, own.id);
+      q.setStatus.run(status, ch, own.id);
+    },
+    /** Who `ch` is dating, if anyone (a person id). */
+    partner: (ch) => q.dating.get(ch)?.person ?? null,
+    pranked(ch, id, at = Date.now()) {
+      const own = canonical(id);
+      if (!own) return;
+      q.addBond.run(ch, own.id);
+      q.setPranked.run(at, ch, own.id);
+    },
     /** Times this person pushed `ch` out of character lately; it fades after a day of peace. */
     pressure(ch, id, at = Date.now()) {
       const b = this.bond(ch, id);

@@ -79,7 +79,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     db.addChat('bot', ch.name, text, now());
     db.meet(characterPersonId(ch.id), ch.name, { at: now() });
     const [r] = await Promise.all([game.act({ type: 'say', text, from: ch.name, by: ch.id, color: ch.chatColor,
-      ...(near ? { near } : {}) }), relay().chat || toDiscord ? chat.post({ text, as: ch.name }) : null]);
+      ...(near ? { near } : {}) }), relay().chat || toDiscord ? chat.post({ text, as: ch.name, color: ch.chatColor }) : null]);
     for (const other of brain.answerers?.(text, ch, depth) ?? []) {
       brain.hear({ source: 'character', name: ch.name, text, personId: characterPersonId(ch.id), only: other.id, depth: depth + 1 },
         (t, who) => botSays(t, who, { toDiscord, depth: depth + 1 })).catch((err) => log.error(err));
@@ -106,7 +106,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       db.meet(personId('game', e.name), e.name, { at: now() });
       if (/^!link\s*$/i.test(e.text.trim())) return linkCode(e.name);
       db.addChat('game', e.name, e.text, now());
-      if (relay().chat) chat.post({ text: e.text, as: e.name });
+      if (relay().chat) chat.post({ text: e.text, as: e.name, color: db.colorOf(personId('game', e.name)) });
       const admin = game.player(e.name)?.privs.includes('server') ?? false;
       // target: the character they were looking at, or stood next to, when they said it (the mod works it out).
       brain.hear({ source: 'game', name: e.name, text: e.text, admin, personId: personId('game', e.name),
@@ -341,7 +341,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'GET /api/admin') {
       return send(res, 200, {
         you, ...status(), settings: botSettings(db, config), relay: relay(), models: MODELS, efforts: EFFORTS,
-        characters: castOf(db, config, now()), people: db.people(100), memories: db.allMemories(80),
+        characters: castOf(db, config, now()), people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
+        memories: db.allMemories(80),
         activity: brain.activity?.() ?? [],
         policyTools: TOOLS.filter((t) => t.permission && t.permission !== 'admin').map((t) => ({ name: t.name, permission: t.permission })),
         missing: config.missing, chat: db.chat(80), usage: db.usage(14),
@@ -362,6 +363,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
       }
       if (body.listen === 'all' || body.listen === 'mentions') next.listen = body.listen;
+      if (typeof body.romance === 'boolean') next.romance = body.romance;
+      if (typeof body.pranks === 'boolean') next.pranks = body.pranks;
       if (body.idle && typeof body.idle === 'object') {
         const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.floor(Number(v)))) : d);
         next.idle = { enabled: body.idle.enabled !== false, after: num(body.idle.after, 15, 3600, 60),
@@ -423,6 +426,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       db.feel(ch, p.id, Number.isFinite(Number(body.affinity)) ? Number(body.affinity) : b.affinity,
         Number.isFinite(Number(body.trust)) ? Number(body.trust) : b.trust);
       if (typeof body.nickname === 'string') db.nickname(ch, p.id, body.nickname.trim() || null);
+      if (typeof body.color === 'string') db.setColor(p.id, body.color || null);
       return send(res, 200, { bond: db.bond(ch, p.id) });
     }
     // Join two people into one, as !link does: { keep, other } (ids); `other` becomes an alias of `keep`.

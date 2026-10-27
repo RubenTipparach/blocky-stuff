@@ -186,3 +186,31 @@ test('no idle turn with nobody online, when switched off, or past the hourly lim
   db.putJson('bot', { idle: { enabled: false } });
   assert.equal(await bot.idle(() => {}), null);
 });
+
+test('a prank needs real hostility, places only harmless blocks into air, and only once a day', async () => {
+  const blocks = [{ x: 1, y: 2, z: 3, item: 'default:gravel' }, { x: 1, y: 3, z: 3, item: 'default:mese' }];
+  const prankOnce = () => () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 'p', name: 'prank',
+    input: { person: 'alice', blocks } }] });
+  const { db, game, bot, client, tick } = setup([prankOnce(), text('Hmph.'), prankOnce(), text('Hmph!'), prankOnce(), text('Again!'),
+    text('Bah.')]);
+  tick(5 * 86_400_000);
+  db.putJson('bot', { cooldown: 0 });
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  db.meet('game:alice', 'alice');
+  const hear = () => bot.hear({ source: 'game', name: 'alice', text: 'Moss, you old rock', personId: 'game:alice' }, () => {});
+  await hear();
+  assert.match(client.calls[1].messages[2].content[0].content, /not angry enough/);
+  db.feel('moss', 'game:alice', -50, 10);
+  const pending = hear();
+  await new Promise((r) => setTimeout(r, 10));
+  const { actions } = game.sync({});
+  assert.deepEqual([actions[0].type, actions[0].soft, actions[0].nodes.length, actions[0].by], ['place', true, 1, 'moss']);
+  game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Placed 1 blocks.' }] });
+  await pending;
+  await hear();
+  assert.match(client.calls[5].messages[2].content[0].content, /already pranked alice today/);
+  // Switched off, the tool is not even offered.
+  db.putJson('bot', { cooldown: 0, pranks: false });
+  await hear();
+  assert.ok(!client.calls[6].tools.some((t) => t.name === 'prank'));
+});

@@ -11,10 +11,30 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxNodes } from './tools.mjs';
 import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, activeCast, characterSystem, characterContext, runCharacterTool,
-  personId, characterPersonId } from './character.mjs';
+  personId, characterPersonId, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
 
 // The character tools, as sent to the model.
 const INNER_TOOLS = CHARACTER_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
+
+// A character's revenge on someone she is hostile to: a few harmless blocks dropped into empty air on or around their
+// build. Never removes or replaces a block (the mod places it only where there is air), at most once a day each.
+const PRANK_TOOL = {
+  name: 'prank',
+  description: `Play a harmless prank on someone you are hostile to: drop up to ${PRANK_BLOCKS} blocks (${PRANK_ITEMS.join(', ')}) `
+    + 'into empty air on or around their build (a gravel hat on their tower, flowers in their doorway). It never removes or '
+    + 'replaces anything. At most once a day per person.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      person: { type: 'string', description: 'Their name as you know it.' },
+      blocks: { type: 'array', minItems: 1, maxItems: PRANK_BLOCKS, items: { type: 'object',
+        properties: { x: { type: 'integer' }, y: { type: 'integer' }, z: { type: 'integer' }, item: { type: 'string', enum: PRANK_ITEMS } },
+        required: ['x', 'y', 'z', 'item'], additionalProperties: false } },
+    },
+    required: ['person', 'blocks'], additionalProperties: false,
+  },
+};
+const DAY = 86_400_000;
 
 // The tools that change the world: what the daily summary tells of.
 export const ACTS = new Set(TOOLS.filter((t) => t.permission).map((t) => t.name));
@@ -54,6 +74,10 @@ export function botSettings(db, config) {
     // Most LLM calls a day across everyone, so a busy day cannot run up the bill. 0 is no limit.
     perDay: saved.perDay ?? 1000,
     policy: { ...DEFAULT_POLICY, ...(saved.policy ?? {}) },
+    // Flirting and dating with characters who are fond of someone, and pranks by those who are hostile; both may be
+    // switched off on /admin.
+    romance: saved.romance ?? true,
+    pranks: saved.pranks ?? true,
     // 'all' (the first value): every chat line gets an answer. 'mentions': only lines that name a character.
     listen: saved.listen === 'mentions' ? 'mentions' : 'all',
     // The hour (UTC) the daily summary goes to Discord and the game; -1 is off. 16:00 UTC is 9 in the morning in
@@ -199,8 +223,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     const asker = { name: msg.name, admin: msg.admin === true };
     const world = msg.source === 'character' ? [] : toolsFor(asker, s.policy);
     const tools = [...world.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
-      ...INNER_TOOLS];
-    const turn = { speakerId: msg.personId, moved: new Map() };
+      ...INNER_TOOLS, ...(s.pranks && msg.source !== 'character' ? [PRANK_TOOL] : [])];
+    const turn = { speakerId: msg.personId, moved: new Map(), romance: s.romance };
     const messages = [{ role: 'user', content: situation(ch, msg, asker, direct) }];
     const g = actingAs(ch);
     for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -216,7 +240,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       messages.push({ role: 'assistant', content: response.content });
       const results = await Promise.all(uses.map(async (use) => {
         const r = CHARACTER_TOOL_NAMES.has(use.name) ? runCharacterTool(db, ch, use.name, use.input, turn, now())
-          : await runTool(use.name, use.input, { game: g, asker, policy: s.policy });
+          : use.name === 'prank' ? await prank(ch, use.input, msg.personId, s)
+            : await runTool(use.name, use.input, { game: g, asker, policy: s.policy });
         log.log(`${ch.name} ${use.name} for ${asker.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
         if (r.ok && ACTS.has(use.name)) {
           db.addDeed(`${asker.name} (by ${ch.name})`, use.name, use.input, r.message, now());
@@ -229,6 +254,29 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       messages.push({ role: 'user', content: results });
     }
     return 'That took me too many steps. Could you ask for something smaller?';
+  }
+
+  /** A prank by `ch`, if she is hostile enough to the person and has not pranked them today. */
+  async function prank(ch, input, speakerId, s) {
+    if (!s.pranks) return { ok: false, message: 'Pranks are switched off on this server.' };
+    const speaker = speakerId && db.person(speakerId);
+    const p = speaker && [speaker.name, db.bond(ch.id, speaker.id).nickname].some((v) => v && v.toLowerCase() === String(input?.person).toLowerCase())
+      ? speaker : db.peopleNamed(ch.id, String(input?.person ?? ''))[0];
+    if (!p) return { ok: false, message: `You do not know anyone called ${input?.person}.` };
+    const b = db.bond(ch.id, p.id);
+    if (b.affinity > PRANK_AT) return { ok: false, message: `You are not angry enough with ${p.name} for that (affinity ${b.affinity}).` };
+    if (b.pranked_at && now() - b.pranked_at < DAY) return { ok: false, message: `You already pranked ${p.name} today. Let it go for now.` };
+    const blocks = (Array.isArray(input?.blocks) ? input.blocks : []).slice(0, PRANK_BLOCKS)
+      .filter((x) => PRANK_ITEMS.includes(x?.item)).map(({ x, y, z, item }) => ({ x, y, z, item }));
+    if (!blocks.length) return { ok: false, message: `Use only ${PRANK_ITEMS.join(', ')}.` };
+    const r = await actingAs(ch).act({ type: 'place', nodes: blocks, soft: true });
+    if (r.ok) {
+      db.pranked(ch.id, p.id, now());
+      db.addDeed(`${ch.name} (a prank on ${p.name})`, 'prank', blocks, r.message, now());
+      db.remember(ch.id, p.id, `Pranked ${p.name}: ${r.message}`, 3, now());
+      note('prank', ch, p.name, `${blocks.length} blocks at (${blocks[0].x}, ${blocks[0].y}, ${blocks[0].z}): ${r.message}`);
+    }
+    return r;
   }
 
   async function call(s, system, tools, messages) {
@@ -249,7 +297,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   function systemPrompt(ch) {
     return 'You are a character living on a Luanti server (a voxel sandbox game, the Minetest Game). People talk to '
       + 'you in the game\'s chat or from the server\'s Discord channel; both are the same conversation, and people in '
-      + `either may talk with you or ask you to do things.\n\n${characterSystem(ch, cast())}\n\n`
+      + `either may talk with you or ask you to do things.\n\n${characterSystem(ch, cast(), botSettings(db, config))}\n\n`
       + 'How you answer:\n'
       + '- Your reply is shown in a chat box, so keep it short: one to three sentences, plain text, no markdown, '
       + 'no lists, no headings. Write only your own words: no name prefix, never another character\'s lines.\n'
@@ -306,7 +354,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     if (!deeds.length && !lines.length) return null;
     const did = deeds.map((d) => `${new Date(d.at).toISOString().slice(11, 16)} for ${d.who}: ${d.tool} ${d.input} -> ${d.result}`);
     const said = lines.map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.name}: ${c.text}`);
-    const response = await call(s, `You are a character on a Luanti server.\n\n${characterSystem(teller, cast())}`, null,
+    const response = await call(s, `You are a character on a Luanti server.\n\n${characterSystem(teller, cast(), s)}`, null,
       [{ role: 'user', content: `Here is the last day on the server.\n\nWhat the characters did in the world `
         + `(${deeds.length}):\n${did.join('\n') || '(nothing)'}\n\nChat (${lines.length} lines):\n${said.join('\n') || '(none)'}\n\n`
         + 'Write the daily summary for the server\'s Discord channel: what you and the others built and did, for whom '
@@ -343,8 +391,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       const self = { name: ch.name, admin: true };
       const tools = [...toolsFor(self, s.policy).filter((x) => IDLE_TOOLS.has(x.name))
         .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
-      ...INNER_TOOLS.filter((x) => x.name !== 'pressed')];
-      const turn = { speakerId: null, moved: new Map() };
+      ...INNER_TOOLS.filter((x) => x.name !== 'pressed' && x.name !== 'set_relationship'), ...(s.pranks ? [PRANK_TOOL] : [])];
+      const turn = { speakerId: null, moved: new Map(), romance: s.romance };
       const g = actingAs(ch);
       const others = all.filter((c) => c.id !== ch.id);
       const sites = others.filter((c) => c.project).map((c) => `${c.name} is building ${c.project.title} at `
@@ -384,6 +432,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
           const size = use.name === 'fill_box' ? (boxNodes(use.input ?? {})?.length ?? Infinity)
             : use.name === 'place_blocks' ? (use.input?.blocks?.length ?? 0) : 0;
           if (CHARACTER_TOOL_NAMES.has(use.name) && use.name !== 'pressed') r = runCharacterTool(db, ch, use.name, use.input, turn, now());
+          else if (use.name === 'prank' && s.pranks) r = await prank(ch, use.input, null, s);
           else if (!IDLE_TOOLS.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
           else if (placed + size > IDLE_BLOCKS) r = { ok: false, message: `That would pass ${IDLE_BLOCKS} blocks for this turn: keep it smaller.` };
           else {

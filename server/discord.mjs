@@ -43,7 +43,9 @@ export function createDiscord(opts = {}) {
   }
 
   /**
-   * Post to every channel. message: { text } or { embed }, with `as` (a name) for webhook posts.
+   * Post to every channel. message: { text } or { embed }, with `as` (who said it) and `color` ("#rrggbb"): a line
+   * with a colour goes as a small embed, the name over a stripe of that colour, so each speaker is easy to pick out
+   * (owner, 2026-10-27: "names from players in game are all the same color. Please assign colors to them").
    * Returns { ok, sent }.
    */
   async function post(message) {
@@ -52,8 +54,10 @@ export function createDiscord(opts = {}) {
     const body = {
       allowed_mentions: { parse: [] },
       ...(message.embed ? { embeds: [message.embed] }
-        : { content: mode === 'bot' && message.as ? `**${clean(message.as, 64)}**: ${clean(message.text, 1800)}`
-          : clean(message.text, 1900) }),
+        : message.color && message.as ? { embeds: [{ color: parseInt(String(message.color).slice(1), 16) || 0x9aa8ff,
+          author: { name: clean(message.as, 64) }, description: clean(message.text, 1900) }] }
+          : { content: mode === 'bot' && message.as ? `**${clean(message.as, 64)}**: ${clean(message.text, 1800)}`
+            : clean(message.text, 1900) }),
     };
     let sent = 0;
     // One after another, so a burst to several servers stays inside Discord's rate limits.

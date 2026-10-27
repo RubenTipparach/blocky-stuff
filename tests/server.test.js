@@ -51,8 +51,15 @@ test('the bridge takes the mod\'s key only, and relays chat to Discord', async (
   assert.deepEqual(r.json.characters.map((c) => c.name), ['Blocky', 'Moss']);
   assert.ok(s.db.chat(5).some((c) => c.source === 'game' && c.text === 'hello'));
   await new Promise((done) => setTimeout(done, 20));
+  // A player's line goes as a small embed: their name over a stripe of their own colour.
   assert.equal(s.posts[0].body.username, 'alice');
-  assert.equal(s.posts[0].body.content, 'hello');
+  assert.equal(s.posts[0].body.embeds[0].author.name, 'alice');
+  assert.equal(s.posts[0].body.embeds[0].description, 'hello');
+  const first = s.posts[0].body.embeds[0].color;
+  assert.equal(first, parseInt(s.db.colorOf('game:alice').slice(1), 16));
+  // The same person keeps the same colour; an admin's pick wins.
+  s.db.setColor('game:alice', '#123456');
+  assert.equal(s.db.colorOf('game:alice'), '#123456');
   await s.close();
 });
 

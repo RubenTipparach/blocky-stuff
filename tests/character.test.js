@@ -104,3 +104,19 @@ test('characters know each other: each has a bond with the other, and removing o
   assert.equal(db.bond('blocky', 'char:moss').affinity, 0);
   assert.equal(db.person('char:moss'), null);
 });
+
+test('dating takes real closeness, one partner at a time; a breakup leaves an ex', () => {
+  const { db, moss } = fresh();
+  const ask = (person, status) => runCharacterTool(db, moss, 'set_relationship', { person, status, reason: 'asked' }, turn(null));
+  assert.match(ask('Ruben', 'dating').message, /do not feel that way/);
+  db.feel('moss', 'game:ruben', 75, 65);
+  db.feel('moss', 'game:alice', 90, 90);
+  assert.equal(ask('Ruben', 'dating').ok, true);
+  assert.match(ask('alice', 'dating').message, /dating Ruben already/);
+  assert.match(personCard(db, moss, 'game:ruben'), /You are dating them/);
+  assert.equal(ask('Ruben', 'none').ok, true);
+  assert.equal(db.bond('moss', 'game:ruben').status, 'ex');
+  assert.equal(ask('alice', 'dating').ok, true);
+  assert.equal(runCharacterTool(db, moss, 'set_relationship', { person: 'Ruben', status: 'dating', reason: 'x' },
+    { ...turn(null), romance: false }).message, 'Romance is switched off on this server.');
+});
