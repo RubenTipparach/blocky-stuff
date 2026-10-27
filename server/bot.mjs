@@ -586,16 +586,22 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   // model: s.model (talking) or s.buildModel (building) (owner, 2026-10-27: "Can we route API to two models? speech via
   // haiku and building via opus").
   async function call(s, system, tools, messages, model = s.model) {
-    const response = await llm.beta.messages.create({
+    const params = {
       model,
-      // Building turns write long lists of blocks: room for them (a reply cut off mid-call is handled, but costs a round).
-      max_tokens: tools ? 16000 : 4000,
+      // Building turns write long lists of blocks: room for them (owner, 2026-10-27: "32 k token limit"; a reply cut off
+      // mid-call is still handled, but costs a round).
+      max_tokens: tools ? 32000 : 4000,
       system,
       ...(tools ? { tools } : {}),
       messages,
       output_config: { effort: s.effort },
       ...(FALLBACK_MODELS.has(model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
-    });
+    };
+    // A reply that long may take minutes, so it streams (the SDK refuses such a request otherwise), and the whole
+    // message is waited for. Transient failures (overload, rate limits, dropped connections) are retried by the SDK.
+    const response = llm.beta.messages.stream
+      ? await llm.beta.messages.stream(params).finalMessage()
+      : await llm.beta.messages.create(params);
     db.addUsage(response.usage?.input_tokens ?? 0, response.usage?.output_tokens ?? 0, now());
     return response;
   }
