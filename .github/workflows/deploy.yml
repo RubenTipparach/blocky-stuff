@@ -4,6 +4,10 @@
 name: deploy
 on:
   push:
+    # Notes and docs change nothing that runs: no deploy, so players are not disconnected for them.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch:
 permissions:
   contents: read
