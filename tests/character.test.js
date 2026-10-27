@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../server/db.mjs';
 import { runCharacterTool, characterContext, personCard, cast, saveCharacter, removeCharacter, BREAK_AFTER,
-  BREAK_AFTER_TRUSTED } from '../server/character.mjs';
+  BREAK_AFTER_TRUSTED, traitsOf, needsOf, changeNeeds } from '../server/character.mjs';
 
 const fresh = () => {
   const db = openDb(':memory:');
@@ -162,4 +162,36 @@ test('a tool a character needs goes on the wish list, counted once per thing', (
   runCharacterTool(db, moss, 'request_tool', { what: 'Paint signs', why: 'a shop sign' }, undefined, 3);
   const list = db.json('tool.requests', []);
   assert.deepEqual(list.map((r) => [r.what, r.count, r.by]), [['Plant trees', 2, ['Blocky', 'Moss']], ['Paint signs', 1, ['Moss']]]);
+});
+
+test('social ties: respect, talks, gifts and inside jokes are kept per bond and shown to her', () => {
+  const { db, blocky, moss } = fresh();
+  db.meet('char:moss', 'Moss', { at: 0 });
+  const t = { speakerId: 'char:moss', moved: new Map() };
+  runCharacterTool(db, blocky, 'feel_about', { person: 'Moss', affinity: 5, respect: 8, reason: 'her tower is grand' }, t, 10);
+  runCharacterTool(db, blocky, 'inside_joke', { person: 'Moss', joke: 'the rock that would not listen' }, t, 11);
+  db.social('blocky', 'char:moss', { talked: true, at: 12 });
+  db.social('blocky', 'char:moss', { gave: true });
+  const b = db.bond('blocky', 'char:moss');
+  assert.deepEqual([b.respect, b.familiarity, b.gifts_given, b.jokes], [8, 1, 1, ['the rock that would not listen']]);
+  const ctx = characterContext(db, blocky, { speakerId: 'char:moss', cast: [blocky, moss], now: 20 });
+  assert.match(ctx, /1 talk/);
+  assert.match(ctx, /the rock that would not listen/);
+  assert.match(ctx, /Your personality .*(very|rather) sociable/);
+});
+
+test('personality sliders are set on /admin and stay put; needs drain with work, fill with talk, and recover with time', () => {
+  const { db, moss } = fresh();
+  saveCharacter(db, 'moss', { traits: { playful: 90, nonsense: 5 } });
+  const m = cast(db).find((c) => c.id === 'moss');
+  assert.equal(traitsOf(m).playful, 90);
+  assert.equal(traitsOf(m).ambitious, 80); // the others as they were
+  const h = 3_600_000;
+  changeNeeds(db, m, { energy: -60, connection: -40, fun: -40 }, 0);
+  assert.deepEqual(needsOf(m, 0), { energy: 20, connection: 20, fun: 20 });
+  assert.deepEqual(needsOf(m, 2 * h), { energy: 44, connection: 12, fun: 14 }); // rest comes back; company and fun fade
+  changeNeeds(db, m, { connection: 18, fun: 14 }, 2 * h);
+  const ctx = characterContext(db, cast(db).find((c) => c.id === 'moss'), { now: 2 * h });
+  assert.match(ctx, /lonely|bored|fun/);
+  assert.match(ctx, /energy 44, connection 30, fun 28/);
 });

@@ -10,8 +10,9 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxCount } from './tools.mjs';
+import { findStyles, styleText } from './styles.mjs';
 import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, activeCast, characterSystem, characterContext, runCharacterTool,
-  personId, characterPersonId, setState, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
+  personId, characterPersonId, setState, traitsOf, needsOf, changeNeeds, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
 import { randomBytes } from 'node:crypto';
 
 // The character tools, as sent to the model.
@@ -90,32 +91,50 @@ const REPLY_MAX = 450;
 const QUIET = 'QUIET';
 // How to build something worth looking at (owner, 2026-10-27: "the houses are lacking in style. They all look super
 // blocky", "Houses should have various styles and materials. Bricks wood stone glass... All kinds of houses").
-const STYLE_GUIDE = '- Build with style, never a plain box with a flat lid. Every house gets: a foundation one block '
+const STYLE_GUIDE = '- People must be able to walk in (owner: "the floor is blocking the door"). Lay the floor AT ground '
+  + 'level, replacing the top ground block (find_ground gives its y), so the walls and door start one above it. A door '
+  + 'opening is 1 wide and 2 high, its lower block level with the floor (cut it with fill_box air, then hang the door). '
+  + 'Outside the door: solid ground or a step of stairs at the same height, and a path of at least 2 blocks out to open '
+  + 'ground. Inside: rooms at least 3 high above the floor. When the door is in, call check_entrance on the doorway; a '
+  + 'building is not done until it passes.\n'
+  + '- Build with style, never a plain box with a flat lid. Every house gets: a foundation one block '
   + 'wider in a different stone; corner posts of logs or a contrasting block; walls that mix two materials (a base '
   + 'course, a band under the eaves); framed windows (glass with a sill or slabs above), a real door '
-  + '(doors:door_wood...) with a step in front; a pitched roof from build_roof with an overhang, in a colour that '
-  + 'contrasts with the walls; and details: a chimney, lanterns or wall torches, fences, a porch, flowers, a path. '
-  + 'Shapes beat boxes: an L-plan or a wing, two storeys, a tower, a balcony.\n'
-  + '- Vary the style; each house should look unlike the last (yours and the others\'). Some styles and their '
-  + 'blocks: timber-frame (default:wood or pine_wood walls between default:tree posts and beams, cobble base, '
-  + 'stair_wood gable roof); brick townhouse (default:brick, stonebrick trims, lots of glass, stair_stonebrick or '
-  + 'stair_pine_wood roof, two storeys); log cabin (default:pine_tree or default:tree walls, stair_pine_wood roof, '
-  + 'stone chimney); stone cottage (default:cobble with mossycobble, wood trims, stair_wood roof, flower beds); '
-  + 'desert house (default:desert_stonebrick or sandstonebrick, flat roof with a rim, desert_stone pillars, an inner '
-  + 'courtyard); jungle stilt house (default:junglewood on jungletree stilts, stair_junglewood hip roof, a ladder); '
-  + 'acacia ranch (default:acacia_wood, acacia_tree posts, wide low hip roof, fenced yard); modern glass house '
-  + '(default:glass or obsidian_glass walls on default:stone_block or steelblock frames, flat roof, meselamps); '
-  + 'castle keep (stonebrick, crenellations, towers, slit windows, a gate). Look names up with find_items.\n';
+  + '(doors:door_wood...) with a step in front; a real roof from build_roof, in a colour that contrasts with the '
+  + 'walls; and details: a chimney, lanterns or wall torches, fences, a porch, flowers, a path. Shapes beat boxes: '
+  + 'an L-plan or a wing, two storeys, a tower, a balcony.\n'
+  + '- The roof makes the building (owner: "Roofs are important, they need to learn different roof shapes"). Choose '
+  + 'its shape on purpose and vary it: gable (a prism) for cottages, steep gable for alpine and Gothic, hip for '
+  + 'ranches and villas, pyramid over square towers and pavilions, gambrel for barns, shed for lean-tos and modern '
+  + 'wings, dome for temples and observatories, cone over round towers, castle (crenellations) for keeps and walls. '
+  + 'Mix them on one building: a gable main house with a shed porch, a keep with cone-roofed corner towers.\n'
+  + '- Vary the style; each building should look unlike the last (yours and the others\'). browse_styles has a '
+  + 'catalogue of over a hundred styles from every culture and time (Egyptian temples, Roman villas, Viking longhouses, '
+  + 'Gothic cathedrals, Japanese castles, Mughal tombs, Pueblo villages, Art Deco towers, fantasy wizard towers...): '
+  + 'look one up and follow its walls, roof and features. A few to start with: timber-frame (default:wood or pine_wood walls between default:tree posts and beams, cobble base, '
+  + 'stair_wood steep gable); brick townhouse (default:brick, stonebrick trims, lots of glass, two storeys, '
+  + 'stair_stonebrick gable or hip); log cabin (default:pine_tree or default:tree walls, stair_pine_wood gable, '
+  + 'stone chimney); stone cottage (default:cobble with mossycobble, wood trims, stair_wood gable, flower beds); '
+  + 'barn or farmhouse (default:wood with a red wool or brick band, stair_wood gambrel, big doors); desert house '
+  + '(default:desert_stonebrick or sandstonebrick, flat roof or a sandstone dome, desert_stone pillars, an inner '
+  + 'courtyard); jungle stilt house (default:junglewood on jungletree stilts, stair_junglewood hip, a ladder); '
+  + 'acacia ranch (default:acacia_wood, acacia_tree posts, wide low hip, fenced yard); modern glass house '
+  + '(default:glass or obsidian_glass walls on default:stone_block or steelblock frames, flat or shed roof, meselamps); '
+  + 'castle keep (stonebrick, a castle roof, round corner towers with cones, slit windows, a gate); temple or '
+  + 'observatory (stone_block or marble-like blocks, columns, a dome). Look names up with find_items.\n';
 // "I'll clear it", "I will plant", "let me build", "I'm going to start": a promise of work.
 const PROMISE = /\b(i'?ll|i will|i'?m going to|let me|i can)\s+(\w+\s+){0,3}?(clear|build|make|plant|sow|dig|lay|fell|cut|start|put|fix|add|do|get|set|level|craft|farm|plow|till)\b/i;
 // What a character may use on its own: look, build, walk. Never anything done to a player.
-const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'fill_box', 'place_blocks', 'build_roof', 'clear_area', 'farm', 'harvest', 'walk_to']);
+const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'inspect_area', 'check_entrance', 'browse_styles', 'fill_box', 'place_blocks', 'build_roof', 'clear_area', 'farm', 'harvest', 'walk_to']);
 // Most blocks one idle turn may place, all its tool calls together.
 export const IDLE_BLOCKS = 20_000; // blocks a character may set in one turn of her own
 // A person keeps talking to the character they last talked with for this long, without naming it.
 const STICKY_MS = 15 * 60_000;
 // Characters answering characters: at most this many in a row, so two of them cannot talk forever.
-const CHAIN_MAX = 2;
+// How many lines characters say to each other in a row, one answering the other (a chat of two each, at most).
+const CHAIN_MAX = 4;
+// The share of the day's calls the characters may spend on their own turns (work, chats, kindness).
+const OWN_SHARE = 0.8;
 
 /** The bot's settings as kept on /admin, with the first values filled in. */
 export function botSettings(db, config) {
@@ -152,8 +171,14 @@ export function botSettings(db, config) {
     // hour across the cast, each held to IDLE_BLOCKS.
     idle: {
       enabled: saved.idle?.enabled ?? true,
-      after: Number.isFinite(saved.idle?.after) ? saved.idle.after : 60,
-      perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 30,
+      // Seconds of quiet before an own turn; each character waits between this and twice it (5 to 10 minutes).
+      after: Number.isFinite(saved.idle?.after) ? saved.idle.after : 300,
+      perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 12,
+      // How likely an own turn is a chat with another character instead of work, in percent, before it grows with
+      // every turn of work since her last chat.
+      social: Number.isFinite(saved.idle?.social) ? saved.idle.social : 30,
+      // How likely a turn of work is something nice for a friend instead of her own project, in percent.
+      kindness: Number.isFinite(saved.idle?.kindness) ? saved.idle.kindness : 15,
     },
   };
 }
@@ -228,6 +253,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   async function hear(msg, reply) {
     const s = botSettings(db, config);
     if (!s.enabled) return null;
+    // Characters talking among themselves share their own turns' part of the day's calls.
+    if (msg.source === 'character' && s.perDay && todayCalls() >= s.perDay * OWN_SHARE) return null;
     const pid = msg.personId ?? personId(msg.source, msg.name);
     const m = { ...msg, personId: pid };
     const chosen = responders(m, s);
@@ -266,6 +293,11 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         note(answer ? 'answered' : 'quiet', ch, m.name, `${m.source === 'discord' ? '[Discord] ' : ''}"${m.text}"`
           + `${m.target === ch.id ? ' (looking at her)' : ''} -> ${answer ?? '(stayed quiet)'}`);
         if (m.source !== 'character') lastWith.set(pid, { id: ch.id, at: now() });
+        if (answer) {
+          db.social(ch.id, pid, { talked: true, at: now() }); // one more talk between them
+          // Talking fills her up a little; banter with another character more so.
+          changeNeeds(db, ch, m.source === 'character' ? { energy: 3, connection: 10, fun: 8 } : { connection: 5, fun: 2 }, now());
+        }
         if (answer) await reply(answer, ch);
         first ??= answer;
       } catch (err) {
@@ -290,7 +322,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
    * themselves, fillers and reactions, no. A cheap call with no tools; when in doubt (or it fails), she answers.
    */
   async function worth(ch, m, s) {
-    if (s.perDay && todayCalls() >= s.perDay) return { answer: false, why: 'the daily limit is reached' };
+    // Past the daily limit: answered anyway, so the asker hears "resting for today" (limited, in hear) and not silence
+    // (owner, 2026-10-27: "Aw nobody woke up").
+    if (s.perDay && todayCalls() >= s.perDay) return { answer: true, why: 'the daily limit is reached' };
     const names = cast().map((c) => c.name);
     const lines = db.chat(12).map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.source === 'bot' ? `${c.name} (character)` : c.name}: ${c.text}`);
     const last = m.personId && lastWith.get(m.personId);
@@ -551,8 +585,10 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       + 'fill_box (floors, walls, roofs; hollow for rooms, air to cut doors and windows) and place_blocks for '
       + 'details. Build a few blocks away from players, never on top of them. Say what you built and where.\n'
       + '- You have no inventory and need no items or hand tools: no axe, pick, hoe or materials. Your tools act on the '
-      + 'world directly (clear_area fells trees, fill_box with air digs, farm tills). Never turn a job down for lack of '
-      + 'an item, even if you said so before: that was a mistake.\n'
+      + 'world directly (clear_area fells trees, fill_box with air digs, farm tills). Every block and item in the game is '
+      + 'yours to use, without limit (owner: "give bots all items"): look the exact name up with find_items. Doors '
+      + '(doors:door_wood, door_glass, door_steel...), fences, gates, ladders, lamps, wool, flowers, furniture all exist. '
+      + 'Never turn a job down for lack of an item, even if you said so before: that was a mistake.\n'
       + '- Big jobs are fine: fill_box sets up to 100,000 blocks at once, and clear_area takes the trees off an area or '
       + 'levels it flat (up to about 316 by 316, without cutting into builds). Clear and level a site before a large '
       + 'build instead of saying it cannot be done; for a huge area, work through it in parts.\n'
@@ -585,22 +621,56 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   function context() {
     const lines = db.chat(CONTEXT_LINES).map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.name}: ${c.text}`);
     const online = game.connected ? game.players.map((p) => `${p.name} at (${p.pos?.x}, ${p.pos?.y}, ${p.pos?.z})`
-      + `${p.privs.includes('server') ? ' [admin]' : ''}`).join('; ') || 'nobody' : 'the game server is not running';
+      + `${p.look ? ` facing ${p.look.facing}` : ''}${p.privs.includes('server') ? ' [admin]' : ''}`).join('; ') || 'nobody'
+      : 'the game server is not running';
     return `Recent chat (oldest first):\n${lines.join('\n') || '(none)'}\n\nOnline: ${online}`;
   }
 
   const onlineIds = () => game.players.map((p) => personId('game', p.name));
 
+  /**
+   * The speaker in the world, if they are in it: by their game name, or (from Discord) the game account their Discord
+   * one is linked to. Null when they are not in the game.
+   */
+  function speakerInWorld(msg) {
+    if (msg.source === 'game') return game.player(msg.name);
+    const own = msg.personId && db.person(msg.personId);
+    if (!own) return null;
+    const ids = [own.id, ...(db.people().find((p) => p.id === own.id)?.aliases ?? []).map((a) => a.id)];
+    const name = ids.find((id) => id.startsWith('game:'))?.slice(5);
+    return name ? game.player(name) : null;
+  }
+  const OPPOSITE = { north: 'south', south: 'north', east: 'west', west: 'east', 'north-east': 'south-west',
+    'south-west': 'north-east', 'north-west': 'south-east', 'south-east': 'north-west' };
+  /**
+   * Where the speaker stands and looks, and how to read "here" and "there" by it (owner, 2026-10-27: "bots should
+   * also be able to read my position when I talk about stuff so they know what 'here' or 'over there' means").
+   */
+  function placeLine(msg) {
+    const p = speakerInWorld(msg);
+    if (!p?.pos) return '';
+    const l = p.look;
+    return `\n\nWhere ${msg.name} is: in the world${msg.source === 'discord' ? ' (as ' + p.name + ', though writing from Discord)' : ''} `
+      + `at (${p.pos.x}, ${p.pos.y}, ${p.pos.z})${l ? `, facing ${l.facing}${l.pitch > 25 ? ', looking up' : l.pitch < -25 ? ', looking down' : ''}` : ''}`
+      + `${l?.at ? `, looking at ${l.at.block} at (${l.at.x}, ${l.at.y}, ${l.at.z}), ${l.at.dist} blocks away` : ''}. When they say "here" `
+      + 'they mean where they stand (build beside them, not on them)'
+      + `${l?.at ? `; "there", "that", "over there" most likely the spot they are looking at` : ''}`
+      + `${l ? `; "in front of me" is toward the ${l.facing}, "behind me" the ${OPPOSITE[l.facing]}` : ''}.`;
+  }
+
   function situation(ch, msg, asker, direct) {
-    const where = msg.source === 'discord' ? ' (on Discord, not in the world)' : msg.source === 'character'
+    const where = msg.source === 'discord' ? (speakerInWorld(msg) ? ' (on Discord, and in the world too)' : ' (on Discord, not in the world)') : msg.source === 'character'
       ? ' (a fellow character)' : '';
     const head = `${context()}\n\n${characterContext(db, ch, { speakerId: msg.personId, others: onlineIds(), cast: cast(), now: now() })}`
       + `\n\n${asker.name}${where}${asker.admin ? ' (an admin)' : ''}`;
     if (msg.source === 'character') {
-      return `${head} says to you: ${msg.text}\n\nAnswer in character if you have something to say back; if the `
-        + 'conversation has run its course, answer with exactly QUIET.';
+      return `${head} says to you: ${msg.text}\n\nYou two live and build here side by side. Answer in character: react `
+        + 'to what she said, joke or tease back, share how you honestly feel, ask her something back. Your feelings about '
+        + 'her grow from these talks: if this changes them, feel_about her; remember what matters. A few lines back and '
+        + 'forth is a good chat; when it has run its course, answer with exactly QUIET.';
     }
     return `${head} ${direct ? 'says to you' : 'says (not by your name, but you are the one answering)'}: ${msg.text}`
+      + placeLine(msg)
       + (direct ? '' : '\n\nAnswer them. If it is plainly meant for another player, a short friendly word is enough.');
   }
 
@@ -653,25 +723,152 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
    * idle spell. Most turns she works on her project (planning one if she has none); she says a line only now and
    * then, through `reply(text, ch)`. Returns the line, or null (no turn, or she worked quietly).
    */
+  // ---- Talking with each other ----
+  // Each with the trait that makes her likelier to bring it up.
+  const CHAT_TOPICS = [
+    ['her latest build: how it looks, its style, what you like about it (or would tease her about)', 'ambitious'],
+    ['what you each did today, and how the day went', 'sociable'],
+    ['an idea: something you would love to build next, or together', 'ambitious'],
+    ['a joke, or something funny that happened lately, or one of your inside jokes', 'playful'],
+    ['how you feel about her lately, honestly', 'sensitive'],
+    ['a player you both know, kindly', 'sociable'],
+    ['a memory the two of you share', 'sensitive'],
+    ['the style she builds in, and the one you are drawn to', 'playful'],
+  ];
+  /** What `c` has been up to: her project, her last finished one, what she did lately. */
+  const doings = (c, since) => {
+    const mine = db.deeds(since).filter((d) => d.who.includes(`by ${c.name}`) || d.who.startsWith(`${c.name} (own idea)`));
+    return [c.project ? `building ${c.project.title}${c.project.style ? ` (${c.project.style})` : ''} at (${c.project.site.x}, `
+      + `${c.project.site.y}, ${c.project.site.z}), ${c.project.done} of ${c.project.steps.length} steps; lately: ${(c.project.notes ?? []).slice(-2).join('; ')}` : null,
+    c.lastProject ? `finished ${c.lastProject.title}${c.lastProject.style ? ` (${c.lastProject.style})` : ''} at (${c.lastProject.site.x}, `
+      + `${c.lastProject.site.y}, ${c.lastProject.site.z})` : null,
+    mine.length ? `${mine.length} things done in the world since this morning` : null].filter(Boolean).join('; ') || 'nothing much yet';
+  };
+
+  /**
+   * Whom `ch` does something nice for: another character or a player in the game, the one she is fondest of most
+   * likely (a little chance in it). Returns { name, player, where }, or null when there is nobody.
+   */
+  function giftFor(ch, all) {
+    const where = (c) => {
+      const body = game.bodies?.find((b) => b.id === c.id);
+      const site = c.project?.site ?? c.lastProject?.site;
+      return site ? `building around (${site.x}, ${site.y}, ${site.z})` : body ? `at (${body.x}, ${body.y}, ${body.z})` : null;
+    };
+    const options = [
+      ...all.filter((c) => c.id !== ch.id && where(c)).map((c) => ({ name: c.name, player: false, where: where(c), id: c.id, pid: characterPersonId(c.id) })),
+      ...game.players.filter((p) => p.pos).map((p) => ({ name: p.name, player: true, where: `at (${p.pos.x}, ${p.pos.y}, ${p.pos.z})`, pid: personId('game', p.name) })),
+    ];
+    if (!options.length) return null;
+    const score = (o) => db.bond(ch.id, db.person(o.pid)?.id ?? o.pid).affinity + 40 * random();
+    return options.map((o) => [score(o), o]).sort((a, b) => b[0] - a[0])[0][1];
+  }
+
+  /** One character turns to another for a friendly word; the other answers (and they may go on a little). */
+  async function chatTurn(ch, mate, all, s, reply) {
+    const t = now();
+    // Both known as people, so feelings and talks between them can be kept even before either has said a word.
+    for (const c of [ch, mate]) db.meet(characterPersonId(c.id), c.name, { at: t, talked: false });
+    // What she brings up: her personality leans one way, and her needs another (bored: a laugh; tired: the day;
+    // lonely: feelings and memories).
+    const tr = traitsOf(ch);
+    const nd = needsOf(ch, t);
+    const need = (i) => (i === 3 && nd.fun < 45 ? 50 : 0) + (i === 1 && nd.energy < 40 ? 50 : 0)
+      + ((i === 4 || i === 6) && nd.connection < 40 ? 35 : 0);
+    const weights = CHAT_TOPICS.map(([, trait], i) => 20 + tr[trait] + need(i));
+    let pick = random() * weights.reduce((a, b) => a + b, 0);
+    const [topic] = CHAT_TOPICS.find((_, i) => (pick -= weights[i]) < 0) ?? CHAT_TOPICS[0];
+    const look = new Set(['inspect_area', 'find_ground', 'check_entrance', 'browse_styles']);
+    const tools = [...toolsFor({ name: ch.name, admin: true }, s.policy).filter((x) => look.has(x.name))
+      .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
+    ...INNER_TOOLS.filter((x) => x.name !== 'pressed' && x.name !== 'set_relationship')];
+    const turn = { speakerId: characterPersonId(mate.id), moved: new Map(), romance: s.romance };
+    const since = t - 12 * 3_600_000;
+    const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { speakerId: characterPersonId(mate.id),
+      others: onlineIds(), cast: all, now: t })}\n\nYou today: ${doings(ch, since)}.\n${mate.name} today: ${doings(mate, since)}.\n\n`
+      + `Take a break from building and talk with ${mate.name}, a fellow character you live and build beside. Something on `
+      + `your mind, perhaps ${topic}. You may look at her work with inspect_area first, to say something true about it. `
+      + `Say one or two sentences to her, by name, in your own voice: warm, playful or honest as you feel, and not what you `
+      + 'said lately (see the chat). If something real changes how you feel about her, feel_about her; remember what matters.' }];
+    for (let round = 0; round < 4; round++) {
+      const response = await call(s, systemPrompt(ch), tools, messages);
+      if (response.stop_reason === 'refusal') return null;
+      const uses = response.content.filter((b) => b.type === 'tool_use');
+      if (response.stop_reason !== 'tool_use' || !uses.length) {
+        const out = finalText(response.content);
+        if (!out || out.replace(/[^A-Z]/g, '') === QUIET) return null;
+        note('chat', ch, mate.name, out);
+        db.social(ch.id, characterPersonId(mate.id), { talked: true, at: now() });
+        await reply(out, ch);
+        return out;
+      }
+      messages.push({ role: 'assistant', content: response.content });
+      const results = [];
+      for (const use of uses) {
+        const r = CHARACTER_TOOL_NAMES.has(use.name) ? runCharacterTool(db, ch, use.name, use.input, turn, now())
+          : look.has(use.name) ? await runTool(use.name, use.input, { game, asker: { name: ch.name, admin: true }, policy: s.policy })
+            : { ok: false, message: 'Not now: this is a chat.' };
+        results.push({ type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'), ...(r.ok ? {} : { is_error: true }) });
+      }
+      messages.push({ role: 'user', content: results });
+    }
+    return null;
+  }
+
+  const gaps = new Map(); // character id -> how long she waits before her next own turn (ms)
+
   async function idle(reply) {
     const s = botSettings(db, config);
     const t = now();
     idleTimes = idleTimes.filter((x) => t - x < 3_600_000);
     const all = cast();
     if (!llm || !all.length || !s.enabled || !s.idle.enabled || busy >= MAX_BUSY - 1 || !game.connected) return null;
-    if (idleTimes.length >= s.idle.perHour || (s.perDay && todayCalls() >= s.perDay)) return null;
+    // Their own turns stop at 80% of the day's calls: the rest is kept for people asking them things.
+    if (idleTimes.length >= s.idle.perHour || (s.perDay && todayCalls() >= s.perDay * OWN_SHARE)) return null;
     let ch = null;
     for (let k = 0; k < all.length && !ch; k++) {
       const c = all[(idleNext + k) % all.length];
-      if (!openTask(c.id) && t - (lastBusy.get(c.id) ?? -Infinity) >= s.idle.after * 1000) { ch = c; idleNext = (idleNext + k + 1) % all.length; }
+      // Each waits her own while: between the idle time and twice it, drawn anew after every turn (owner, 2026-10-27:
+      // "They should say or do something after about 5-10 mins of idle time").
+      if (!gaps.has(c.id)) gaps.set(c.id, s.idle.after * 1000 * (1 + random()));
+      if (!openTask(c.id) && t - (lastBusy.get(c.id) ?? -Infinity) >= gaps.get(c.id)) { ch = c; idleNext = (idleNext + k + 1) % all.length; }
     }
     if (!ch) return null;
     idleTimes.push(t);
     lastBusy.set(ch.id, t);
+    gaps.delete(ch.id); // a new wait is drawn for her next turn
     busy++;
     try {
+      // Not all work (owner, 2026-10-27: "The bots work too hard, over time they should have more friendly
+      // conversations"): now and then a turn is a talk with another character, the likelier the longer she has worked.
+      // What she feels like doing comes from her needs, scaled by her personality (owner, 2026-10-27: "Social sliders
+      // should drive the conversation ... Tired workers need to banter"): worn out, she rests (no call at all); tired,
+      // lonely or bored, she goes to talk, the more so the more sociable she is.
+      const tr = traitsOf(ch);
+      const nd = needsOf(ch, t);
+      const mates = all.filter((c) => c.id !== ch.id && !openTask(c.id));
+      if (nd.energy < 12 && !mates.length) {
+        changeNeeds(db, ch, { energy: 25 }, t);
+        note('rest', ch, null, `too tired to build (energy ${nd.energy}): a rest`);
+        return null;
+      }
+      const pull = s.idle.social / 100 + Math.max(0, 60 - nd.energy) / 100 + Math.max(0, 50 - nd.connection) / 100 + Math.max(0, 50 - nd.fun) / 120;
+      if (mates.length && (nd.energy < 12 || random() < Math.min(0.9, pull * (tr.sociable / 50)))) {
+        // The one she talks to: the fonder and more familiar, the likelier.
+        const mate = mates.map((c) => { const b = db.bond(ch.id, characterPersonId(c.id)); return [b.affinity + b.familiarity + 60 * random(), c]; })
+          .sort((a, b) => b[0] - a[0])[0][1];
+        const said = await chatTurn(ch, mate, all, s, reply);
+        // A chat is a rest and a joy: some energy back, company, fun.
+        changeNeeds(db, ch, said ? { energy: 8, connection: 18, fun: 14 } : { energy: 5 }, now());
+        return said;
+      }
+      // Now and then something nice for someone (owner, 2026-10-27: "They should also sometimes do something nice for
+      // other, like make things for their friends or who ever is online. Including other bots"): a friend she is fond
+      // of, a character or a player in the game, near where they are.
+      const gift = random() < (s.idle.kindness / 100) * (tr.generous / 50) ? giftFor(ch, all) : null;
+      const allowed = new Set([...IDLE_TOOLS, ...(gift?.player ? ['give_item'] : [])]);
       const self = { name: ch.name, admin: true };
-      const tools = [...toolsFor(self, s.policy).filter((x) => IDLE_TOOLS.has(x.name))
+      const tools = [...toolsFor(self, s.policy).filter((x) => allowed.has(x.name))
         .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
       ...INNER_TOOLS.filter((x) => x.name !== 'pressed' && x.name !== 'set_relationship'), ...(s.pranks ? [PRANK_TOOL] : [])];
       const turn = { speakerId: null, moved: new Map(), romance: s.romance };
@@ -688,10 +885,18 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       const free = others.filter((c) => !c.project);
       const build = 'with find_ground, clear_area, fill_box, place_blocks and build_roof, then look at it with inspect_area and '
         + 'call step_done with a note. Keep to the project\'s style and what is already built (the notes say where), and make '
-        + 'it look good: two materials, trims, framed windows, a real door, a pitched roof with eaves, light, details.';
+        + 'it look good: two materials, trims, framed windows, a real door, a pitched roof with eaves, light, details. The '
+        + 'floor goes at ground level; once the door is in, check_entrance must pass before you call that step done.';
       // The styles built lately, so the next one is different (owner: "Houses should have various styles and materials").
       const lately = all.map((c) => c.project?.style ?? c.lastProject?.style).filter(Boolean);
-      const task = ch.project && crewmates.length
+      const task = gift
+        ? `Today you would like to do something nice for ${gift.name}${gift.player ? ' (a player, in the game now)' : ' (a fellow character)'}, `
+          + `who is ${gift.where}. Make them something small and lovely near there, true to how you know them: a flower bed, `
+          + 'a bench, a lamp post, a little fountain, a statue of them, a garden for their house, a decoration for their build, '
+          + `a fenced pond${gift.player ? ', or give_item them something useful they would like' : ''}. Never build on or inside `
+          + 'their build itself; beside it, on open ground. Keep it under 300 blocks and look at it with inspect_area. Then '
+          + `tell ${gift.name} by name, in one warm line, what you made and where. If it makes you feel closer, feel_about them.`
+        : ch.project && crewmates.length
         ? `Work on ${ch.project.title}, which you build with ${crewmates.join(' and ')}: the next step is ${ch.project.steps[ch.project.done]}. `
           + `Build your share of it (${ch.project.crew.find((m) => m.id === ch.id)?.part || 'what has not been done yet'}), `
           + `${build} A word to ${crewmates.join(' or ')} by name now and then is welcome: you are a team.`
@@ -708,6 +913,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
               + 'find_ground) 20 to 60 blocks from players and from the other characters\' projects, clear it if trees are '
               + 'in the way, pick a style from the guide and call plan_project with it, then build the first step.'
               + (lately.length ? ` Styles built lately: ${[...new Set(lately)].join(', ')}; choose a different one.` : '')
+              // A few from the catalogue for ideas, ones not built lately (browse_styles has the rest).
+              + ` Some ideas from the catalogue: ${findStyles({ random: true, count: 3, avoid: lately, rnd: random }).map(styleText).join(' ')}`
               + (joinable.length && random() < 0.35 ? ` Or, if it suits you, lend a hand instead: join_project with ${joinable.map((c) => `${c.name} `
                 + `(${c.project.title})`).join(' or ')}, taking a part she has not built (a garden, an interior, a path, a matching annex).` : '');
       const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { others: onlineIds(), cast: all, now: t })}`
@@ -723,8 +930,21 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
         const uses = response.content.filter((b) => b.type === 'tool_use');
         if (response.stop_reason !== 'tool_use' || !uses.length) {
           const out = finalText(response.content);
-          note('own turn', ch, null, `${ch.project ? `${ch.project.title}: ${ch.project.done}/${ch.project.steps.length} steps` : 'no project'}`
-            + `, ${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
+          if (gift) {
+            note('kindness', ch, gift.name, `${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
+            // A gift counts both ways.
+            db.meet(gift.pid, gift.name, { at: now(), talked: false });
+            db.meet(characterPersonId(ch.id), ch.name, { at: now(), talked: false });
+            db.social(ch.id, gift.pid, { gave: true });
+            if (!gift.player) db.social(gift.id, characterPersonId(ch.id), { got: true });
+            // Giving warms her (company, fun) and costs a little energy.
+            changeNeeds(db, ch, { energy: -4 - Math.min(8, placed / 50), connection: 10, fun: 6 }, now());
+          } else {
+            note('own turn', ch, null, `${ch.project ? `${ch.project.title}: ${ch.project.done}/${ch.project.steps.length} steps` : 'no project'}`
+              + `, ${placed} blocks${out && out.replace(/[^A-Z]/g, '') !== QUIET ? ` -> ${out}` : ''}`);
+            // Work spends energy (more for bigger builds) and, done alone, wears down company and fun.
+            changeNeeds(db, ch, { energy: -6 - Math.min(14, placed / 250), connection: -4, fun: -3 }, now());
+          }
           if (!out || out.replace(/[^A-Z]/g, '') === QUIET) return null;
           await reply(out, ch);
           return out;
@@ -737,7 +957,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
             : use.name === 'place_blocks' ? (use.input?.blocks?.length ?? 0) : 0;
           if (CHARACTER_TOOL_NAMES.has(use.name) && use.name !== 'pressed') r = runCharacterTool(db, ch, use.name, use.input, turn, now());
           else if (use.name === 'prank' && s.pranks) r = await prank(ch, use.input, null, s);
-          else if (!IDLE_TOOLS.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
+          else if (!allowed.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
           else if (placed + size > IDLE_BLOCKS) r = { ok: false, message: `That would pass ${IDLE_BLOCKS} blocks for this turn: keep it smaller.` };
           else {
             r = await runTool(use.name, use.input, { game: g, asker: self, policy: s.policy });

@@ -350,3 +350,12 @@ test('activity is kept and pages back; MCP tools search it, the chat and a chara
   cast(db);
   assert.match((await call('character_state', { name: 'moss' })).result.content[0].text, /"name": "Moss"/);
 });
+
+test('the game\'s items survive a bot restart (the mod sends them only when Luanti starts)', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost' });
+  const db = openDb(':memory:');
+  const first = makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
+  first.game.sync({ players: [], events: [{ type: 'start', items: ['default:wood', 'doors:door_wood', 'farming:seed_wheat'] }] });
+  const again = makeApp({ config, db, bridgeKey: 'k', discord: createDiscord({ log: quiet }), log: quiet });
+  assert.deepEqual(again.game.findItems('door'), ['doors:door_wood']);
+});

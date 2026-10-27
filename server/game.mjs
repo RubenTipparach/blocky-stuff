@@ -22,6 +22,7 @@ export const ACTIONS = {
   ground: ['columns'],
   scan: ['x1', 'z1', 'w', 'd'],
   farm: ['x1', 'z1', 'x2', 'z2', 'crop?', 'water?'],
+  entrance: ['x', 'y', 'z', 'facing?'],
   box: ['item', 'x1', 'y1', 'z1', 'x2', 'y2', 'z2', 'hollow?'],
   clear: ['x1', 'z1', 'x2', 'z2', 'mode', 'y?', 'surface?', 'fill?'],
   harvest: ['x1', 'z1', 'x2', 'z2', 'y', 'player?'],
@@ -58,6 +59,9 @@ export function createGame({ now = () => Date.now() } = {}) {
     get seenAt() { return seenAt; },
     get players() { return players; },
     get bodies() { return bodies; },
+    /** Every item the game has. The mod sends them when Luanti starts; a restarted bot gets them back from storage. */
+    get items() { return items; },
+    set items(list) { if (Array.isArray(list)) items = list.filter((s) => typeof s === 'string'); },
     /** fn(action) for every action sent to the game. */
     onAct(fn) { actListeners.push(fn); },
     get time() { return time; },
@@ -70,6 +74,7 @@ export function createGame({ now = () => Date.now() } = {}) {
       if (Array.isArray(body?.players)) {
         players = body.players.filter((p) => typeof p?.name === 'string').map((p) => ({
           name: p.name, pos: roundPos(p.pos), hp: Number(p.hp) || 0, privs: Array.isArray(p.privs) ? p.privs : [],
+          look: lookOf(p.look),
         }));
       }
       if (typeof body?.time === 'number') time = body.time;
@@ -137,3 +142,7 @@ export function checkAction(action) {
 
 const roundPos = (p) => (p && typeof p === 'object'
   ? { x: Math.round(Number(p.x) || 0), y: Math.round(Number(p.y) || 0), z: Math.round(Number(p.z) || 0) } : null);
+// Where a player looks: { facing (north, north-east...), pitch (degrees up), at: { x, y, z, block, dist } or null }.
+const FACINGS = new Set(['north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west']);
+const lookOf = (l) => (l && FACINGS.has(l.facing) ? { facing: l.facing, pitch: Math.round(Number(l.pitch) || 0),
+  at: l.at && typeof l.at.block === 'string' ? { ...roundPos(l.at), block: l.at.block.slice(0, 80), dist: Math.round(Number(l.at.dist) || 0) } : null } : null);

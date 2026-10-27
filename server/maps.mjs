@@ -58,6 +58,8 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     db.putJson('maps.tiles.version', TILE_VERSION);
   }
   const lastAsk = new Map(); // address -> when it last rendered on request
+  const lastRefresh = new Map(); // address -> when it last asked for a refresh
+  const REFRESH_GAP_MS = 60_000;
   let lastMapCommand = 0;
   let busy = false;
 
@@ -289,7 +291,10 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
           leaves: names.map((n) => /leaves|needles|foliage/.test(n)), cols }));
         await mkdir(join(dir, 'tiles'), { recursive: true });
         await writeFile(runsFile(cx, cz), body);
-        db.putJson('maps.tiles', { ...db.json('maps.tiles', {}), [key]: now() });
+        // Drawn pictures of this chunk (its flat tile, its isometric cuts) are out of date now.
+        const tiles = { ...db.json('maps.tiles', {}), [key]: now() };
+        for (const k of Object.keys(tiles)) if (k === `${cx}_${-cz - 1}` || k.startsWith(`iso_${cx}_${cz}_`)) delete tiles[k];
+        db.putJson('maps.tiles', tiles);
         remember(`${cx},${cz}`, { names, cols });
         return body;
       } finally {
@@ -391,17 +396,24 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
 
   // ---- Keeping the store up to date ----
 
-  const dirty = new Set(); // "cx,cz": chunks something was done to since they were read
+  // "cx,cz": chunks something was done to since they were read. Kept in the database: a restart must not forget them
+  // (it did, and two fields made just before a deploy never showed on the map).
+  const dirty = new Set(db.json('maps.dirty', []));
+  const saveDirty = () => db.putJson('maps.dirty', [...dirty].slice(-2000));
   const chunkOf = (x, z) => `${Math.floor(x / ISO.C)},${Math.floor(z / ISO.C)}`;
-  game.onAct?.((a) => {
-    if (a.type === 'place') for (const n of a.nodes ?? []) dirty.add(chunkOf(n.x, n.z));
-    if (['farm', 'harvest', 'clear', 'box'].includes(a.type)) {
-      // Every chunk the area touches.
-      for (let x = Math.min(a.x1, a.x2); x <= Math.max(a.x1, a.x2) + ISO.C - 1; x += ISO.C) {
-        for (let z = Math.min(a.z1, a.z2); z <= Math.max(a.z1, a.z2) + ISO.C - 1; z += ISO.C) dirty.add(chunkOf(Math.min(x, Math.max(a.x1, a.x2)), Math.min(z, Math.max(a.z1, a.z2))));
-      }
-      for (const [x, z] of [[a.x1, a.z1], [a.x2, a.z2], [a.x1, a.z2], [a.x2, a.z1]]) dirty.add(chunkOf(x, z));
+  /** The chunks a box of columns touches. */
+  const chunksIn = (x1, z1, x2, z2) => {
+    const out = [];
+    for (let cx = Math.floor(Math.min(x1, x2) / ISO.C); cx <= Math.floor(Math.max(x1, x2) / ISO.C); cx++) {
+      for (let cz = Math.floor(Math.min(z1, z2) / ISO.C); cz <= Math.floor(Math.max(z1, z2) / ISO.C); cz++) out.push(`${cx},${cz}`);
     }
+    return out;
+  };
+  game.onAct?.((a) => {
+    const before = dirty.size;
+    if (a.type === 'place') for (const n of a.nodes ?? []) dirty.add(chunkOf(n.x, n.z));
+    if (['farm', 'harvest', 'clear', 'box'].includes(a.type)) for (const k of chunksIn(a.x1, a.z1, a.x2, a.z2)) dirty.add(k);
+    if (dirty.size !== before) saveDirty();
   });
   let lastSurvey = 0;
   let surveying = false;
@@ -422,15 +434,43 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     let n = 0;
     try {
       for (const k of [...dirty].slice(0, SURVEY_MAX)) {
-        dirty.delete(k);
         const [cx, cz] = k.split(',').map(Number);
-        if (await readChunk(cx, cz).catch(() => null)) n++;
+        // Kept on the list until it is read: a failed read is tried again next time.
+        if (await readChunk(cx, cz).catch(() => null)) { n++; dirty.delete(k); }
       }
     } finally {
       surveying = false;
+      saveDirty();
     }
     if (n) log.log(`map: ${n} chunks brought up to date`);
     return n;
+  }
+
+  /**
+   * Read an area again from the game now (owner, 2026-10-27: "Is there a way I can request current map data on map
+   * page?"): the chunks under columns x1, z1 to x2, z2, at most REFRESH_MAX. Returns the chunk keys read.
+   */
+  const REFRESH_MAX = 16;
+  async function refresh(x1, z1, x2, z2) {
+    const keys = chunksIn(x1, z1, x2, z2).slice(0, REFRESH_MAX);
+    const read = [];
+    for (const k of keys) {
+      const [cx, cz] = k.split(',').map(Number);
+      if (await readChunk(cx, cz).catch(() => null)) { read.push(k); dirty.delete(k); }
+    }
+    saveDirty();
+    return read;
+  }
+
+  /** How fresh the store is: chunks kept and their ages, chunks waiting to be read, the last survey. */
+  function storeStatus() {
+    const tiles = db.json('maps.tiles', {});
+    const ages = Object.entries(tiles).filter(([k]) => k.startsWith('runs_')).map(([k, t]) => [k.slice(5).replace('_', ','), t]);
+    const at = ages.map(([, t]) => t);
+    return { chunks: ages.length, newest: at.length ? new Date(Math.max(...at)).toISOString() : null,
+      oldest: at.length ? new Date(Math.min(...at)).toISOString() : null, waiting: [...dirty],
+      lastSurvey: lastSurvey ? new Date(lastSurvey).toISOString() : null, everyMinutes: SURVEY_MS / 60_000,
+      readAt: Object.fromEntries(ages.sort((x, y) => y[1] - x[1]).slice(0, 40).map(([k, t]) => [k, new Date(t).toISOString()])) };
   }
 
   /** Where everyone is: characters (with their colours) and players online. */
@@ -472,7 +512,31 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   async function handle(req, res, url, ip) {
     if (url.pathname === '/map' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(page(url.searchParams.get('view') === 'flat' ? 'flat' : 'iso'));
+      const x = Number(url.searchParams.get('x'));
+      const z = Number(url.searchParams.get('z'));
+      const spot = url.searchParams.has('x') && Number.isFinite(x) && Number.isFinite(z) && Math.abs(x) < 31000 && Math.abs(z) < 31000
+        ? { x: Math.round(x), y: 10, z: Math.round(z) } : null;
+      res.end(page(url.searchParams.get('view') === 'flat' ? 'flat' : 'iso', spot));
+      return true;
+    }
+    // The page's Refresh button: read the chunks in view again, now; once a minute per address.
+    if (url.pathname === '/map/refresh' && req.method === 'POST') {
+      if (now() - (lastRefresh.get(ip) ?? 0) < REFRESH_GAP_MS) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '60' });
+        res.end(JSON.stringify({ error: 'One refresh a minute: try again shortly.' }));
+        return true;
+      }
+      const b = Object.fromEntries(['x1', 'z1', 'x2', 'z2'].map((k) => [k, Number(url.searchParams.get(k))]));
+      if (!Object.values(b).every((v) => Number.isFinite(v) && Math.abs(v) < 31000)) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Give x1, z1, x2, z2.' }));
+        return true;
+      }
+      lastRefresh.set(ip, now());
+      if (lastRefresh.size > 5000) lastRefresh.clear();
+      const read = game.connected ? await refresh(b.x1, b.z1, b.x2, b.z2) : [];
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ read, game: game.connected }));
       return true;
     }
     const t = /^\/map\/tiles\/(-?\d{1,4})\/(-?\d{1,4})\.png$/.exec(url.pathname);
@@ -564,7 +628,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     return false;
   }
 
-  function page(view = 'iso') {
+  function page(view = 'iso', spot = null) {
     legendCast = characters();
     const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const byId = Object.fromEntries(characters().map((c) => [c.id, c]));
@@ -575,8 +639,8 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
         <figcaption><b style="color:${esc(c?.chatColor ?? '#8fd16a')}">${esc(c?.name ?? m.key)}</b> ${esc(m.title.split(': ').slice(1).join(': '))}
         <span>at ${m.x}, ${m.y}, ${m.z} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}</span></figcaption></figure>`;
     }).join('');
-    // Where to open the map: the first character, else 0, 0.
-    const first = (game.bodies ?? [])[0] ?? { x: 0, y: 10, z: 0 };
+    // Where to open the map: the spot asked for (switching views keeps it), else the first character, else 0, 0.
+    const first = spot ?? (game.bodies ?? [])[0] ?? { x: 0, y: 10, z: 0 };
     return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Blocky Stuff map</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
@@ -591,6 +655,12 @@ p { color: var(--muted); margin: 0 0 14px; } a { color: var(--accent); }
 .leaflet-container { font: 13px system-ui, sans-serif; }
 .who { background: rgba(20, 24, 18, .85); color: #fff; border: 0; border-radius: 6px; padding: 2px 6px; font-weight: 600; box-shadow: none; }
 .who::before { display: none; }
+.bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+.bar button { font: inherit; font-size: 14px; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px; cursor: pointer; min-height: 36px; }
+.seg { display: inline-flex; } .seg button:first-child { border-radius: 999px 0 0 999px; } .seg button:last-child { border-radius: 0 999px 999px 0; border-left: 0; }
+.seg button.on { background: var(--accent); color: #12150f; border-color: var(--accent); }
+.bar button.act { border-radius: 999px; } .bar button:disabled { opacity: .5; cursor: default; }
+#refreshNote { color: var(--muted); font-size: 14px; }
 .cut, .toggles { display: flex; gap: 12px 18px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; color: var(--muted); }
 .tog { display: inline-flex; gap: 6px; align-items: center; color: var(--text); cursor: pointer; white-space: nowrap; } .tog input { accent-color: var(--accent); width: 16px; height: 16px; }
 .cut input[type=range]:disabled { opacity: .4; }
@@ -607,10 +677,8 @@ figcaption { padding: 10px 12px; display: grid; gap: 2px; } figcaption span { co
 code { background: #232a1f; padding: 1px 6px; border-radius: 4px; }
 </style></head><body><main>
 <h1>${esc(config.serverName)} map</h1>
-<p>${view === 'iso' ? 'Drag and zoom the world; switch on the cut to slice it open one block at a time.' : 'Drag and zoom the world from above.'}
-The characters and players move on it live. Join at
-<code>${esc(config.gameAddress || new URL(config.publicUrl).hostname)}:${config.gamePort}</code> with <a href="https://www.luanti.org/en/">Luanti</a>.
-Parts of the world nobody has been to yet stay blank. <a href="/map${view === 'iso' ? '?view=flat' : ''}">${view === 'iso' ? 'Top-down view' : 'Isometric view'}</a></p>
+<div class="bar"><span class="seg"><button id="toIso"${view === 'iso' ? ' class="on"' : ''}>Isometric</button><button id="toFlat"${view === 'flat' ? ' class="on"' : ''}>Top-down</button></span>
+<button id="refresh" class="act">↻ Refresh this view</button><span id="refreshNote"></span></div>
 ${view === 'iso' ? `<div class="cut"><label class="tog"><input type="checkbox" id="cutOn"> Cut at height</label>
 <input type="range" id="cut" min="${ISO.YMIN + 1}" max="${ISO.YMAX}" step="1" value="${ISO.YMAX}"><output id="cutOut">everything</output></div>
 <div class="toggles"><label class="tog"><input type="checkbox" id="show_trees"> Trees</label><label class="tog"><input type="checkbox" id="show_characters"> Characters</label>
@@ -641,19 +709,40 @@ document.addEventListener('click', async (ev) => {
   setTimeout(() => { b.textContent = 'Copy'; }, 1500);
 }, true);
 ${view === 'iso' ? isoScript(first) : flatScript(first)}
+// ---- Switching views (at the same spot) and refreshing what is in view ----
+const goTo = (v) => { const [x, z] = centerXZ(); location.href = '/map?' + (v === 'flat' ? 'view=flat&' : '') + 'x=' + x + '&z=' + z; };
+document.getElementById('toIso').onclick = () => { if (${view === 'flat'}) goTo('iso'); };
+document.getElementById('toFlat').onclick = () => { if (${view === 'iso'}) goTo('flat'); };
+document.getElementById('refresh').onclick = async () => {
+  const btn = document.getElementById('refresh'), note = document.getElementById('refreshNote');
+  // The 4 by 4 chunks (256 by 256 blocks) round the middle of the view.
+  const [x, z] = centerXZ(), cx = Math.floor(x / 64), cz = Math.floor(z / 64);
+  btn.disabled = true; note.textContent = 'Reading the area from the game…';
+  try {
+    const r = await fetch('/map/refresh?x1=' + (cx - 2) * 64 + '&z1=' + (cz - 2) * 64 + '&x2=' + ((cx + 2) * 64 - 1) + '&z2=' + ((cz + 2) * 64 - 1), { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) note.textContent = j.error || 'Could not refresh right now.';
+    else if (!j.game) note.textContent = 'The game is not running: showing the last map.';
+    else { afterRefresh(j.read); note.textContent = 'Up to date (' + j.read.length + ' areas read just now).'; }
+  } catch { note.textContent = 'Could not reach the server.'; }
+  setTimeout(() => { btn.disabled = false; }, 60000);
+};
 </script></body></html>`;
   }
 
-  return { render, snapshot, tick, survey, pictures, handle, settings, page, postNow, tile, isoChunk, chunkRuns, where };
+  return { render, snapshot, tick, survey, refresh, storeStatus, pictures, handle, settings, page, postNow, tile, isoChunk, chunkRuns, where };
 }
 
 // The flat map's script: one map unit is one block, x east and z north as the map's up; tiles are 64 blocks at zoom 2.
 function flatScript(first) {
   return `const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 5, zoomSnap: 0.5, attributionControl: false })
   .setView([${Number(first.z) || 0}, ${Number(first.x) || 0}], 3);
-L.tileLayer('/map/tiles/{x}/{y}.png', { tileSize: 256, minNativeZoom: 2, maxNativeZoom: 2, noWrap: true,
+const tiles = L.tileLayer('/map/tiles/{x}/{y}.png?v={v}', { tileSize: 256, minNativeZoom: 2, maxNativeZoom: 2, noWrap: true, v: 0,
   errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=' }).addTo(map);
 const at = (x, y, z) => [z, x];
+const centerXZ = () => { const c = map.getCenter(); return [Math.round(c.lng), Math.round(c.lat)]; };
+// After a refresh: every tile fetched again (the server drew the refreshed ones anew).
+const afterRefresh = () => { tiles.options.v = Date.now(); tiles.redraw(); };
 ${markersScript()}
 const Coords = L.Control.extend({ onAdd() { this.el = L.DomUtil.create('div', 'coords'); this.el.textContent = 'x, z'; return this.el; } });
 const coords = new Coords({ position: 'bottomleft' }).addTo(map);
@@ -672,7 +761,9 @@ function isoScript(first) {
   return `const A = ${A}, YMIN = ${YMIN}, YMAX = ${YMAX}, C = ${C}, NY = YMAX - YMIN + 1;
 const W = 2 * C * A + 2 * A, H = Math.round(C * A + (YMAX - YMIN + 3) * A + 3 * A), OX = C * A, OY = (YMAX - YMIN + 2) * A;
 const gx = (x, z) => (x - z) * A, gy = (x, y, z) => (x + z) * A / 2 - y * A;
-const at = (x, y, z) => [-(gy(x, y, z) + A / 2), gx(x, z) + A];
+// The map's longitude is the drawing's x flipped (-gx): drawn as computed, the world came out mirrored (owner,
+// 2026-10-27: "the bridge sways to the right, the map sways to the left").
+const at = (x, y, z) => [-(gy(x, y, z) + A / 2), -(gx(x, z) + A)];
 const map = L.map('map', { crs: L.CRS.Simple, minZoom: -4, maxZoom: 3, zoomSnap: 0.5, attributionControl: false,
   maxBoundsViscosity: 1 }).setView(at(${Number(first.x) || 0}, ${Number(first.y) || 10}, ${Number(first.z) || 0}), 0);
 const origin = (cx, cz) => { const x1 = cx * C, z1 = cz * C; return [(x1 - z1) * A - OX, (x1 + z1) * A / 2 - YMIN * A - OY]; };
@@ -720,7 +811,7 @@ function draw(chunk) {
   const blit = (sx, sy, rgba) => {
     const alpha = (rgba[3] ?? 255) / 255;
     for (let yy = 0; yy < SP.w; yy++) { const ty = sy + yy; if (ty < 0 || ty >= H) continue;
-      for (let xx = 0; xx < SP.w; xx++) { const f = SP.face[yy * SP.w + xx]; if (!f) continue; const tx = sx + xx; if (tx < 0 || tx >= W) continue;
+      for (let xx = 0; xx < SP.w; xx++) { const f = SP.face[yy * SP.w + xx]; if (!f) continue; const tx = W - 1 - (sx + xx); if (tx < 0 || tx >= W) continue;
         const k = SHADE[f] * (SP.edge[yy * SP.w + xx] ? 0.86 : 1), o = (ty * W + tx) * 4, da = px[o + 3] / 255, oa = alpha + da * (1 - alpha);
         for (let c = 0; c < 3; c++) px[o + c] = oa ? (Math.min(255, rgba[c] * k) * alpha + px[o + c] * da * (1 - alpha)) / oa : 0;
         px[o + 3] = oa * 255; } }
@@ -749,21 +840,33 @@ let fetching = 0;
 const queue = [];
 const turn = () => (fetching < 4 ? (fetching++, Promise.resolve()) : new Promise((r) => queue.push(r)));
 const done = () => { fetching--; const next = queue.shift(); if (next) { fetching++; next(); } };
-async function fetchChunk(cx, cz) {
+async function fetchChunk(cx, cz, fresh = false) {
   await turn();
-  try { const r = await fetch('/map/chunk/' + cx + '/' + cz + '.json'); return r.ok ? await r.json() : null; } catch { return null; } finally { done(); }
+  try { const r = await fetch('/map/chunk/' + cx + '/' + cz + '.json', fresh ? { cache: 'reload' } : undefined); return r.ok ? await r.json() : null; } catch { return null; } finally { done(); }
+}
+// The block (x, z) at the middle of the view, taking the ground as about y 10.
+const centerXZ = () => { const c = map.getCenter(); const u = (-c.lng - A) / A, v = (-c.lat - A / 2 + 10 * A) * 2 / A; return [Math.round((u + v) / 2), Math.round((v - u) / 2)]; };
+// After a refresh: the chunks read anew are fetched past the browser's cache and drawn again.
+function afterRefresh(keys) {
+  for (const key of keys) {
+    const chunk = chunks.get(key);
+    if (!chunk || !chunk.g) continue;
+    const [cx, cz] = key.split(',').map(Number);
+    chunk.at = Date.now();
+    fetchChunk(cx, cz, true).then((data) => { if (data) { chunk.data = data; chunk.g = grid(data); show(cx, cz, chunk); } });
+  }
 }
 async function show(cx, cz, chunk) {
   const src = await draw(chunk);
   if (!src) return;
   const [ox, oy] = origin(cx, cz);
   if (chunk.overlay) { const old = chunk.src; chunk.overlay.setUrl(src); setTimeout(() => URL.revokeObjectURL(old), 2000); }
-  else chunk.overlay = L.imageOverlay(src, [[-oy, ox], [-(oy + H), ox + W]], { zIndex: 1000 + cx + cz, interactive: false }).addTo(map);
+  else chunk.overlay = L.imageOverlay(src, [[-oy, -(ox + W)], [-(oy + H), -ox]], { zIndex: 1000 + cx + cz, interactive: false }).addTo(map);
   chunk.src = src;
 }
 function wanted() {
   const b = map.getBounds();
-  const gx1 = b.getWest(), gx2 = b.getEast(), gy1 = -b.getNorth(), gy2 = -b.getSouth();
+  const gx1 = -b.getEast(), gx2 = -b.getWest(), gy1 = -b.getNorth(), gy2 = -b.getSouth();
   const umin = gx1 / A - 2, umax = gx2 / A + 2, vmin = 2 * gy1 / A + 2 * YMIN - 4, vmax = 2 * gy2 / A + 2 * YMAX + 4;
   const out = [];
   for (let p = Math.floor((umin - C) / C); p <= Math.ceil((umax + C) / C); p++) {
@@ -820,7 +923,7 @@ fetch('/map/explored.json').then((r) => r.json()).then((e) => {
     const corners = [[cx1, cz1], [cx2, cz1], [cx1, cz2], [cx2, cz2]].map(([cx, cz]) => origin(cx, cz));
     const west = Math.min(...corners.map(([ox]) => ox)), east = Math.max(...corners.map(([ox]) => ox + W));
     const north = Math.min(...corners.map(([, oy]) => oy)), south = Math.max(...corners.map(([, oy]) => oy + H));
-    const box = L.latLngBounds([[-north, west], [-south, east]]);
+    const box = L.latLngBounds([[-north, -east], [-south, -west]]);
     map.setMaxBounds(box.pad(0.05));
     map.setMinZoom(Math.min(0, map.getBoundsZoom(box) - 0.5));
   }
@@ -837,7 +940,7 @@ const blockAt = (x, y, z) => {
   return chunk.data.names[id - 1];
 };
 map.on('click', (e) => {
-  const gxc = e.latlng.lng, gyc = -e.latlng.lat;
+  const gxc = -e.latlng.lng, gyc = -e.latlng.lat;
   const top = view.cut ? view.cutAt : YMAX;
   for (let y = top; y >= YMIN; y--) {
     const u = (gxc - A) / A, v = ((gyc - A / 2) + y * A) * 2 / A;

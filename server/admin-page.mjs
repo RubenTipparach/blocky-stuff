@@ -80,6 +80,10 @@ export const ADMIN_PAGE = `<!doctype html>
   .badge.dating { background: #5a2a44; color: #ffb3d9; } .badge.ex { background: #3a3a3a; }
   .meter { display: grid; grid-template-columns: 54px 1fr 116px; gap: 8px; align-items: center; font-size: 13px; }
   .meter .lab { color: var(--muted); } .meter output { text-align: right; font-weight: 600; }
+  .need { display: grid; grid-template-columns: 110px 1fr 40px; gap: 8px; align-items: center; margin: 0 0 8px; font-size: 14px; }
+  .need .track { height: 12px; border-radius: 999px; background: #182015; border: 1px solid var(--line); overflow: hidden; }
+  .need .fill { height: 100%; border-radius: 999px; transition: width .4s; }
+  .need b { text-align: right; } .trait { grid-template-columns: 90px 1fr 40px; }
   input[type=range] { -webkit-appearance: none; appearance: none; height: 10px; border-radius: 999px; padding: 0; min-height: 0; border: 0; }
   input[type=range].aff { background: linear-gradient(to right, #c0392b, #e67e22 30%, #7f8c7a 50%, #8fd16a 75%, #2ecc71); }
   input[type=range].tru { background: linear-gradient(to right, #4a4f46, #4aa3df); }
@@ -148,7 +152,8 @@ const agoOf = (t) => { const m = Math.round((Date.now() - t) / 60000); return m 
 // was said. A filter row on top, remembered on this device.
 const KIND = { answered: ['💬 answered', 'ok', 'talk'], quiet: ['🤐 stayed quiet', 'muted', 'talk'], skipped: ['⏭ skipped', 'muted', 'skipped'],
   ignored: ['🚫 ignored', 'warn', 'skipped'], limited: ['⏳ limited', 'warn', 'problems'], error: ['⚠️ error', 'bad', 'problems'],
-  'own turn': ['🔨 own turn', 'muted', 'work'], task: ['📋 task', 'ok', 'work'], prank: ['😈 prank', 'warn', 'work'] };
+  'own turn': ['🔨 own turn', 'muted', 'work'], task: ['📋 task', 'ok', 'work'], prank: ['😈 prank', 'warn', 'work'],
+  chat: ['☕ chat', 'ok', 'talk'], kindness: ['🎁 kindness', 'ok', 'work'] };
 let feedFilter = 'all';
 try { feedFilter = localStorage.getItem('feedFilter') || 'all'; } catch { /* no storage */ }
 // The feed's events, newest first: the newest come with each refresh, older ones a page at a time as it scrolls.
@@ -350,8 +355,10 @@ function build() {
     <label class="check"><input type="checkbox" id="b_romance"> Romance: characters fond of someone may flirt, and date (always PG)</label>
     <label class="check"><input type="checkbox" id="b_pranks"> Pranks: characters hostile to someone may drop a few harmless blocks on their build, once a day</label>
     <label class="check"><input type="checkbox" id="b_idle"> They work on their own projects when nobody is asking them anything (while someone is online, and for an hour after anyone's last word)</label>
-    <div class="two"><label class="field">A turn when not asked anything for (seconds)<input id="b_idleAfter" type="number" min="15"></label>
+    <div class="two"><label class="field">Quiet before an own turn (seconds; each waits this to twice this, 300 = 5 to 10 min)<input id="b_idleAfter" type="number" min="60"></label>
     <label class="field">Own turns per hour, at most (all together)<input id="b_idlePerHour" type="number" min="0"></label></div>
+    <div class="two"><label class="field">Chats with each other (% of own turns; it grows the longer they work)<input id="b_idleSocial" type="number" min="0" max="100"></label>
+    <label class="field">Something nice for a friend (% of work turns)<input id="b_idleKindness" type="number" min="0" max="100"></label></div>
     <div class="muted note" style="margin:0 0 6px">Players who are not admins may ask for:</div>
     <div id="policy"></div>
     <div class="row" style="margin-top:10px"><button>Save</button><button type="button" class="quiet" id="summaryNow">Post today's summary now</button>
@@ -403,6 +410,18 @@ function build() {
       <button type="button" class="quiet" id="c_post">Take a picture and post it</button>
       <button type="button" class="danger" id="c_remove">Remove</button><span id="charNote" class="note muted"></span></div>
   </form></section>
+<div class="grid" style="margin-top:14px">
+<section><h2>How she feels now</h2>
+  <p class="muted note" style="margin:0 0 8px">Her social battery. Building drains energy (bigger builds, more), and working alone wears down
+  company and fun; chats, banter and kind deeds fill them back up, and rest brings energy back with time. When she is tired,
+  lonely or bored she goes to talk; worn out, she rests.</p>
+  <div id="needs"></div></section>
+<section><h2>Personality</h2>
+  <p class="muted note" style="margin:0 0 8px">Sliders on top of her written personality. They stay where you put them, and decide how
+  strongly her needs pull her: a sociable one chats more, a generous one does more for others, and what she talks about.</p>
+  <div id="traits"></div>
+  <div class="row"><button type="button" id="saveTraits">Save personality</button><span id="traitNote" class="note muted"></span></div></section>
+</div>
 <section style="margin-top:14px"><h2>Her tasks</h2>
   <p class="muted note" style="margin:0 0 8px">Jobs people asked of her. She keeps at an open one until it is done and checked, or set aside; Cancel stops it.</p>
   <div class="scroll"><table><thead><tr><th>Asked</th><th>By</th><th>Task</th><th>Status</th><th>Rounds</th><th></th></tr></thead>
@@ -543,6 +562,7 @@ function build() {
     catch (e) { $('botNote').textContent = e.message; }
   };
   $('b_idle').checked = s.idle.enabled; $('b_idleAfter').value = s.idle.after; $('b_idlePerHour').value = s.idle.perHour;
+  $('b_idleSocial').value = s.idle.social; $('b_idleKindness').value = s.idle.kindness;
   const perms = [...new Map(state.policyTools.map((t) => [t.permission, t])).keys()];
   const label = { give: 'Items for themselves', teleport: 'Teleporting themselves', heal: 'Healing themselves', time: 'Changing the time of day', build: 'Building (placing blocks)' };
   $('policy').innerHTML = perms.map((p) => '<label class="check"><input type="checkbox" data-perm="' + p + '"' + (s.policy[p] ? ' checked' : '')
@@ -603,7 +623,8 @@ function build() {
       await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value,
         effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
         perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, sleep: $('b_sleep').checked, sleepAfter: Number($('b_sleepAfter').value), summaryHour: Number($('b_summaryHour').value),
-        idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value }, policy });
+        idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value,
+          social: $('b_idleSocial').value, kindness: $('b_idleKindness').value }, policy });
       $('botNote').textContent = 'Saved.';
     } catch (e) { $('botNote').textContent = e.message; }
   };
@@ -677,12 +698,46 @@ async function loadChannels() {
   } catch (e) { $('discordNote').textContent = e.message; }
 }
 
+// Her needs as bars (live), her personality as sliders (kept as you set them until saved; not redrawn while edited).
+const NEED_LOOK = { energy: ['⚡ Energy', '#f2b84b'], connection: ['🤝 Connection', '#4aa3df'], fun: ['🎈 Fun', '#e57bb5'] };
+const TRAIT_LOOK = { sociable: 'Sociable', generous: 'Generous', playful: 'Playful', ambitious: 'Ambitious', sensitive: 'Sensitive' };
+let traitsFor = null;
+function renderSoul(me) {
+  const n = me.needsNow || {};
+  $('needs').innerHTML = Object.entries(NEED_LOOK).map(([k, [label, colour]]) => '<div class="need"><span>' + label + '</span>'
+    + '<div class="track"><div class="fill" style="width:' + (n[k] ?? 0) + '%;background:' + colour + '"></div></div><b>' + (n[k] ?? 0) + '</b></div>').join('');
+  if (traitsFor === me.id && $('traits').contains(document.activeElement)) return;
+  if (traitsFor === me.id && $('traits').dataset.dirty) return;
+  traitsFor = me.id;
+  delete $('traits').dataset.dirty;
+  const t = me.traitsNow || {};
+  $('traits').innerHTML = Object.entries(TRAIT_LOOK).map(([k, label]) => '<div class="need trait"><span>' + label + '</span>'
+    + '<input type="range" min="0" max="100" data-trait="' + k + '" value="' + (t[k] ?? 50) + '"><b>' + (t[k] ?? 50) + '</b></div>').join('');
+}
+document.addEventListener('input', (ev) => {
+  const r = ev.target.closest && ev.target.closest('#traits input[data-trait]');
+  if (!r) return;
+  r.nextElementSibling.textContent = r.value;
+  $('traits').dataset.dirty = '1';
+});
+document.addEventListener('click', async (ev) => {
+  if (!ev.target.closest || !ev.target.closest('#saveTraits')) return;
+  const traits = Object.fromEntries([...document.querySelectorAll('#traits input[data-trait]')].map((r) => [r.dataset.trait, Number(r.value)]));
+  try {
+    await api('/api/admin/character', { id: traitsFor, traits });
+    delete $('traits').dataset.dirty;
+    $('traitNote').textContent = 'Saved.';
+    refreshSoon();
+  } catch (e) { $('traitNote').textContent = e.message; }
+});
+
 function refresh() {
   const st = state;
   const me = st.characters.find((c) => c.id === picked) || st.characters[0];
   if (me) $('moodLine').textContent = 'Mood: ' + me.mood.label + (me.mood.reason ? ' (' + me.mood.reason + ')' : '')
     + (me.project ? ' · Project: ' + me.project.title + ' at ' + me.project.site.x + ', ' + me.project.site.y + ', ' + me.project.site.z
       + ' (' + me.project.done + ' of ' + me.project.steps.length + ' steps)' : me.goal ? ' · Working on: ' + me.goal : '');
+  if (me) renderSoul(me);
   renderFeed();
   const ago = agoOf;
   renderRelationships(false);

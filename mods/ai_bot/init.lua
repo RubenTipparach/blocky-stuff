@@ -52,13 +52,35 @@ local function item_names()
 	return names
 end
 
+-- Which way a player faces and what they are looking at (owner, 2026-10-27: "bots should also be able to read my
+-- position when I talk about stuff so they know what 'here' or 'over there' means"): eight directions from the look
+-- yaw (0 is north, +z, turning toward west), up or down in degrees, and the first block along the line of sight
+-- within 64, as the player would point at it.
+local DIRS8 = { "north", "north-west", "west", "south-west", "south", "south-east", "east", "north-east" }
+local function look_of(player)
+	local i = math.floor(player:get_look_horizontal() / (2 * math.pi) * 8 + 0.5) % 8
+	local eye = vector.add(player:get_pos(), vector.new(0, player:get_properties().eye_height or 1.47, 0))
+	local hit
+	for t in core.raycast(eye, vector.add(eye, vector.multiply(player:get_look_dir(), 64)), false, false) do
+		if t.type == "node" then
+			local n = core.get_node(t.under)
+			if n.name ~= "air" and n.name ~= "ignore" then
+				hit = { x = t.under.x, y = t.under.y, z = t.under.z, block = n.name, dist = math.floor(vector.distance(eye, t.under) + 0.5) }
+				break
+			end
+		end
+	end
+	return { facing = DIRS8[i + 1], pitch = math.floor(-math.deg(player:get_look_vertical()) + 0.5), at = hit }
+end
+
 local function snapshot()
 	local players = {}
 	for _, player in ipairs(core.get_connected_players()) do
 		local name = player:get_player_name()
 		local privs = {}
 		for priv in pairs(core.get_player_privs(name)) do privs[#privs + 1] = priv end
-		players[#players + 1] = { name = name, pos = player:get_pos(), hp = player:get_hp(), privs = privs }
+		local ok, look = pcall(look_of, player)
+		players[#players + 1] = { name = name, pos = player:get_pos(), hp = player:get_hp(), privs = privs, look = ok and look or nil }
 	end
 	return players
 end
@@ -82,7 +104,45 @@ end
 -- facing (upside down: hang from it); a door's front looks toward it; a torch, ladder or sign hangs on that side's wall.
 local FACEDIR = { north = 0, east = 1, south = 2, west = 3 }
 local UPSIDE = { [0] = 20, [1] = 23, [2] = 22, [3] = 21 }
-local WALL = { east = 3, west = 2, north = 5, south = 4 } -- wallmounted: the wall is on that side of the block
+
+-- ---- Attached blocks: torches, ladders, signs (owner, 2026-10-27: "why are all the torches upside down", "bots dont
+-- seem to understand correctly placing things on surfaces", "same with ladders") ----
+-- These hang on a surface, kept in param2 (wallmounted: 0 ceiling, 1 floor, 2..5 a wall). Set straight into the world
+-- they had 0, hanging from the ceiling. Now each finds what it is against: the wall it was told (facing), else for a
+-- ladder or sign the first solid wall, for a torch the floor, then a wall, then the ceiling.
+local SIDES = { east = vector.new(1, 0, 0), west = vector.new(-1, 0, 0), north = vector.new(0, 0, 1), south = vector.new(0, 0, -1) }
+local SIDE_ORDER = { "north", "east", "south", "west" }
+local function wallmounted(def) return def and (def.paramtype2 == "wallmounted" or def.paramtype2 == "colorwallmounted") end
+local function solid_at(pos)
+	local def = core.registered_nodes[core.get_node(pos).name]
+	return def ~= nil and def.walkable == true
+end
+-- The param2 for an attached block at pos: toward the surface it hangs on.
+local function attach_dir(pos, name, facing, upside)
+	if facing and SIDES[facing] then return core.dir_to_wallmounted(SIDES[facing]) end
+	if upside then return 0 end
+	local down, up = vector.new(0, -1, 0), vector.new(0, 1, 0)
+	local walls_first = name:find("ladder") or name:find("sign")
+	local function a_wall()
+		for _, s in ipairs(SIDE_ORDER) do if solid_at(vector.add(pos, SIDES[s])) then return core.dir_to_wallmounted(SIDES[s]) end end
+	end
+	if walls_first then
+		local w = a_wall()
+		if w then return w end
+	end
+	if solid_at(vector.add(pos, down)) then return 1 end
+	local w = a_wall()
+	if w then return w end
+	if solid_at(vector.add(pos, up)) then return 0 end
+	return 1
+end
+-- A torch is three blocks in Minetest Game: on the floor, on a wall, from the ceiling.
+local function torch_for(param2)
+	if param2 == 1 or not core.registered_nodes["default:torch_wall"] then return "default:torch" end
+	if param2 == 0 then return "default:torch_ceiling" end
+	return "default:torch_wall"
+end
+
 local function set_turned(pos, n)
 	local name, param2 = n.item, tonumber(n.param2) or 0
 	local f = n.facing and FACEDIR[n.facing]
@@ -96,14 +156,12 @@ local function set_turned(pos, n)
 		if core.registered_nodes["doors:hidden"] then core.set_node(up, { name = "doors:hidden", param2 = param2 }) end
 		return
 	end
-	if name == "default:torch" and n.facing and core.registered_nodes["default:torch_wall"] then
-		name = "default:torch_wall"
-	end
 	local def = core.registered_nodes[name] or {}
-	if f and (def.paramtype2 == "facedir" or def.paramtype2 == "4dir" or def.paramtype2 == "colorfacedir") then
+	if wallmounted(def) then
+		param2 = attach_dir(pos, name, n.facing, n.upside_down)
+		if name:match("^default:torch") then name = torch_for(param2) end
+	elseif f and (def.paramtype2 == "facedir" or def.paramtype2 == "4dir" or def.paramtype2 == "colorfacedir") then
 		param2 = n.upside_down and UPSIDE[f] or f
-	elseif n.facing and (def.paramtype2 == "wallmounted" or def.paramtype2 == "colorwallmounted") then
-		param2 = WALL[n.facing] or 1
 	elseif not f and n.upside_down and def.paramtype2 == "facedir" then
 		param2 = 20 -- a slab or stair hung from above
 	end
@@ -178,7 +236,13 @@ function actions.place(a)
 	-- Blocks nobody is near may not be loaded; load them, or set_node does nothing there.
 	core.load_area(lo, hi)
 	local placed, protected, filled = 0, 0, 0
+	-- Attached blocks (torches, ladders, signs) last, so the walls and floors they hang on are there first.
+	local ordered, later = {}, {}
 	for _, n in ipairs(a.nodes) do
+		if wallmounted(core.registered_nodes[n.item]) then later[#later + 1] = n else ordered[#ordered + 1] = n end
+	end
+	for _, n in ipairs(later) do ordered[#ordered + 1] = n end
+	for _, n in ipairs(ordered) do
 		local pos = vector.new(n.x, n.y, n.z)
 		if core.is_protected(pos, "") then
 			protected = protected + 1
@@ -380,6 +444,77 @@ function actions.clear(a)
 	if not level then return true, "Clearing trees and plants from " .. cols .. " columns; the ground stays as it was." .. more end
 	return true, "Levelling " .. (x2 - x1 + 1) .. " by " .. (z2 - z1 + 1) .. " at y " .. y .. ". Build from y " .. (y + 1) .. "." .. more
 end
+
+-- ---- Can a person walk in? (owner, 2026-10-27: "bots build houses without a large enough floor or walkway to get
+-- into them", "the floor is blocking the door") ----
+-- From two steps outside a doorway, through it, to two steps inside: at each step a person needs something to stand
+-- on and two blocks of room (air, an open door, grass), and may step up or down one block. Tells what is in the way.
+local function passable(pos)
+	local def = core.registered_nodes[core.get_node(pos).name]
+	return def == nil or def.walkable == false or core.get_node(pos).name:find("^doors:door_") ~= nil or core.get_node(pos).name == "doors:hidden"
+end
+function actions.entrance(a)
+	if not in_world(a.x, a.y, a.z) then return false, "That position is outside the world." end
+	local door = vector.new(a.x, a.y, a.z)
+	core.load_area(vector.subtract(door, 4), vector.add(door, 4))
+	local tries = SIDES[a.facing or ""] and { a.facing } or SIDE_ORDER
+	local report = {}
+	for _, side in ipairs(tries) do
+		local out = SIDES[side]
+		local problems, y = {}, a.y
+		-- Outside to inside: two steps out, the doorway, two steps in.
+		for step = 2, -2, -1 do
+			local at = vector.add(vector.new(door.x, 0, door.z), vector.multiply(out, step))
+			-- Where the feet go here: the same height, or one up or down from the last step.
+			local found
+			for _, dy in ipairs({ 0, 1, -1 }) do
+				local feet = vector.new(at.x, y + dy, at.z)
+				if not passable(vector.new(feet.x, feet.y - 1, feet.z)) and passable(feet) and passable(vector.new(feet.x, feet.y + 1, feet.z)) then
+					found = feet.y
+					break
+				end
+			end
+			local where = step == 0 and "the doorway" or (step > 0 and (step .. " out") or (-step .. " in"))
+			if not found then
+				local feet = vector.new(at.x, y, at.z)
+				local what = not passable(feet) and ("blocked at foot height by " .. core.get_node(feet).name)
+					or not passable(vector.new(feet.x, feet.y + 1, feet.z)) and ("no headroom: " .. core.get_node(vector.new(feet.x, feet.y + 1, feet.z)).name .. " at head height")
+					or passable(vector.new(feet.x, feet.y - 1, feet.z)) and "nothing to stand on (a drop or a gap)"
+					or "a step of more than one block"
+				problems[#problems + 1] = where .. " (" .. at.x .. ", " .. y .. ", " .. at.z .. "): " .. what
+			else
+				y = found
+			end
+		end
+		if #problems == 0 then
+			return true, "A person can walk in from the " .. side .. ": outside, through the doorway at (" .. door.x .. ", "
+				.. door.y .. ", " .. door.z .. "), and inside. The entrance is fine."
+		end
+		report[#report + 1] = "From the " .. side .. ": " .. table.concat(problems, "; ")
+	end
+	return true, "Nobody can walk in yet. " .. table.concat(report, ". ") .. ". Fix it: the door opening needs two clear blocks "
+		.. "above the floor, the floor inside level with the doorway, and solid ground or a step outside it, with a path out."
+end
+
+-- Once per map block, as it loads: torches and ladders the characters set before attach_dir existed are turned the
+-- right way. A floor torch hanging from the ceiling (param2 0, upside down) finds its surface again; a ladder lying on
+-- the floor or the ceiling goes onto a wall beside it, if there is one. Players' torches are never like that.
+core.register_lbm({
+	label = "ai_bot: torches and ladders the right way up",
+	name = "ai_bot:attached_right_way_v1",
+	nodenames = { "default:torch", "default:ladder_wood", "default:ladder_steel" },
+	run_at_every_load = false,
+	action = function(pos, node)
+		if node.name == "default:torch" then
+			if node.param2 == 1 then return end
+			local p2 = attach_dir(pos, node.name)
+			core.swap_node(pos, { name = torch_for(p2), param2 = p2 })
+		elseif node.param2 <= 1 then
+			local p2 = attach_dir(pos, node.name)
+			if p2 > 1 then core.swap_node(pos, { name = node.name, param2 = p2 }) end
+		end
+	end,
+})
 
 -- ---- Farming (owner, 2026-10-27: "the bot is complaining that theres no farming mechanics", there is: wheat and cotton) ----
 

@@ -24,7 +24,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { TOOLS } from './tools.mjs';
 import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId, affinityWord,
-  trustWord } from './character.mjs';
+  trustWord, needsOf, traitsOf } from './character.mjs';
 
 // A /link code lasts this long.
 const LINK_MS = 10 * 60_000;
@@ -49,13 +49,20 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   game = createGame({ now }), discord = null, bot = null, log = console, daily = false }) {
   const sessionSecret = config.sessionSecret || db.secret('session');
   // The Activity feed's filters, as kinds of event.
-  const FEED_KINDS = { talk: ['answered', 'quiet'], work: ['own turn', 'task', 'prank'], skipped: ['skipped', 'ignored'], problems: ['limited', 'error'] };
+  const FEED_KINDS = { talk: ['answered', 'quiet', 'chat'], work: ['own turn', 'task', 'prank', 'kindness'], skipped: ['skipped', 'ignored'], problems: ['limited', 'error'] };
   // Once: "mentions only" was the first version's default and stayed saved; everyone gets an answer now (owner,
   // 2026-10-27: "Someone should reply"). Set it back on /admin after this if wanted.
   if (!db.setting('once.listen-all')) {
     const b = db.json('bot', {});
     if (b.listen === 'mentions') db.putJson('bot', { ...b, listen: 'all' });
     db.putSetting('once.listen-all', '1');
+  }
+  // Once: the first pace (a turn after a minute, 30 an hour) was too chatty (owner, 2026-10-27: "Bots are too chatty.
+  // They should say or do something after about 5-10 mins of idle time"): at least 5 minutes, at most 12 an hour.
+  if (!db.setting('once.idle-pace')) {
+    const b = db.json('bot', {});
+    if (b.idle) db.putJson('bot', { ...b, idle: { ...b.idle, after: Math.max(300, b.idle.after ?? 300), perHour: Math.min(12, b.idle.perHour ?? 12) } });
+    db.putSetting('once.idle-pace', '1');
   }
   const redirectUri = `${config.publicUrl}/auth/discord/callback`;
   const relay = () => ({ chat: true, news: true, ...db.json('relay', {}) });
@@ -117,7 +124,12 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   // Kept in the database, so a bot restart does not count as someone being around.
   let lastActivity = Number(db.setting('activity.last')) || now();
   const active = () => { lastActivity = now(); db.putSetting('activity.last', String(lastActivity)); };
+  // The game's items come once, when Luanti starts; a bot restarted on its own (a hot update) gets them back from here.
+  // Without this, find_items found nothing after every hot update, and the characters believed there were no doors,
+  // seeds or hoes (owner, 2026-10-27: "Bot says no door", "Need to give bots all items").
+  if (!game.items.length) game.items = db.json('game.items', []);
   game.onEvent((e) => {
+    if (e.type === 'start' && Array.isArray(e.items) && e.items.length) db.putJson('game.items', e.items);
     if (e.type === 'chat' || e.type === 'join' || e.type === 'order') active();
     if (e.type === 'chat' && typeof e.name === 'string' && typeof e.text === 'string') {
       // Everyone who chats is someone the bot knows, whether or not it answers.
@@ -459,7 +471,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'GET /api/admin') {
       return send(res, 200, {
         you, ...status(), settings: botSettings(db, config), relay: relay(), models: MODELS, efforts: EFFORTS,
-        characters: castOf(db, config, now()), people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
+        characters: castOf(db, config, now()).map((c) => ({ ...c, needsNow: needsOf(c, now()), traitsNow: traitsOf(c) })),
+        people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
         memories: db.allMemories(80),
         activity: db.activity({ limit: 40 }),
         // Every account on the game server, each saying who on Discord it is linked to, if anyone (Players lists them all
@@ -502,7 +515,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (body.idle && typeof body.idle === 'object') {
         const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.floor(Number(v)))) : d);
         next.idle = { enabled: body.idle.enabled !== false, after: num(body.idle.after, 15, 3600, 60),
-          perHour: num(body.idle.perHour, 0, 120, 20) };
+          perHour: num(body.idle.perHour, 0, 120, 20), social: num(body.idle.social, 0, 100, 30), kindness: num(body.idle.kindness, 0, 100, 15) };
       }
       if (Number.isInteger(Number(body.summaryHour)) && Number(body.summaryHour) >= -1 && Number(body.summaryHour) <= 23) {
         next.summaryHour = Number(body.summaryHour);
@@ -648,7 +661,24 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (req.method !== 'POST') return send(res, 405, { error: 'POST JSON-RPC here.' }, { allow: 'POST' });
       const msg = await readBody(req);
       if (!msg) return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Not JSON.' } });
-      const ctx = { game, db, status, announce };
+      // talk(name, text): a word to one character from the builders (an admin), her answer back (owner, 2026-10-27:
+      // "Tell bot via mcp that doors are available").
+      const talk = async (name, text) => {
+        const ch = characters().find((c) => c.name.toLowerCase() === String(name).toLowerCase());
+        if (!ch) return { ok: false, message: `No character called ${name}.` };
+        db.addChat('admin', 'Builders', `${ch.name}, ${text}`, now());
+        const answer = await brain.hear({ source: 'game', name: 'Builders', text: `${ch.name}, ${text}`, admin: true, only: ch.id,
+          personId: 'admin:builders' }, (t, who) => botSays(t, who, { toDiscord: true }));
+        return { ok: true, message: answer ? `${ch.name}: ${answer}` : `${ch.name} did not answer.` };
+      };
+      // Restart the Luanti server (not the bot), only while nobody is playing unless forced.
+      const restartGame = ({ force = false } = {}) => {
+        if (!luanti) return { ok: false, message: 'This server does not run Luanti itself.' };
+        if (game.players.length && !force) return { ok: false, message: `${game.players.length} playing now: not restarting (force to do it anyway).` };
+        luanti.restart().catch((err) => log.error('restart failed:', err));
+        return { ok: true, message: 'Restarting the game; back in about 20 seconds.' };
+      };
+      const ctx = { game, db, status, announce, maps, talk, restartGame };
       if (Array.isArray(msg)) {
         const out = (await Promise.all(msg.map((m) => mcpCall(m, ctx)))).filter(Boolean);
         return out.length ? send(res, 200, out) : (res.writeHead(202), res.end());

@@ -122,6 +122,10 @@ export function saveCharacter(db, id, patch, config = {}) {
     backstory: text(patch.backstory, 3000), personality: text(patch.personality, 3000), speech: text(patch.speech, 3000),
     goals: text(patch.goals, 3000),
     goal: typeof patch.goal === 'string' ? patch.goal.trim().slice(0, 200) || null : undefined,
+    // The personality sliders, set on /admin (0 to 100 each).
+    traits: patch.traits && typeof patch.traits === 'object'
+      ? { ...traitsOf(c), ...Object.fromEntries(TRAITS.filter((k) => Number.isFinite(Number(patch.traits[k])))
+        .map((k) => [k, Math.max(0, Math.min(100, Math.round(Number(patch.traits[k]))))])) } : undefined,
   };
   for (const [k, v] of Object.entries(fields)) if (v !== undefined) c[k] = v;
   if (patch.resetMood) delete c.mood;
@@ -139,6 +143,51 @@ export function removeCharacter(db, id, config = {}) {
 }
 
 // Set a character's own state (mood, goal, tasks), keeping everything else.
+// ---- Personality sliders: how a character tends to spend her time and talk, 0 to 100 each ----
+// (owner, 2026-10-27: "track various social attributes so that their internal memories and personalities can better
+// drive their behaviors"; "personality sliders. This will be more static. But the admin can change them whenever").
+// sociable: chats instead of working; generous: does nice things for others; playful: jokes and teasing; ambitious:
+// big builds and ideas; sensitive: talks about feelings. Saved on the character as `traits`; changed on /admin only.
+export const TRAITS = ['sociable', 'generous', 'playful', 'ambitious', 'sensitive'];
+const TRAIT_START = {
+  blocky: { sociable: 70, generous: 65, playful: 75, ambitious: 60, sensitive: 55 },
+  moss: { sociable: 35, generous: 45, playful: 40, ambitious: 80, sensitive: 35 },
+};
+/** Her personality sliders (as set on /admin, else where she starts). */
+export const traitsOf = (ch) => ({ ...Object.fromEntries(TRAITS.map((k) => [k, 50])), ...(TRAIT_START[ch.id] ?? {}), ...(ch.traits ?? {}) });
+// ---- Needs: her social battery, which what she does drains and fills (owner, 2026-10-27: "Things they do drain
+// certain aspects of their social brain. More energy they spend to build, the more tired they become. Tired workers
+// need to banter") ----
+// energy: building spends it, rest and chats give it back; connection: working alone wears it down, talking and
+// kindness fill it; fun: long work wears it down, jokes and banter fill it. 0 to 100, saved as `needs` with the time
+// they were last changed; with time they come back toward rested (energy) and drift down (connection, fun).
+export const NEEDS = ['energy', 'connection', 'fun'];
+const NEEDS_START = { energy: 80, connection: 60, fun: 60 };
+const PER_HOUR = { energy: 12, connection: -4, fun: -3 };
+/** Her needs now: as last saved, moved on by the time since. */
+export function needsOf(ch, now = Date.now()) {
+  const saved = ch.needs ?? { ...NEEDS_START, at: now };
+  const hours = Math.max(0, (now - (saved.at ?? now)) / 3_600_000);
+  return Object.fromEntries(NEEDS.map((k) => [k, Math.max(0, Math.min(100, Math.round((saved[k] ?? NEEDS_START[k]) + PER_HOUR[k] * hours)))]));
+}
+/** Change her needs by `delta` ({ energy: -8, ... }), saved; returns them. */
+export function changeNeeds(db, ch, delta, now = Date.now()) {
+  const n = needsOf(ch, now);
+  for (const k of NEEDS) if (Number.isFinite(delta[k])) n[k] = Math.max(0, Math.min(100, Math.round(n[k] + delta[k])));
+  ch.needs = { ...n, at: now };
+  setState(db, ch.id, { needs: ch.needs });
+  return n;
+}
+const needLine = (n) => [
+  n.energy < 20 ? 'exhausted' : n.energy < 40 ? 'tired' : n.energy > 80 ? 'full of energy' : 'fine for energy',
+  n.connection < 25 ? 'lonely, longing for company' : n.connection < 45 ? 'a bit lonely' : n.connection > 80 ? 'well connected' : null,
+  n.fun < 25 ? 'bored stiff, in need of a laugh' : n.fun < 45 ? 'could do with some fun' : n.fun > 80 ? 'in high spirits' : null,
+].filter(Boolean).join(', ');
+
+const traitWord = (v) => (v >= 80 ? 'very' : v >= 60 ? 'rather' : v >= 40 ? 'somewhat' : v >= 20 ? 'not very' : 'not at all');
+const respectWord = (v) => (v >= 60 ? 'you admire their work' : v >= 25 ? 'you respect their work' : v > -25 ? 'no strong view of their work'
+  : 'you think little of their work');
+
 export function setState(db, id, patch) {
   const list = db.json('characters', []);
   const c = list.find((x) => x.id === id);
@@ -234,6 +283,9 @@ export function personCard(db, ch, id, now = Date.now(), { speaker = false } = {
       : `First seen ${ago(now - p.first_at)}; they have talked ${p.talks} times here; last seen ${ago(now - p.last_at)}.`,
     `How you feel: ${affinityWord(b.affinity)} (affinity ${b.affinity}), trust ${trustWord(b.trust)} (${b.trust}).`
       + `${b.status === 'dating' ? ' You are dating them.' : b.status === 'ex' ? ' They are your ex.' : ''}`,
+    `Between you: ${b.familiarity} talk${b.familiarity === 1 ? '' : 's'}${b.last_talk ? `, the last ${ago(now - b.last_talk)}` : ''}; `
+      + `${respectWord(b.respect)} (respect ${b.respect}); gifts: you gave ${b.gifts_given}, they gave ${b.gifts_got}.`
+      + `${b.jokes.length ? ` Your inside jokes: ${b.jokes.join('; ')}.` : ''}`,
     b.facts.length ? `What you know about them: ${b.facts.join('; ')}.` : 'You know nothing about them yet.',
     mems.length ? `Your memories with them:\n${mems.join('\n')}` : 'No memories together yet.',
     ...(speaker && pushed ? [`They have pushed you out of character ${pushed} time${pushed === 1 ? '' : 's'} lately`
@@ -247,8 +299,13 @@ export function personCard(db, ch, id, now = Date.now(), { speaker = false } = {
  * speakerId: the person talking (or null on its own turns); others: ids of the rest; cast: every active character.
  */
 export function characterContext(db, ch, { speakerId = null, others = [], cast: all = [], now = Date.now() } = {}) {
+  const tr = traitsOf(ch);
   const parts = [`Your mood: ${ch.mood.label}${ch.mood.reason ? ` (${ch.mood.reason})` : ''}.`
-    + `${ch.goal ? ` What you are working on: ${ch.goal}.` : ''}`];
+    + `${ch.goal ? ` What you are working on: ${ch.goal}.` : ''}`,
+  `Your personality (let it colour what you do and say): ${TRAITS.map((k) => `${traitWord(tr[k])} ${k}`).join(', ')}.`];
+  const nd = needsOf(ch, now);
+  parts.push(`How you feel in yourself right now: ${needLine(nd)} (energy ${nd.energy}, connection ${nd.connection}, fun ${nd.fun}). `
+    + 'Let it show: tired, you say so and slow down; lonely or bored, you seek company and a laugh.');
   if (ch.project) parts.push(projectLine(ch.project, now));
   const card = speakerId && personCard(db, ch, speakerId, now, { speaker: true });
   if (card) parts.push(`Who is talking to you:\n${card}`);
@@ -261,6 +318,8 @@ export function characterContext(db, ch, { speakerId = null, others = [], cast: 
     const b = db.bond(ch.id, p.id);
     lines.push(`- ${p.name}${p.id.startsWith('char:') ? ' (a fellow character)' : ''}${b.nickname ? ` ("${b.nickname}")` : ''}: `
       + `${affinityWord(b.affinity)}, trust ${trustWord(b.trust)}${b.status === 'dating' ? ', your partner' : b.status === 'ex' ? ', your ex' : ''}`
+      + `${b.familiarity ? `, ${b.familiarity} talks` : ''}${b.respect >= 25 || b.respect <= -25 ? `, ${respectWord(b.respect)}` : ''}`
+      + `${b.jokes.length ? `, an inside joke: ${b.jokes.at(-1)}` : ''}`
       + `${b.facts.length ? `; ${b.facts.slice(-3).join('; ')}` : ''}`);
   }
   if (lines.length) parts.push(`Others around:\n${lines.join('\n')}`);
@@ -322,6 +381,7 @@ export const CHARACTER_TOOLS = [
         person,
         affinity: { type: 'integer', minimum: -FEEL_STEP, maximum: FEEL_STEP, description: 'Change in affinity.' },
         trust: { type: 'integer', minimum: -FEEL_STEP, maximum: FEEL_STEP, description: 'Change in trust.' },
+        respect: { type: 'integer', minimum: -FEEL_STEP, maximum: FEEL_STEP, description: 'Change in how much you respect their work and skill.' },
         reason: { type: 'string', maxLength: 200 },
       },
       required: ['person', 'reason'], additionalProperties: false,
@@ -412,6 +472,13 @@ export const CHARACTER_TOOLS = [
       required: ['what', 'why'], additionalProperties: false },
   },
   {
+    name: 'inside_joke',
+    description: 'Keep a joke, a teasing nickname for a thing, or a running gag that only you and this person share, to '
+      + 'bring back later.',
+    input_schema: { type: 'object', properties: { person, joke: { type: 'string', maxLength: 120 } }, required: ['person', 'joke'],
+      additionalProperties: false },
+  },
+  {
     name: 'recall',
     description: 'Search your memories for words (a place, a build, a name).',
     input_schema: { type: 'object', properties: { query: { type: 'string', maxLength: 100 } }, required: ['query'],
@@ -460,6 +527,7 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       const dt = step(input.trust, used.trust);
       turn.moved.set(p.id, { affinity: used.affinity + da, trust: used.trust + dt });
       db.feel(ch.id, p.id, b.affinity + da, b.trust + dt);
+      if (input.respect) db.social(ch.id, p.id, { respect: b.respect + Math.max(-FEEL_STEP, Math.min(FEEL_STEP, Math.round(Number(input.respect) || 0))) });
       if (Math.abs(da) + Math.abs(dt) >= 6 && input.reason) {
         db.remember(ch.id, p.id, input.reason, Math.abs(da) >= 8 ? 3 : 2, now);
       }
@@ -532,6 +600,10 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
           db.remember(m.id, null, `Finished ${others.length ? `with ${others.join(' and ')} ` : 'my project '}${p.title} at `
             + `(${p.site.x}, ${p.site.y}, ${p.site.z}). ${p.notes.slice(-3).join('; ')}`, 4, now);
           setState(db, m.id, { project: null, goal: null, lastProject: { title: p.title, style: p.style ?? null, site: p.site, at: now } });
+          // A finished build is a joy (fun); built together, they know each other a little better.
+          const me = fresh(db, m.id);
+          if (me) changeNeeds(db, me, { fun: 15, connection: crew.length > 1 ? 10 : 0 }, now);
+          for (const o of crew) if (o.id !== m.id) db.social(m.id, characterPersonId(o.id), { talked: true, at: now });
         }
         ch.project = null;
         return { ok: true, message: `${p.title} is finished! Tell everyone, proudly, in one line.` };
@@ -550,6 +622,12 @@ export function runCharacterTool(db, ch, name, input = {}, turn = { speakerId: n
       const rest = (p.crew ?? []).filter((m) => m.id !== ch.id);
       if (rest.length) shareProject(db, { ...p, crew: rest });
       return { ok: true, message: rest.length ? `Dropped; ${rest.map((m) => m.name).join(' and ')} carries on.` : 'Dropped.' };
+    }
+    case 'inside_joke': {
+      const p = who(input.person);
+      if (!p) return { ok: false, message: `You do not know anyone called ${input.person}.` };
+      db.social(ch.id, p.id, { joke: String(input.joke ?? '').trim(), at: now });
+      return { ok: true, message: `Kept: you can bring it up with ${p.name} again.` };
     }
     case 'request_tool': {
       // (owner, 2026-10-27: "Bots can also request via mcp server for new tools to be added too"; "You will check the

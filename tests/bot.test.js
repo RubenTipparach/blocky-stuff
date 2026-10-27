@@ -23,7 +23,8 @@ function setup(script, { t = 0 } = {}) {
   const config = loadConfig({ ANTHROPIC_API_KEY: 'k' });
   const client = fakeClient(script);
   let clock = t;
-  const bot = createBot({ db, game, config, client, now: () => clock, log: quiet });
+  // Chance never picks a chat or a kind deed unless a test asks (random: 0.99 is above every threshold).
+  const bot = createBot({ db, game, config, client, now: () => clock, log: quiet, random: () => 0.99 });
   return { db, game, bot, client, tick: (ms) => { clock += ms; } };
 }
 
@@ -148,7 +149,7 @@ test('a character naming another may get an answer, but not forever', () => {
   const { bot } = setup([]);
   const [blocky, moss] = bot.cast();
   assert.deepEqual(bot.answerers('Moss, look at this!', blocky).map((c) => c.id), ['moss']);
-  assert.deepEqual(bot.answerers('Moss, look at this!', blocky, 2), []);
+  assert.deepEqual(bot.answerers('Moss, look at this!', blocky, 6), []); // a chat of three lines each, at most
   assert.deepEqual(bot.answerers('I talk about myself, Moss', moss), []);
 });
 
@@ -312,4 +313,47 @@ test('a promise with nothing done is sent back once: start it now or say no', as
   assert.match(client.calls[0].system, /comes before your own project/);
   assert.match(client.calls[0].system, /request_tool/);
   assert.match(client.calls[0].system, /no axe/);
+});
+
+test('between work, a character may turn to another for a chat, and they talk', async () => {
+  const db = openDb(':memory:');
+  const game = createGame();
+  const client = fakeClient([text('Moss, your tower makes my cottage look like a biscuit tin!')]);
+  const bot = createBot({ db, game, config: loadConfig({ ANTHROPIC_API_KEY: 'k' }), client, now: () => 10_000_000, log: quiet, random: () => 0.01 });
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  const said = [];
+  assert.equal(await bot.idle((t, ch) => said.push([ch.name, t])), 'Moss, your tower makes my cottage look like a biscuit tin!');
+  assert.match(client.calls[0].messages[0].content, /Take a break from building and talk with Moss/);
+  assert.equal(db.bond('blocky', 'char:moss').familiarity, 1);
+  assert.equal(bot.activity()[0].kind, 'chat');
+  assert.deepEqual(bot.answerers(said[0][1], bot.cast()[0]).map((c) => c.name), ['Moss']); // she will answer
+});
+
+test('past the daily limit a person still hears back; the characters\' own turns stop at 80% of it', async () => {
+  const { db, bot, game } = setup([]);
+  db.putJson('bot', { cooldown: 0, perDay: 10 });
+  for (let i = 0; i < 8; i++) db.addUsage(10, 5, 0);
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  assert.equal(await bot.idle(() => {}), null); // 8 of 10: own turns are done for today
+  for (let i = 0; i < 2; i++) db.addUsage(10, 5, 0);
+  const said = [];
+  await bot.hear({ source: 'discord', name: 'ruben', text: 'can you make a bridge' }, (t) => said.push(t));
+  assert.match(said[0], /resting for today/);
+});
+
+test('a speaker in the world: where they stand and look, so "here" and "there" mean something', async () => {
+  const { db, game, bot, client } = setup([text('On it!'), text('Coming!')]);
+  db.putJson('bot', { cooldown: 0, listen: 'every' });
+  game.sync({ players: [{ name: 'ruben', pos: { x: -60, y: 10, z: 42 }, hp: 20, privs: [],
+    look: { facing: 'north-east', pitch: -10, at: { x: -52, y: 9, z: 50, block: 'default:dirt_with_grass', dist: 11 } } }] });
+  await bot.hear({ source: 'game', name: 'ruben', text: 'Blocky, build a well over there' }, () => {});
+  const asked = client.calls[0].messages[0].content;
+  assert.match(asked, /at \(-60, 10, 42\), facing north-east, looking at default:dirt_with_grass at \(-52, 9, 50\), 11 blocks away/);
+  assert.match(asked, /"behind me" the south-west/);
+  // From Discord, linked to the game account: the same place.
+  db.meet('game:ruben', 'ruben', { at: 0 });
+  db.meet('discord:42', 'PscifieX', { at: 0 });
+  db.link('game:ruben', 'discord:42');
+  await bot.hear({ source: 'discord', name: 'PscifieX', personId: 'discord:42', text: 'Blocky, come here' }, () => {});
+  assert.match(client.calls[1].messages[0].content, /as ruben, though writing from Discord\) at \(-60, 10, 42\)/);
 });
