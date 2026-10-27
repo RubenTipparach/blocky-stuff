@@ -181,7 +181,7 @@ end
 local npc_name = "Blocky"
 local npc = nil -- the ObjectRef while it exists
 local follow = nil -- the player it walks after
-local work_pos, work_until = nil, 0 -- a build site, and when it is done there
+local work_pos, work_until, work_anim = nil, 0, "mine" -- a site, when it is done there, what it does there
 local has_model = core.get_modpath("player_api") ~= nil
 local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 } }
 local WALK_SPEED, NEAR, FAR = 4, 3, 40
@@ -255,7 +255,7 @@ core.register_entity("ai_bot:npc", {
 			end
 		else
 			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
-			npc_anim(self, work_pos and "mine" or "stand")
+			npc_anim(self, work_pos and work_anim or "stand")
 		end
 	end,
 })
@@ -274,9 +274,15 @@ local function npc_follow(name)
 end
 
 -- Go to a build site and work there a while, appearing there if need be.
-local function npc_work(pos)
-	work_pos, work_until = pos, core.get_us_time() + 10 * 1000000
+local function npc_work(pos, anim)
+	work_pos, work_until, work_anim = pos, core.get_us_time() + 10 * 1000000, anim or "mine"
 	if not npc_alive() then npc_spawn(pos) end
+end
+
+function actions.walk(a)
+	if not in_world(a.x, a.y, a.z) then return false, "That position is outside the world." end
+	npc_work(vector.new(a.x, a.y, a.z), "stand")
+	return true, "Walking to " .. a.x .. ", " .. a.y .. ", " .. a.z .. "."
 end
 
 -- Each sync: in the world while anyone is, by the player it last followed or the first one online.

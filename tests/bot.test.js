@@ -141,3 +141,40 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
   assert.match(client.calls[2].messages[0].content, /heal_player/);
   assert.equal(await setup([]).bot.summary(0), null);
 });
+
+test('an idle turn builds within its limits, says what it is up to, and is kept as its own idea', async () => {
+  const big = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 9, y2: 9, z2: 9 }; // 1000 blocks
+  const small = { item: 'default:wood', x1: 0, y1: 0, z1: 0, x2: 1, y2: 1, z2: 1 };
+  const { db, game, bot, client } = setup([
+    () => ({ stop_reason: 'tool_use', usage: {}, content: [
+      { type: 'tool_use', id: 'a', name: 'fill_box', input: big },
+      { type: 'tool_use', id: 'b', name: 'give_item', input: { player: 'alice', item: 'default:dirt' } }] }),
+    () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 'c', name: 'fill_box', input: small }] }),
+    text('Building a little wooden cube!'),
+  ]);
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  const said = [];
+  const turn = bot.idle((t) => said.push(t));
+  await new Promise((r) => setTimeout(r, 10));
+  const { actions } = game.sync({});
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].nodes.length, 8);
+  game.sync({ results: [{ id: actions[0].id, ok: true, message: 'Placed 8 blocks.' }] });
+  assert.equal(await turn, 'Building a little wooden cube!');
+  const firstResults = client.calls[1].messages[2].content;
+  assert.match(firstResults[0].content, /400 blocks/);
+  assert.match(firstResults[1].content, /not for your own turns/);
+  assert.equal(db.deeds(0)[0].who, 'Blocky (own idea)');
+  assert.deepEqual(said, ['Building a little wooden cube!']);
+});
+
+test('no idle turn with nobody online, when switched off, or past the hourly limit', async () => {
+  const { db, game, bot } = setup([text('QUIET'), text('Hi')]);
+  assert.equal(await bot.idle(() => {}), null); // nobody online
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  assert.equal(await bot.idle(() => {}), null); // chose QUIET
+  db.putJson('bot', { idle: { enabled: true, after: 60, perHour: 1 } });
+  assert.equal(await bot.idle(() => {}), null); // the QUIET turn used the hour's one
+  db.putJson('bot', { idle: { enabled: false } });
+  assert.equal(await bot.idle(() => {}), null);
+});

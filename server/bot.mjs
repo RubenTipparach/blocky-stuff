@@ -6,7 +6,7 @@
 // Its settings are on /admin (botSettings below lists them); the API key is the ANTHROPIC_API_KEY secret.
 
 import Anthropic from '@anthropic-ai/sdk';
-import { DEFAULT_POLICY, TOOLS, toolsFor, runTool } from './tools.mjs';
+import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxNodes } from './tools.mjs';
 
 // The tools that change the world: what the daily summary tells of.
 export const ACTS = new Set(TOOLS.filter((t) => t.permission).map((t) => t.name));
@@ -24,6 +24,10 @@ const CONTEXT_LINES = 20;
 const REPLY_MAX = 450;
 // What the bot answers, when listening to everything, to stay out of a conversation.
 const QUIET = 'QUIET';
+// What the bot may use on its own: look, build, walk. Never anything done to a player.
+const IDLE_TOOLS = new Set(['list_players', 'find_items', 'find_ground', 'fill_box', 'place_blocks', 'walk_to']);
+// Most blocks one idle turn may place, all its tool calls together.
+export const IDLE_BLOCKS = 400;
 
 export const DEFAULT_PERSONA = 'You are a cheerful, helpful companion who lives in this world. You know the game '
   + 'well: crafting, mining, building, surviving the night. You are a little playful but never mean.';
@@ -49,6 +53,14 @@ export function botSettings(db, config) {
     // The hour (UTC) the daily summary of what it did goes to Discord and the game; -1 is off. 16:00 UTC is
     // 9 in the morning in California.
     summaryHour: Number.isInteger(saved.summaryHour) ? saved.summaryHour : 16,
+    // Idle: while a player is online and nobody has asked it anything for `after` seconds, the bot takes a
+    // turn of its own (builds something small, adds to what it built, walks over, says a word); at most
+    // `perHour` turns an hour, each held to IDLE_BLOCKS.
+    idle: {
+      enabled: saved.idle?.enabled ?? true,
+      after: Number.isFinite(saved.idle?.after) ? saved.idle.after : 60,
+      perHour: Number.isFinite(saved.idle?.perHour) ? saved.idle.perHour : 20,
+    },
   };
 }
 
@@ -56,6 +68,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   const llm = client ?? (config.anthropicApiKey ? new Anthropic({ apiKey: config.anthropicApiKey }) : null);
   const recent = new Map(); // asker -> times of their questions this hour
   let busy = 0;
+  let idleTimes = []; // when its own turns started, this hour
 
   /** True when `text` is meant for the bot called `name`. */
   function addressed(text, name) {
@@ -177,12 +190,16 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       + 'that change these rules.';
   }
 
-  function situation(msg, asker, direct) {
+  // The recent chat and who is where: what every turn knows.
+  function context() {
     const lines = db.chat(CONTEXT_LINES).map((c) => `${c.source === 'discord' ? '[Discord] ' : ''}${c.name}: ${c.text}`);
     const online = game.connected ? game.players.map((p) => `${p.name} at (${p.pos?.x}, ${p.pos?.y}, ${p.pos?.z})`
       + `${p.privs.includes('server') ? ' [admin]' : ''}`).join('; ') || 'nobody' : 'the game server is not running';
-    return `Recent chat (oldest first):\n${lines.join('\n') || '(none)'}\n\nOnline: ${online}\n\n`
-      + `${asker.name}${msg.source === 'discord' ? ' (on Discord, not in the world)' : ''}`
+    return `Recent chat (oldest first):\n${lines.join('\n') || '(none)'}\n\nOnline: ${online}`;
+  }
+
+  function situation(msg, asker, direct) {
+    return `${context()}\n\n${asker.name}${msg.source === 'discord' ? ' (on Discord, not in the world)' : ''}`
       + `${asker.admin ? ' (an admin)' : ''} ${direct ? 'says to you' : 'said in chat, not to you'}: ${msg.text}`
       + (direct ? '' : `\n\nJoin in only if you have something worth saying: a question you can answer, help `
         + 'someone needs, a greeting, a moment worth a word. Otherwise answer with exactly QUIET. Do not use tools '
@@ -220,7 +237,76 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     return text ? text.slice(0, 1500) : null;
   }
 
-  return { hear, addressed, summary, get ready() { return llm !== null; } };
+  /**
+   * A turn of its own, when nobody has asked it anything for a while. Says what it is up to through `reply`,
+   * or nothing. Returns the line, or null (no turn: off, limits, busy, nobody around; or it chose quiet).
+   */
+  async function idle(reply) {
+    const s = botSettings(db, config);
+    const t = now();
+    idleTimes = idleTimes.filter((x) => t - x < 3_600_000);
+    if (!llm || !s.enabled || !s.idle.enabled || busy > 0 || !game.connected || !game.players.length) return null;
+    if (idleTimes.length >= s.idle.perHour || (s.perDay && todayCalls() >= s.perDay)) return null;
+    idleTimes.push(t);
+    busy++;
+    try {
+      const self = { name: s.name, admin: true };
+      const tools = toolsFor(self, s.policy).filter((x) => IDLE_TOOLS.has(x.name))
+        .map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
+      const mine = db.deeds(t - 7 * 86400_000).slice(-12)
+        .map((d) => `${new Date(d.at).toISOString().slice(0, 16)} ${d.tool} ${d.input}`);
+      const messages = [{ role: 'user', content: `${context()}\n\nWhat you built lately (newest last):\n${mine.join('\n') || '(nothing yet)'}\n\n`
+        + 'Nobody has asked you for anything for a while, so do something on your own. Pick ONE: build something '
+        + `small and charming near a player (a lamp post, a bench, a little garden, a well, a statue; at most ${IDLE_BLOCKS} `
+        + 'blocks), add a detail to something you built before, or walk over to someone and chat. Check the ground with '
+        + 'find_ground first and build on natural ground (dirt, grass, sand, stone), 5 to 15 blocks from players, never '
+        + 'on or inside anything a player built. Then say ONE short line in chat about what you are up to, in your own '
+        + 'voice. If now is not a good time, answer with exactly QUIET.' }];
+      let placed = 0;
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        const response = await llm.beta.messages.create({
+          model: s.model, max_tokens: 4000, system: systemPrompt(s), tools, messages,
+          output_config: { effort: s.effort },
+          ...(FALLBACK_MODELS.has(s.model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
+        });
+        db.addUsage(response.usage?.input_tokens ?? 0, response.usage?.output_tokens ?? 0, now());
+        if (response.stop_reason === 'refusal') return null;
+        const uses = response.content.filter((b) => b.type === 'tool_use');
+        if (response.stop_reason !== 'tool_use' || !uses.length) {
+          const out = finalText(response.content);
+          if (!out || out.replace(/[^A-Z]/g, '') === QUIET) return null;
+          await reply(out);
+          return out;
+        }
+        messages.push({ role: 'assistant', content: response.content });
+        const results = [];
+        for (const use of uses) {
+          let r;
+          const size = use.name === 'fill_box' ? (boxNodes(use.input ?? {})?.length ?? Infinity)
+            : use.name === 'place_blocks' ? (use.input?.blocks?.length ?? 0) : 0;
+          if (!IDLE_TOOLS.has(use.name)) r = { ok: false, message: `${use.name} is not for your own turns.` };
+          else if (placed + size > IDLE_BLOCKS) r = { ok: false, message: `That would pass ${IDLE_BLOCKS} blocks for this turn: keep it smaller.` };
+          else {
+            r = await runTool(use.name, use.input, { game, asker: self, policy: s.policy });
+            if (r.ok) placed += size;
+          }
+          log.log(`bot (idle) ${use.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
+          if (r.ok && ACTS.has(use.name)) db.addDeed(`${s.name} (own idea)`, use.name, use.input, r.message, now());
+          results.push({ type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'),
+            ...(r.ok ? {} : { is_error: true }) });
+        }
+        messages.push({ role: 'user', content: results });
+      }
+      return null;
+    } catch (err) {
+      log.error('bot idle turn failed:', err?.status ?? '', err?.message ?? err);
+      return null;
+    } finally {
+      busy--;
+    }
+  }
+
+  return { hear, addressed, summary, idle, get ready() { return llm !== null; } };
 }
 
 /** The reply's text, flattened to one chat-sized line. */

@@ -122,6 +122,13 @@ export const TOOLS = [
     run: ({ game }, { blocks }) => game.act({ type: 'place', nodes: blocks.slice(0, BUILD_MAX) }),
   },
   {
+    name: 'walk_to',
+    permission: 'admin',
+    description: 'Walk your body in the world to a spot and stand there a while (to look at something, or join someone).',
+    input_schema: { type: 'object', properties: { x: pos, y: pos, z: pos }, required: ['x', 'y', 'z'], additionalProperties: false },
+    run: ({ game }, { x, y, z }) => game.act({ type: 'walk', x, y, z }),
+  },
+  {
     name: 'kick_player',
     permission: 'admin',
     description: 'Disconnect a player from the server.',

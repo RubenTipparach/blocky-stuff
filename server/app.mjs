@@ -72,7 +72,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     return r;
   }
 
+  // When a player or Discord last said anything, or the bot last spoke: the idle clock counts from here.
+  let lastActivity = now();
   game.onEvent((e) => {
+    if (e.type === 'chat' || e.type === 'join') lastActivity = now();
     if (e.type === 'chat' && typeof e.name === 'string' && typeof e.text === 'string') {
       db.addChat('game', e.name, e.text, now());
       if (relay().chat) chat.post({ text: e.text, as: e.name });
@@ -94,7 +97,23 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     }
   });
 
+  // The idle clock: a quiet minute (the bot's idle `after`) with a player online, and the bot takes a turn.
+  let idling = false;
+  async function idleTick() {
+    const s = botSettings(db, config);
+    if (idling || !s.idle.enabled || !game.players.length || now() - lastActivity < s.idle.after * 1000) return;
+    idling = true;
+    try {
+      await brain.idle?.((t) => botSays(t));
+    } finally {
+      lastActivity = now();
+      idling = false;
+    }
+  }
+  if (daily) setInterval(() => { idleTick().catch((err) => log.error('idle turn failed:', err)); }, 5000).unref();
+
   function fromDiscord(m) {
+    lastActivity = now();
     db.addChat('discord', m.name, m.text, now());
     if (relay().chat) game.act({ type: 'say', text: m.text, from: `[Discord] ${m.name}` });
     // An admin on Discord is known by their Discord id, which Discord vouches for; a name anyone can type.
@@ -266,6 +285,11 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
       }
       if (body.listen === 'all' || body.listen === 'mentions') next.listen = body.listen;
+      if (body.idle && typeof body.idle === 'object') {
+        const num = (v, lo, hi, d) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Math.floor(Number(v)))) : d);
+        next.idle = { enabled: body.idle.enabled !== false, after: num(body.idle.after, 15, 3600, 60),
+          perHour: num(body.idle.perHour, 0, 120, 20) };
+      }
       if (Number.isInteger(Number(body.summaryHour)) && Number(body.summaryHour) >= -1 && Number(body.summaryHour) <= 23) {
         next.summaryHour = Number(body.summaryHour);
       }
@@ -377,5 +401,6 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   server.discord = chat;
   server.announce = announce;
   server.dailySummary = dailySummary;
+  server.idleTick = idleTick;
   return server;
 }
