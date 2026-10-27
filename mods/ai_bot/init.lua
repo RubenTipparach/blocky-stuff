@@ -498,6 +498,79 @@ local function after(a)
 	end
 end
 
+-- ---- Seeing an area, for the isometric map (server/map.mjs) ----
+
+-- The blocks of an area as a picture needs them: for each column (x, then z) its top block's height and the blocks
+-- from there down as far as its sides show (to the lower of the two neighbours the camera sees past), as indexes
+-- into a list of names. VoxelManip reads the whole box at once, from memory or disk; ungenerated ground is left out.
+local SCAN_MAX, SCAN_HIGH, SIDE_MAX = 128, 112, 24
+function actions.scan(a)
+	local x1, z1 = math.floor(tonumber(a.x1) or 0), math.floor(tonumber(a.z1) or 0)
+	local w, d = math.floor(tonumber(a.w) or 0), math.floor(tonumber(a.d) or 0)
+	local y1, y2 = math.floor(tonumber(a.y1) or -32), math.floor(tonumber(a.y2) or 80)
+	if w < 1 or d < 1 or w > SCAN_MAX or d > SCAN_MAX or y2 <= y1 or y2 - y1 > SCAN_HIGH
+		or not in_world(x1, y1, z1) or not in_world(x1 + w, y2, z1 + d) then
+		return false, "Scan at most " .. SCAN_MAX .. " by " .. SCAN_MAX .. " columns and " .. SCAN_HIGH .. " high."
+	end
+	local vm = core.get_voxel_manip()
+	local emin, emax = vm:read_from_map({ x = x1, y = y1, z = z1 }, { x = x1 + w, y = y2, z = z1 + d })
+	local area = VoxelArea:new({ MinEdge = emin, MaxEdge = emax })
+	local data = vm:get_data()
+	local AIR, IGNORE = core.CONTENT_AIR, core.CONTENT_IGNORE
+	-- Tops first (one extra row and column, for the neighbours of the last ones).
+	local top = {}
+	for z = z1, z1 + d do
+		for x = x1, x1 + w do
+			local h = nil
+			for y = y2, y1, -1 do
+				local c = data[area:index(x, y, z)]
+				if c ~= AIR and c ~= IGNORE then h = y break end
+			end
+			top[(z - z1) * (w + 1) + (x - x1)] = h
+		end
+	end
+	local names, index, cols = {}, {}, {}
+	local function id(c)
+		local n = core.get_name_from_content_id(c)
+		if not index[n] then names[#names + 1] = n index[n] = #names - 1 end
+		return index[n]
+	end
+	for z = z1, z1 + d - 1 do
+		for x = x1, x1 + w - 1 do
+			local h = top[(z - z1) * (w + 1) + (x - x1)]
+			if not h then
+				cols[#cols + 1] = false
+			else
+				local south = top[(z + 1 - z1) * (w + 1) + (x - x1)] or y1
+				local east = top[(z - z1) * (w + 1) + (x + 1 - x1)] or y1
+				local low = math.min(h, math.max(math.min(south, east) + 1, h - SIDE_MAX, y1)) -- always its top block
+				local col = { h }
+				for y = h, low, -1 do
+					local c = data[area:index(x, y, z)]
+					col[#col + 1] = (c == AIR or c == IGNORE) and -1 or id(c)
+				end
+				cols[#cols + 1] = col
+			end
+		end
+	end
+	local here = {}
+	for bid, b in pairs(bodies) do
+		if alive(b) then
+			local p = b.obj:get_pos()
+			if p.x >= x1 and p.x < x1 + w and p.z >= z1 and p.z < z1 + d then
+				here[#here + 1] = { id = bid, x = math.floor(p.x + 0.5), y = math.floor(p.y + 0.5), z = math.floor(p.z + 0.5) }
+			end
+		end
+	end
+	for _, player in ipairs(core.get_connected_players()) do
+		local p = player:get_pos()
+		if p.x >= x1 and p.x < x1 + w and p.z >= z1 and p.z < z1 + d then
+			here[#here + 1] = { player = player:get_player_name(), x = math.floor(p.x + 0.5), y = math.floor(p.y + 0.5), z = math.floor(p.z + 0.5) }
+		end
+	end
+	return true, core.write_json({ x1 = x1, z1 = z1, w = w, d = d, y1 = y1, names = names, cols = cols, marks = here })
+end
+
 -- ---- Talking to one of them, and how she feels about you ----
 
 -- The character a player is looking at (within 12 blocks, about 20 degrees of where they look), else the nearest
@@ -653,6 +726,16 @@ local function sync()
 		extra_headers = { "Content-Type: application/json", "X-Bridge-Key: " .. key },
 		data = core.write_json({
 			players = snapshot(), time = core.get_timeofday(), events = sent_events, results = sent_results,
+			bodies = (function()
+				local out = {}
+				for bid, b in pairs(bodies) do
+					if alive(b) then
+						local p = b.obj:get_pos()
+						out[#out + 1] = { id = bid, x = math.floor(p.x + 0.5), y = math.floor(p.y + 0.5), z = math.floor(p.z + 0.5) }
+					end
+				end
+				return out
+			end)(),
 		}),
 	}, function(res)
 		in_flight = false

@@ -18,6 +18,7 @@ import { createBot, botSettings } from './bot.mjs';
 import { createDiscord } from './discord.mjs';
 import { mcpAuthorized, mcpCall, storeMcpToken } from './mcp.mjs';
 import { ADMIN_PAGE } from './admin-page.mjs';
+import { createMaps } from './maps.mjs';
 import { TOOLS } from './tools.mjs';
 import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId, affinityWord,
   trustWord } from './character.mjs';
@@ -68,6 +69,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     onMessage: (m) => fromDiscord(m),
   });
   const brain = bot ?? createBot({ db, game, config, now, log });
+  const maps = createMaps({ db, game, config, characters: () => characters(), chat, now, log });
+  if (daily) setInterval(() => { maps.tick().catch((err) => log.error('map tick failed:', err)); }, 60_000).unref();
 
   // ---- Chat, between the game, Discord and the bot ----
 
@@ -187,6 +190,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (m.userId) db.meet(personId('discord', m.userId), m.name, { at: now() });
     const linking = /^!link\s+([0-9a-f]{6})\s*$/i.exec(m.text.trim());
     if (linking && m.userId) return linkDiscord(m, linking[1]);
+    if (/^!map\b/i.test(m.text.trim())) {
+      maps.command(m.text).catch((err) => log.error('!map failed:', err));
+      return undefined;
+    }
     db.addChat('discord', m.name, m.text, now());
     if (relay().chat) game.act({ type: 'say', text: m.text, from: `[Discord] ${m.name}` });
     // An admin on Discord is known by their Discord id, which Discord vouches for; a name anyone can type.
@@ -344,6 +351,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         characters: castOf(db, config, now()), people: db.people(100).map((p) => ({ ...p, color: db.colorOf(p.id) })),
         memories: db.allMemories(80),
         activity: brain.activity?.() ?? [],
+        maps: { url: `${config.publicUrl}/map`, settings: maps.settings(), kept: db.json('maps', {}) },
         policyTools: TOOLS.filter((t) => t.permission && t.permission !== 'admin').map((t) => ({ name: t.name, permission: t.permission })),
         missing: config.missing, chat: db.chat(80), usage: db.usage(14),
         mcp: { url: `${config.publicUrl}/mcp`, hasToken: Boolean(config.mcpToken || db.setting('mcp.token')) },
@@ -442,6 +450,18 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'POST /api/admin/forget-memory') {
       return send(res, 200, { forgotten: db.dropMemory(Number(body.id)) });
     }
+    // How often a working character's picture goes to Discord, in hours (0: only finished projects).
+    if (route === 'POST /api/admin/maps') {
+      const every = Math.max(0, Math.min(48, Number(body.every)));
+      if (Number.isFinite(every)) db.putJson('maps.settings', { ...db.json('maps.settings', {}), every });
+      return send(res, 200, { maps: maps.settings() });
+    }
+    if (route === 'POST /api/admin/map-now') {
+      const ch = characters().find((c) => c.id === body.id);
+      if (!ch) return send(res, 404, { error: 'No such character.' });
+      const snap = await maps.snapshot(ch);
+      return snap ? send(res, 200, { ok: true, file: snap.file }) : send(res, 400, { error: `${ch.name} is not in the world, or the game is down.` });
+    }
     if (route === 'POST /api/admin/summary') {
       const text = await dailySummary({ force: true });
       return send(res, text ? 200 : 400, text ? { ok: true, text } : { error: 'Nothing happened in the last day, or the bot is off.' });
@@ -471,6 +491,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     }
 
     const ip = req.headers['fly-client-ip'] ?? req.socket.remoteAddress ?? '';
+    // The public map: open to anyone, renders held to a few a minute per address (server/maps.mjs).
+    if ((url.pathname === '/map' || url.pathname.startsWith('/map/')) && await maps.handle(req, res, url, ip)) return undefined;
     if (/^\/(api|auth|mcp)/.test(url.pathname) && limited(ip)) return send(res, 429, 'Slow down.');
 
     if (url.pathname === '/mcp') {
@@ -518,5 +540,6 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   server.dailySummary = dailySummary;
   server.idleTick = idleTick;
   server.fromDiscord = fromDiscord;
+  server.maps = maps;
   return server;
 }

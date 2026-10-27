@@ -81,6 +81,40 @@ export function createDiscord(opts = {}) {
     return { ok: sent > 0, sent };
   }
 
+  /**
+   * Post a picture to every channel: { png (a Buffer), filename, text, as, color, link }. The picture rides in an embed
+   * with the speaker's name and colour, linking to `link`. Returns { ok, sent }.
+   */
+  async function postImage({ png, filename = 'map.png', text = '', as, color, link }) {
+    const mode = modeOf();
+    if (!mode || !png) return { ok: false, sent: 0 };
+    const name = String(filename).replace(/[^\w.-]/g, '') || 'map.png';
+    const payload = {
+      allowed_mentions: { parse: [] },
+      embeds: [{ color: parseInt(String(color ?? '#8fd16a').slice(1), 16) || 0x8fd16a, description: clean(text, 1900),
+        ...(as ? { author: { name: clean(as, 64) } } : {}), ...(link ? { url: link, title: 'See the map' } : {}),
+        image: { url: `attachment://${name}` } }],
+      attachments: [{ id: 0, filename: name }],
+      ...(mode === 'webhook' ? { username: clean(as ?? 'Blocky Stuff', 80) } : {}),
+    };
+    let sent = 0;
+    for (const target of mode === 'bot' ? channelIds : webhooks) {
+      const form = new FormData();
+      form.append('payload_json', JSON.stringify(payload));
+      form.append('files[0]', new Blob([png], { type: 'image/png' }), name);
+      try {
+        const res = mode === 'bot'
+          ? await fetchImpl(`${api}/channels/${target}/messages`, { method: 'POST', headers: { authorization: `Bot ${token}` }, body: form })
+          : await fetchImpl(`${target}?wait=true`, { method: 'POST', body: form });
+        if (res.ok) sent++;
+        else log.error(`discord picture failed: ${res.status}`);
+      } catch (err) {
+        log.error('discord picture failed:', err.message);
+      }
+    }
+    return { ok: sent > 0, sent };
+  }
+
   // ---- The Gateway: messages typed in the bot's channels ----
   let ws = null;
   let beat = null;
@@ -176,6 +210,7 @@ export function createDiscord(opts = {}) {
       return out;
     },
     post,
+    postImage,
     /** A one-line news post as an embed: kind is a COLORS key. */
     news: (kind, text) => post({ embed: { color: COLORS[kind] ?? COLORS.bot, description: clean(text, 300) } }),
     start() { if (stopped) { stopped = false; connect(); } },

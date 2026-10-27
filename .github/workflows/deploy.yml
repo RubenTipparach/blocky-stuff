@@ -57,6 +57,15 @@ jobs:
             docker logs blocky-check 2>&1 | tail -n 120
             exit 1
           fi
+          # The isometric map end to end: the mod scans a real world, the sidecar draws it.
+          sleep 3
+          if ! curl -fsS -m 30 "http://localhost:8080/map/render?x=0&z=0&r=12" -o /tmp/map.png \
+            || [ "$(head -c 4 /tmp/map.png | od -An -tx1 | tr -d ' ')" != "89504e47" ]; then
+            echo "::error::The map did not render; nothing was deployed. The log follows."
+            docker logs blocky-check 2>&1 | tail -n 80
+            exit 1
+          fi
+          echo "Map render: $(wc -c < /tmp/map.png) bytes"
           docker logs blocky-check 2>&1 | grep -E '\[ai_bot\]|Starting Luanti|Sidecar' || true
           docker rm -f blocky-check > /dev/null
 

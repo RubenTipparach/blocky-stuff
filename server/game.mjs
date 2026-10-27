@@ -20,6 +20,7 @@ export const ACTIONS = {
   kick: ['player', 'reason?'],
   heal: ['player'],
   ground: ['columns'],
+  scan: ['x1', 'z1', 'w', 'd'],
   walk: ['x', 'y', 'z'],
   follow: ['player'],
   come: ['player'],
@@ -32,6 +33,7 @@ const ACT_TIMEOUT_MS = 8_000;
 
 export function createGame({ now = () => Date.now() } = {}) {
   let players = [];
+  let bodies = []; // where each character's body stands: { id, x, y, z }
   let time = null;
   let seenAt = 0;
   let items = [];
@@ -50,6 +52,7 @@ export function createGame({ now = () => Date.now() } = {}) {
     get connected() { return seenAt > 0 && now() - seenAt < STALE_MS; },
     get seenAt() { return seenAt; },
     get players() { return players; },
+    get bodies() { return bodies; },
     get time() { return time; },
     get items() { return items; },
     /** Calls fn with every event the mod reports. */
@@ -63,6 +66,7 @@ export function createGame({ now = () => Date.now() } = {}) {
         }));
       }
       if (typeof body?.time === 'number') time = body.time;
+      if (Array.isArray(body?.bodies)) bodies = body.bodies.filter((b) => typeof b?.id === 'string' && Number.isFinite(b.x));
       for (const r of Array.isArray(body?.results) ? body.results : []) {
         const p = pending.get(r?.id);
         if (!p) continue;
