@@ -447,6 +447,9 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       for (const c of characters()) db.remember(c.id, a.id, `Learned that ${b.name} is also ${a.name}.`, 2, now());
       return send(res, 200, { person: db.person(a.id) });
     }
+    if (route === 'POST /api/admin/unlink') {
+      return db.unlink(String(body.id ?? '')) ? send(res, 200, { ok: true }) : send(res, 400, { error: 'That account is not linked to anyone.' });
+    }
     if (route === 'POST /api/admin/forget-memory') {
       return send(res, 200, { forgotten: db.dropMemory(Number(body.id)) });
     }

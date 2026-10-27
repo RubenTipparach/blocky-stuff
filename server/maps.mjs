@@ -5,15 +5,22 @@
 // is in the game (owner, 2026-10-27: "post this only every once every 30 mins on the server IF theres anyone
 // online"), and on !map.
 //
-//   GET /map                         the public page: a zoomable top-down map of the world (owner, 2026-10-27: "a google
-//                                    style map on https://blocky-stuff.fly.dev/map") with the characters and players on
-//                                    it, and the latest isometric picture of each character
-//   GET /map/tiles/<x>/<y>.png       a 64 by 64 block tile of that map (x east, y south), drawn on first look, kept 30 min
+//   GET /map                         the public page: a zoomable isometric map of the world (owner, 2026-10-27: "a google
+//                                    style map", "I wanted the isometric look on that map") with a depth slider, the
+//                                    characters and players on it, and the latest picture of each character;
+//                                    /map?view=flat is the same world flat, from above
+//   GET /map/iso/<cx>/<cz>.png?top=  the 64 by 64 block chunk (cx, cz) drawn isometric in a fixed frame, cut at y = top,
+//                                    with a clear background; chunks laid front over back make the map
+//   GET /map/tiles/<x>/<y>.png       a 64 by 64 block tile of the flat map (x east, y south)
 //   GET /map/where.json              where the characters and players are now
+//   GET /map/explored.json           the 64-block chunks the world has anything in, and their bounds (owner: "isomap
+//                                    should be bounded by explored areas ... so I cant just scroll infinitely")
 //   GET /map/img/<name>.png          a kept picture
 //   GET /map/render?x=&z=[&y=][&r=]  a fresh picture of any spot (r up to 48 blocks around), a few a minute per address
 
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { renderIso, renderTile } from './map.mjs';
 
@@ -25,7 +32,9 @@ const TILE = 64; // blocks a side, per tile
 const TILE_KEEP_MS = 30 * 60_000; // a drawn tile is good for this long
 const TILE_AT_ONCE = 4; // tiles scanned at once, so the game never stalls on a map
 // Bump when tiles are drawn differently: kept tiles of an older drawing are drawn again.
-const TILE_VERSION = 2;
+const TILE_VERSION = 3;
+// The isometric map's frame, shared with the page's script (which places each chunk from these numbers alone).
+export const ISO = { A: 4, YMIN: -32, YMAX: 127, C: 64 };
 // Every post ends with this (owner: "have the discord bot tell players to check out this site for more maps").
 const MORE = (url) => `More maps: ${url}/map`;
 
@@ -54,7 +63,8 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     const rr = Math.max(8, Math.min(48, Math.round(r)));
     const yy = Number.isFinite(y) ? Math.round(y) : null;
     const r1 = await game.act({ type: 'scan', x1: Math.round(x) - rr, z1: Math.round(z) - rr, w: 2 * rr, d: 2 * rr,
-      y1: yy === null ? -20 : yy - 30, y2: yy === null ? 90 : yy + 50 });
+      // Down to 48 blocks under her, whole columns to there (owner: "this should scan down to the lower depths").
+      y1: yy === null ? -32 : yy - 48, y2: yy === null ? 120 : yy + 50 });
     if (!r1.ok) return { error: r1.message };
     let scan;
     try { scan = JSON.parse(r1.message); } catch { return { error: 'The game sent back something unreadable.' }; }
@@ -177,6 +187,78 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     return job;
   }
 
+  /** The isometric chunk (cx, cz) cut at y = top: a PNG in the shared frame, kept like the tiles. */
+  async function isoChunk(cx, cz, top) {
+    const cut = Math.max(ISO.YMIN + 10, Math.min(ISO.YMAX, Math.round(top)));
+    const key = `iso_${cx}_${cz}_${cut}`;
+    const file = join(dir, 'tiles', `${key}.png`);
+    const meta = db.json('maps.tiles', {});
+    if (meta[key] && now() - meta[key] < TILE_KEEP_MS) {
+      try { return await readFile(file); } catch { /* gone: draw it again */ }
+    }
+    if (drawing.has(key)) return drawing.get(key);
+    const job = (async () => {
+      await slot();
+      try {
+        const r1 = await game.act({ type: 'scan', x1: cx * ISO.C, z1: cz * ISO.C, w: ISO.C, d: ISO.C, y1: ISO.YMIN, y2: cut });
+        if (!r1.ok) return null;
+        const png = renderIso(JSON.parse(r1.message), { scale: ISO.A, fixed: { ymin: ISO.YMIN, ymax: ISO.YMAX }, transparent: true }).png;
+        await mkdir(join(dir, 'tiles'), { recursive: true });
+        await writeFile(file, png);
+        db.putJson('maps.tiles', { ...db.json('maps.tiles', {}), [key]: now() });
+        return png;
+      } finally {
+        free();
+        drawing.delete(key);
+      }
+    })();
+    drawing.set(key, job);
+    return job;
+  }
+
+  // ---- The explored world: the chunks with map blocks saved, read from the world's map.sqlite ----
+
+  let explored = { at: 0, chunks: [], bounds: null };
+  /**
+   * The 64-block chunks with any map block saved in the world (Luanti saves every 16-block map block once it is
+   * generated), read-only from map.sqlite, at most every 5 minutes. Both layouts: x, y, z columns (worlds made by
+   * Luanti 5.12 and later) and the older packed pos.
+   */
+  function exploredWorld() {
+    if (now() - explored.at < 5 * 60_000) return explored;
+    const file = join(config.dataDir, 'world', 'map.sqlite');
+    if (!existsSync(file)) return explored;
+    let world;
+    try {
+      world = new DatabaseSync(file, { readOnly: true });
+      const cols = world.prepare('PRAGMA table_info(blocks)').all().map((c) => c.name);
+      const keys = new Set();
+      const add = (bx, bz) => keys.add(`${Math.floor((bx * 16) / ISO.C)},${Math.floor((bz * 16) / ISO.C)}`);
+      if (cols.includes('x')) {
+        for (const r of world.prepare('SELECT DISTINCT x, z FROM blocks').all()) add(r.x, r.z);
+      } else {
+        const signed = (v) => (v < 2048 ? v : v - 4096);
+        for (const { pos } of world.prepare('SELECT pos FROM blocks').all()) {
+          let p = Number(pos);
+          const x = signed(((p % 4096) + 4096) % 4096);
+          p = (p - x) / 4096;
+          const y = signed(((p % 4096) + 4096) % 4096);
+          p = (p - y) / 4096;
+          add(x, signed(((p % 4096) + 4096) % 4096));
+        }
+      }
+      const chunks = [...keys].map((k) => k.split(',').map(Number));
+      const xs = chunks.map(([cx]) => cx);
+      const zs = chunks.map(([, cz]) => cz);
+      explored = { at: now(), chunks, bounds: chunks.length ? { cx1: Math.min(...xs), cz1: Math.min(...zs), cx2: Math.max(...xs), cz2: Math.max(...zs) } : null };
+    } catch (err) {
+      log.error('reading the explored world failed:', err.message);
+    } finally {
+      try { world?.close(); } catch { /* closed */ }
+    }
+    return explored;
+  }
+
   /** Where everyone is: characters (with their colours) and players online. */
   function where() {
     const byId = Object.fromEntries(characters().map((c) => [c.id, c]));
@@ -219,7 +301,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
   async function handle(req, res, url, ip) {
     if (url.pathname === '/map' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(page());
+      res.end(page(url.searchParams.get('view') === 'flat' ? 'flat' : 'iso'));
       return true;
     }
     const t = /^\/map\/tiles\/(-?\d{1,4})\/(-?\d{1,4})\.png$/.exec(url.pathname);
@@ -232,6 +314,25 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
       }
       res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=300' });
       res.end(png);
+      return true;
+    }
+    const iso = /^\/map\/iso\/(-?\d{1,4})\/(-?\d{1,4})\.png$/.exec(url.pathname);
+    if (iso && req.method === 'GET') {
+      const top = Number(url.searchParams.get('top') ?? ISO.YMAX);
+      const png = game.connected && Number.isFinite(top) ? await isoChunk(Number(iso[1]), Number(iso[2]), top).catch(() => null) : null;
+      if (!png) {
+        res.writeHead(503, { 'content-type': 'text/plain', 'retry-after': '30' });
+        res.end('The game is not answering; try again soon.');
+        return true;
+      }
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=300' });
+      res.end(png);
+      return true;
+    }
+    if (url.pathname === '/map/explored.json' && req.method === 'GET') {
+      const e = exploredWorld();
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' });
+      res.end(JSON.stringify({ chunks: e.chunks, bounds: e.bounds }));
       return true;
     }
     if (url.pathname === '/map/where.json' && req.method === 'GET') {
@@ -280,7 +381,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     return false;
   }
 
-  function page() {
+  function page(view = 'iso') {
     const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const byId = Object.fromEntries(characters().map((c) => [c.id, c]));
     const cards = Object.values(kept()).sort((x, y) => y.at - x.at).map((m) => {
@@ -291,7 +392,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
         <span>at ${m.x}, ${m.y}, ${m.z} · ${mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`}</span></figcaption></figure>`;
     }).join('');
     // Where to open the map: the first character, else 0, 0.
-    const first = (game.bodies ?? [])[0] ?? { x: 0, z: 0 };
+    const first = (game.bodies ?? [])[0] ?? { x: 0, y: 10, z: 0 };
     return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Blocky Stuff map</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
@@ -305,6 +406,8 @@ p { color: var(--muted); margin: 0 0 14px; } a { color: var(--accent); }
 .leaflet-container { font: 13px system-ui, sans-serif; }
 .who { background: rgba(20, 24, 18, .85); color: #fff; border: 0; border-radius: 6px; padding: 2px 6px; font-weight: 600; box-shadow: none; }
 .who::before { display: none; }
+.cut { display: flex; gap: 12px; align-items: center; margin: 0 0 10px; color: var(--muted); }
+.cut input { flex: 1 1 200px; max-width: 420px; accent-color: var(--accent); } .cut output { font: 600 14px ui-monospace, monospace; color: var(--text); min-width: 120px; }
 .coords { background: rgba(20, 24, 18, .85); color: #fff; padding: 4px 8px; border-radius: 6px; font: 12px ui-monospace, monospace; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 16px; }
 figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
@@ -313,39 +416,122 @@ figcaption { padding: 10px 12px; display: grid; gap: 2px; } figcaption span { co
 code { background: #232a1f; padding: 1px 6px; border-radius: 4px; }
 </style></head><body><main>
 <h1>${esc(config.serverName)} map</h1>
-<p>Drag and zoom the world; the characters and players move on it live. Join at
+<p>${view === 'iso' ? 'Drag and zoom the world, and slide the cut to look 10 blocks deeper at a time.' : 'Drag and zoom the world from above.'}
+The characters and players move on it live. Join at
 <code>${esc(config.gameAddress || new URL(config.publicUrl).hostname)}:${config.gamePort}</code> with <a href="https://www.luanti.org/en/">Luanti</a>.
-Parts of the world nobody has been to yet stay blank.</p>
+Parts of the world nobody has been to yet stay blank. <a href="/map${view === 'iso' ? '?view=flat' : ''}">${view === 'iso' ? 'Top-down view' : 'Isometric view'}</a></p>
+${view === 'iso' ? `<div class="cut"><label for="cut">Cut at height</label><input type="range" id="cut" min="${ISO.YMIN + 10}" max="${ISO.YMAX}" step="10" value="${ISO.YMAX}"><output id="cutOut">everything</output></div>` : ''}
 <div id="map"></div>
 <h2>What the characters are up to</h2>
 <p>Isometric pictures of each character, aimed at where she is, refreshed every 20 minutes.</p>
 <div class="grid">${cards || '<p>No pictures yet: they come once a character is in the world.</p>'}</div></main>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
-// One map unit is one block: x east, and z north as the map's up (Leaflet's lat). Tiles are 64 blocks at zoom 2.
-const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 5, zoomSnap: 0.5, attributionControl: false })
+${view === 'iso' ? isoScript(first) : flatScript(first)}
+</script></body></html>`;
+  }
+
+  return { render, snapshot, tick, command, handle, settings, page, postNow, tile, isoChunk, where };
+}
+
+// The flat map's script: one map unit is one block, x east and z north as the map's up; tiles are 64 blocks at zoom 2.
+function flatScript(first) {
+  return `const map = L.map('map', { crs: L.CRS.Simple, minZoom: 0, maxZoom: 5, zoomSnap: 0.5, attributionControl: false })
   .setView([${Number(first.z) || 0}, ${Number(first.x) || 0}], 3);
 L.tileLayer('/map/tiles/{x}/{y}.png', { tileSize: 256, minNativeZoom: 2, maxNativeZoom: 2, noWrap: true,
   errorTileUrl: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=' }).addTo(map);
+const at = (x, y, z) => [z, x];
+${markersScript()}
+const Coords = L.Control.extend({ onAdd() { this.el = L.DomUtil.create('div', 'coords'); this.el.textContent = 'x, z'; return this.el; } });
+const coords = new Coords({ position: 'bottomleft' }).addTo(map);
+map.on('mousemove', (e) => { coords.el.textContent = 'x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat); });`;
+}
+
+// The isometric map's script. One map unit is one pixel of the drawing at zoom 0; a block at (x, y, z) sits at
+// GX = (x - z) * A, GY = (x + z) * A / 2 - y * A (as server/map.mjs draws it), and the map's up is -GY. Each chunk is an
+// image in the shared frame, placed from ISO alone, the nearer (larger cx + cz) over the farther.
+function isoScript(first) {
+  const { A, YMIN, YMAX, C } = ISO;
+  return `const A = ${A}, YMIN = ${YMIN}, YMAX = ${YMAX}, C = ${C};
+const W = 2 * C * A + 2 * A, H = Math.round(C * A + (YMAX - YMIN + 3) * A + 3 * A), OX = C * A, OY = (YMAX - YMIN + 2) * A;
+const gx = (x, z) => (x - z) * A, gy = (x, y, z) => (x + z) * A / 2 - y * A;
+const at = (x, y, z) => [-(gy(x, y, z) + A / 2), gx(x, z) + A];
+const map = L.map('map', { crs: L.CRS.Simple, minZoom: -4, maxZoom: 3, zoomSnap: 0.5, attributionControl: false,
+  maxBoundsViscosity: 1 }).setView(at(${Number(first.x) || 0}, ${Number(first.y) || 10}, ${Number(first.z) || 0}), 0);
+// Only the explored world: the chunks with anything saved, and no panning past their bounds.
+let known = null;
+fetch('/map/explored.json').then((r) => r.json()).then((e) => {
+  if (!e.bounds) return;
+  known = new Set(e.chunks.map(([cx, cz]) => cx + ',' + cz));
+  const { cx1, cz1, cx2, cz2 } = e.bounds;
+  const corners = [[cx1, cz1], [cx2, cz1], [cx1, cz2], [cx2, cz2]].map(([cx, cz]) => origin(cx, cz));
+  const west = Math.min(...corners.map(([ox]) => ox)), east = Math.max(...corners.map(([ox]) => ox + W));
+  const north = Math.min(...corners.map(([, oy]) => oy)), south = Math.max(...corners.map(([, oy]) => oy + H));
+  const box = L.latLngBounds([[-north, west], [-south, east]]);
+  map.setMaxBounds(box.pad(0.05));
+  map.setMinZoom(Math.min(0, map.getBoundsZoom(box) - 0.5));
+  load();
+}).catch(() => {});
+let cutAt = YMAX; // not "top": the browser already has a window.top
+const shown = new Map();
+const origin = (cx, cz) => { const x1 = cx * C, z1 = cz * C; return [(x1 - z1) * A - OX, (x1 + z1) * A / 2 - YMIN * A - OY]; };
+function load() {
+  const b = map.getBounds();
+  const gx1 = b.getWest(), gx2 = b.getEast(), gy1 = -b.getNorth(), gy2 = -b.getSouth();
+  const umin = gx1 / A - 2, umax = gx2 / A + 2, vmin = 2 * gy1 / A + 2 * YMIN - 4, vmax = 2 * gy2 / A + 2 * cutAt + 4;
+  const want = [];
+  for (let p = Math.floor((umin - C) / C); p <= Math.ceil((umax + C) / C); p++) {
+    for (let q = Math.floor((vmin - 2 * C) / C); q <= Math.ceil(vmax / C); q++) {
+      if ((p + q) % 2 !== 0) continue;
+      const cx = (p + q) / 2, cz = (q - p) / 2;
+      if (known && !known.has(cx + ',' + cz)) continue;
+      const [ox, oy] = origin(cx, cz);
+      if (ox > gx2 || ox + W < gx1 || oy > gy2 || oy + H < gy1) continue;
+      want.push([cx, cz]);
+    }
+  }
+  const mid = map.getCenter();
+  want.sort((a, b) => { const [ax, ay] = origin(...a), [bx, by] = origin(...b);
+    return Math.hypot(ax + W / 2 - mid.lng, -(ay + H / 2) - mid.lat) - Math.hypot(bx + W / 2 - mid.lng, -(by + H / 2) - mid.lat); });
+  const keep = new Set();
+  for (const [cx, cz] of want.slice(0, 60)) {
+    const key = cx + ',' + cz + ',' + cutAt;
+    keep.add(key);
+    if (shown.has(key)) continue;
+    const [ox, oy] = origin(cx, cz);
+    const img = L.imageOverlay('/map/iso/' + cx + '/' + cz + '.png?top=' + cutAt, [[-oy, ox], [-(oy + H), ox + W]],
+      { zIndex: 1000 + cx + cz, interactive: false }).addTo(map);
+    shown.set(key, img);
+  }
+  for (const [key, img] of shown) if (!keep.has(key)) { map.removeLayer(img); shown.delete(key); }
+}
+map.on('moveend', load);
+load();
+const cut = document.getElementById('cut'), cutOut = document.getElementById('cutOut');
+let wait = null;
+cut.addEventListener('input', () => {
+  cutAt = Number(cut.value);
+  cutOut.textContent = cutAt >= YMAX ? 'everything' : 'y ' + cutAt + ' and below';
+  clearTimeout(wait);
+  wait = setTimeout(() => { for (const img of shown.values()) map.removeLayer(img); shown.clear(); load(); }, 250);
+});
+${markersScript()}`;
+}
+
+// Live markers for both views: `at(x, y, z)` turns a block into the view's map position.
+function markersScript() {
+  return `map.createPane('people').style.zIndex = 650; // over the map's chunks
 const layer = L.layerGroup().addTo(map);
 const where = async () => {
   try {
     const w = await (await fetch('/map/where.json', { cache: 'no-store' })).json();
     layer.clearLayers();
-    for (const c of w.characters) L.circleMarker([c.z, c.x], { radius: 8, color: '#141812', weight: 2, fillColor: c.color, fillOpacity: 1 })
+    for (const c of w.characters) L.circleMarker(at(c.x, c.y, c.z), { pane: 'people', radius: 8, color: '#141812', weight: 2, fillColor: c.color, fillOpacity: 1 })
       .bindTooltip(c.name + (c.doing ? ' · ' + c.doing : ''), { permanent: true, direction: 'right', className: 'who', offset: [8, 0] }).addTo(layer);
-    for (const p of w.players) L.circleMarker([p.z, p.x], { radius: 6, color: '#141812', weight: 2, fillColor: '#ffffff', fillOpacity: 1 })
+    for (const p of w.players) L.circleMarker(at(p.x, p.y, p.z), { pane: 'people', radius: 6, color: '#141812', weight: 2, fillColor: '#ffffff', fillOpacity: 1 })
       .bindTooltip(p.name, { permanent: true, direction: 'right', className: 'who', offset: [8, 0] }).addTo(layer);
   } catch {}
 };
 where();
-setInterval(where, 10000);
-// The block under the pointer.
-const Coords = L.Control.extend({ onAdd() { this.el = L.DomUtil.create('div', 'coords'); this.el.textContent = 'x, z'; return this.el; } });
-const coords = new Coords({ position: 'bottomleft' }).addTo(map);
-map.on('mousemove', (e) => { coords.el.textContent = 'x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat); });
-</script></body></html>`;
-  }
-
-  return { render, snapshot, tick, command, handle, settings, page, postNow, tile, where };
+setInterval(where, 10000);`;
 }

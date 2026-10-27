@@ -217,6 +217,13 @@ export function openDb(path) {
       q.setLink.run(a.id, b.id);
       return true;
     },
+    /** Undo a link: the alias stands on its own again (its old talks, feelings and memories stay with the other). */
+    unlink(id) {
+      const r = q.rawPerson.get(id);
+      if (!r?.link) return false;
+      q.setLink.run(null, id);
+      return true;
+    },
     /** Everyone known (own rows), most recently seen first, with aliases and each character's bond. */
     people: (n = 200) => q.people.all(n).map((r) => ({ ...r, aliases: q.aliases.all(r.id),
       bonds: Object.fromEntries(q.bondsOf.all(r.id).map((b) => [b.character, bondOut(b)])) })),

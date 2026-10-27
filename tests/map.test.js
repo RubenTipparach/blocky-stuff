@@ -42,8 +42,10 @@ test('the public map page, a render on request held to its pace, and !map postin
   const { game } = server;
   // Play the mod: answer every scan with the patch above.
   game.sync({ players: [], bodies: [{ id: 'blocky', x: 5, y: 2, z: 5 }] });
+  const asked = [];
   const answerScans = setInterval(() => {
     const { actions } = game.sync({});
+    asked.push(...actions);
     game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: JSON.stringify(scan) })) });
   }, 5);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -68,6 +70,15 @@ test('the public map page, a render on request held to its pace, and !map postin
     assert.deepEqual(w.characters.map((c) => [c.name, c.x, c.z]), [['Blocky', 5, 5]]);
     assert.match(pictures[0].text, /More maps: http:\/\/localhost\/map/);
     assert.match(await (await fetch(`${base}/map`)).text(), /leaflet/);
+    // An isometric chunk of the map, cut at the asked height, in the shared frame (clear background: RGBA).
+    const iso = await fetch(`${base}/map/iso/2/-3.png?top=40`);
+    assert.equal(iso.status, 200);
+    const isoPng = Buffer.from(await iso.arrayBuffer());
+    assert.equal(isoPng[25], 6); // colour type 6: RGBA
+    // The frame's height is fixed (y -32 to 127), whatever the chunk holds: that is what lines chunks up.
+    assert.equal(isoPng.readUInt32BE(20), Math.round(((4 + 4) * 4) / 2 + (127 + 32 + 3) * 4 + 3 * 4));
+    assert.match(await (await fetch(`${base}/map?view=flat`)).text(), /tiles/);
+    assert.ok(asked.some((a) => a.type === 'scan' && a.x1 === 128 && a.z1 === -192 && a.w === 64 && a.y2 === 40 && a.y1 === -32));
   } finally {
     clearInterval(answerScans);
     await new Promise((r) => server.close(r));
@@ -108,5 +119,34 @@ test('pictures go to Discord only while someone is online, at most every 30 minu
     assert.equal(pictures.length, 2);
   } finally {
     clearInterval(answer);
+  }
+});
+
+test('the explored world is read from map.sqlite, in either layout', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { mkdirSync } = await import('node:fs');
+  const { createMaps } = await import('../server/maps.mjs');
+  const { createGame } = await import('../server/game.mjs');
+  for (const layout of ['xyz', 'pos']) {
+    const dataDir = mkdtempSync(join(tmpdir(), 'blocky-explored-'));
+    mkdirSync(join(dataDir, 'world'));
+    const w = new DatabaseSync(join(dataDir, 'world', 'map.sqlite'));
+    if (layout === 'xyz') {
+      w.exec('CREATE TABLE blocks (x INTEGER, y INTEGER, z INTEGER, data BLOB, PRIMARY KEY (x, z, y))');
+      for (const [x, y, z] of [[0, 0, 0], [3, 1, 3], [4, 0, -1], [-5, 2, 8]]) w.prepare("INSERT INTO blocks VALUES (?, ?, ?, x'00')").run(x, y, z);
+    } else {
+      w.exec('CREATE TABLE blocks (pos INT PRIMARY KEY, data BLOB)');
+      const pos = (x, y, z) => z * 16777216 + y * 4096 + x;
+      for (const [x, y, z] of [[0, 0, 0], [3, 1, 3], [4, 0, -1], [-5, 2, 8]]) w.prepare("INSERT INTO blocks VALUES (?, x'00')").run(pos(x, y, z));
+    }
+    w.close();
+    const maps = createMaps({ db: openDb(':memory:'), game: createGame(), config: { dataDir, publicUrl: 'http://x', serverName: 'B', gamePort: 1 },
+      characters: () => [], chat: {}, log: quiet });
+    const res = { writeHead() {}, end(body) { this.body = body; } };
+    await maps.handle({ method: 'GET' }, res, new URL('http://x/map/explored.json'), '1');
+    const e = JSON.parse(res.body);
+    // Map blocks are 16 apart, chunks 64: blocks 0..3 are chunk 0, 4 is chunk 1, -5 is chunk -2, 8 is chunk 2.
+    assert.deepEqual(e.chunks.map((c) => c.join(',')).sort(), ['-2,2', '0,0', '1,-1'], layout);
+    assert.deepEqual(e.bounds, { cx1: -2, cz1: -1, cx2: 1, cz2: 2 }, layout);
   }
 });

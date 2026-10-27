@@ -559,15 +559,23 @@ function actions.scan(a)
 				local over = g < h and id(data[area:index(x, h, z)]) or nil
 				cols[#cols + 1] = { g, id(data[area:index(x, g, z)]), over }
 			else
-				-- Everything from the top down to the ground under it, then down its sides as far as they show.
-				local g = ground[(z - z1) * (w + 1) + (x - x1)]
-				local south = ground[(z + 1 - z1) * (w + 1) + (x - x1)] or y1
-				local east = ground[(z - z1) * (w + 1) + (x + 1 - x1)] or y1
-				local low = math.min(g, math.max(math.min(south, east) + 1, g - SIDE_MAX, y1)) -- always its ground block
-				local col = { h }
-				for y = h, low, -1 do
+				-- Every block a face of which can be seen: open air or foliage above it or to its south or east (the
+				-- sides the camera sees), the cut at the top of the scan, or the edge of the area. So columns come out
+				-- whole down to the scan's floor at the edges, caves and overhangs show, and a lower cut opens the
+				-- ground up (owner, 2026-10-27: "make this the whole columns", "a depth slider to see 10 blocks down").
+				-- As pairs, top down: y, name index, y, name index...
+				local col = {}
+				local edge = x == x1 + w - 1 or z == z1 + d - 1
+				local function open(c) return c == AIR or c == IGNORE or leafy(c) end
+				for y = h, y1, -1 do
 					local c = data[area:index(x, y, z)]
-					col[#col + 1] = (c == AIR or c == IGNORE) and -1 or id(c)
+					if c ~= AIR and c ~= IGNORE then
+						if y == y2 or edge or open(data[area:index(x, y + 1, z)]) or open(data[area:index(x, y, z + 1)])
+							or open(data[area:index(x + 1, y, z)]) then
+							col[#col + 1] = y
+							col[#col + 1] = id(c)
+						end
+					end
 				end
 				cols[#cols + 1] = col
 			end

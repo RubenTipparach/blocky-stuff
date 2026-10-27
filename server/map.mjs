@@ -102,18 +102,12 @@ const GLYPHS = {
   '-': '00000000000000011111000000000000000', '.': '00000000000000000000000000110001100', '_': '00000000000000000000000000000011111',
 };
 
-/** Write `text` (in capitals) onto an RGB picture at (x, y), each font pixel `s` by `s`, on a dark plate. */
-export function drawLabel(px, width, height, x, y, text, rgb, s = 2) {
+/** Write `text` (in capitals) at (x, y) through put(x, y, rgb), each font pixel `s` by `s`, on a dark plate. */
+export function drawLabel(put, x, y, text, rgb, s = 2) {
   const t = String(text).toUpperCase().slice(0, 24);
   const w = t.length * 6 * s + 3 * s;
   const h = 7 * s + 4 * s;
-  for (let yy = 0; yy < h; yy++) {
-    for (let xx = 0; xx < w; xx++) {
-      const tx = x + xx;
-      const ty = y + yy;
-      if (tx >= 0 && ty >= 0 && tx < width && ty < height) px.set([20, 24, 18], (ty * width + tx) * 3);
-    }
-  }
+  for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) put(x + xx, y + yy, [20, 24, 18]);
   [...t].forEach((ch, i) => {
     const g = GLYPHS[ch];
     if (!g) return;
@@ -121,11 +115,7 @@ export function drawLabel(px, width, height, x, y, text, rgb, s = 2) {
       for (let col = 0; col < 5; col++) {
         if (g[row * 5 + col] !== '1') continue;
         for (let dy = 0; dy < s; dy++) {
-          for (let dx = 0; dx < s; dx++) {
-            const tx = x + 2 * s + i * 6 * s + col * s + dx;
-            const ty = y + 2 * s + row * s + dy;
-            if (tx >= 0 && ty >= 0 && tx < width && ty < height) px.set(rgb, (ty * width + tx) * 3);
-          }
+          for (let dx = 0; dx < s; dx++) put(x + 2 * s + i * 6 * s + col * s + dx, y + 2 * s + row * s + dy, rgb);
         }
       }
     }
@@ -133,36 +123,41 @@ export function drawLabel(px, width, height, x, y, text, rgb, s = 2) {
 }
 
 /**
- * Draw a scan (the mod's `scan` result) as an isometric picture. marks: { color: "#rrggbb" } per mark, by id or
- * player. Returns { png, width, height }.
+ * Draw a scan (the mod's `scan` result: per column, the visible blocks as pairs y, name index, top down) as an
+ * isometric picture. marks: a pin and name per character (markColors, markNames by id) or player. `fixed` draws in a
+ * frame of fixed height (ymin to ymax), so pictures of neighbouring areas line up into one map; `transparent` leaves
+ * the background clear for that. Returns { png, width, height }.
  */
-export function renderIso(scan, { markColors = {}, markNames = {}, scale } = {}) {
+export function renderIso(scan, { markColors = {}, markNames = {}, scale, fixed = null, transparent = false } = {}) {
   const { x1, z1, w, d, y1 } = scan;
   const names = Array.isArray(scan.names) ? scan.names : [];
   const cols = Array.isArray(scan.cols) ? scan.cols : [];
   let hmin = Infinity;
   let hmax = -Infinity;
   for (const c of cols) {
-    if (!c) continue;
+    if (!c || c.length < 2) continue;
     hmax = Math.max(hmax, c[0]);
-    hmin = Math.min(hmin, c[0] - (c.length - 2));
+    hmin = Math.min(hmin, c[c.length - 2]);
   }
+  if (fixed) { hmin = fixed.ymin; hmax = fixed.ymax; }
   if (hmax === -Infinity) { hmin = y1; hmax = y1 + 1; }
   const a = scale ?? (Math.max(w, d) <= 48 ? 8 : Math.max(w, d) <= 80 ? 6 : 4);
   const sp = sprite(a);
   const tall = hmax - hmin + 3;
   const width = (w + d) * a + 2 * a;
   const height = Math.round(((w + d) * a) / 2 + tall * a + 3 * a);
-  const px = new Uint8Array(width * height * 3);
-  for (let i = 0; i < width * height; i++) px.set(BG, i * 3);
+  const px = new Uint8Array(width * height * 4);
+  if (!transparent) for (let i = 0; i < width * height; i++) px.set([...BG, 255], i * 4);
   // A block at world (x, y, z) has its sprite's top-left here, placed by where it sits in the area (so the same area
-  // anywhere in the world draws the same): x runs down-right, z down-left, y up.
+  // anywhere in the world draws the same): x runs down-right, z down-left, y up. In a fixed frame the origin depends
+  // only on the frame, which is what lines neighbouring pictures up.
   const ox = d * a;
-  const oy = (hmax - y1 + 2) * a;
+  const oy = (hmax - (fixed ? hmin : y1) + 2) * a;
+  const base = fixed ? hmin : y1;
   const at = (x, y, z) => {
     const rx = x - x1;
     const rz = z - z1;
-    return [ox + (rx - rz) * a, oy + ((rx + rz) * a) / 2 - (y - y1) * a];
+    return [ox + (rx - rz) * a, oy + ((rx + rz) * a) / 2 - (y - base) * a];
   };
   const blit = (sx, sy, rgba) => {
     const alpha = (rgba[3] ?? 255) / 255;
@@ -175,8 +170,14 @@ export function renderIso(scan, { markColors = {}, markNames = {}, scale } = {})
         const tx = Math.round(sx) + xx;
         if (tx < 0 || tx >= width) continue;
         const k = (f === 1 ? SHADE.top : f === 2 ? SHADE.left : SHADE.right) * (sp.edge[yy * sp.w + xx] ? 0.86 : 1);
-        const o = (ty * width + tx) * 3;
-        for (let c = 0; c < 3; c++) px[o + c] = Math.round(px[o + c] * (1 - alpha) + Math.min(255, rgba[c] * k) * alpha);
+        const o = (ty * width + tx) * 4;
+        const da = px[o + 3] / 255;
+        const oa = alpha + da * (1 - alpha);
+        for (let c = 0; c < 3; c++) {
+          const src = Math.min(255, rgba[c] * k);
+          px[o + c] = oa ? Math.round((src * alpha + px[o + c] * da * (1 - alpha)) / oa) : 0;
+        }
+        px[o + 3] = Math.round(oa * 255);
       }
     }
   };
@@ -185,20 +186,17 @@ export function renderIso(scan, { markColors = {}, markNames = {}, scale } = {})
     for (let x = Math.max(0, s - d + 1); x <= Math.min(w - 1, s); x++) {
       const z = s - x;
       const col = cols[z * w + x];
-      if (!col) continue;
-      const top = col[0];
-      for (let k = col.length - 1; k >= 1; k--) {
-        const idx = col[k];
-        if (idx < 0) continue;
-        const name = names[idx];
+      if (!col || col.length < 2) continue;
+      for (let k = col.length - 2; k >= 0; k -= 2) {
+        const name = names[col[k + 1]];
         if (!name) continue;
-        const y = top - (k - 1);
-        const [sx, sy] = at(x1 + x, y, z1 + z);
+        const [sx, sy] = at(x1 + x, col[k], z1 + z);
         blit(sx, sy, colorOf(name));
       }
     }
   }
-  // Marks: a pin of the character's colour (players white) over where they stand.
+  // Marks: a pin of the character's colour (players white) over where they stand, and the name beside it.
+  const put = (tx, ty, rgb) => { if (tx >= 0 && ty >= 0 && tx < width && ty < height) px.set([...rgb, 255], (ty * width + tx) * 4); };
   for (const m of Array.isArray(scan.marks) ? scan.marks : []) {
     const hex = markColors[m.id ?? m.player] ?? (m.player ? '#ffffff' : '#f2b84b');
     const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) || 255);
@@ -210,16 +208,13 @@ export function renderIso(scan, { markColors = {}, markNames = {}, scale } = {})
       for (let xx = -r - 1; xx <= r + 1; xx++) {
         const inPin = yy <= 0 ? xx * xx + yy * yy <= r * r : Math.abs(xx) <= r - (yy * r) / (2 * r);
         const ring = yy <= 0 ? xx * xx + yy * yy <= (r + 1) * (r + 1) : Math.abs(xx) <= r + 1 - (yy * r) / (2 * r);
-        const tx = cx + xx;
-        const ty = cy + yy;
-        if (tx < 0 || ty < 0 || tx >= width || ty >= height || !(inPin || ring)) continue;
-        px.set(inPin ? rgb : [16, 18, 14], (ty * width + tx) * 3);
+        if (inPin || ring) put(cx + xx, cy + yy, inPin ? rgb : [16, 18, 14]);
       }
     }
     const name = m.player ?? markNames[m.id] ?? m.id;
-    if (name) drawLabel(px, width, height, cx + r + 4, cy - r - 2, name, m.player ? [255, 255, 255] : rgb.map((v) => Math.min(255, v + 60)));
+    if (name) drawLabel(put, cx + r + 4, cy - r - 2, name, m.player ? [255, 255, 255] : rgb.map((v) => Math.min(255, v + 60)));
   }
-  return { png: encodePng(px, width, height), width, height };
+  return { png: encodePng(px, width, height, 4), width, height };
 }
 
 /**

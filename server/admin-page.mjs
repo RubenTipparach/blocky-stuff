@@ -158,15 +158,36 @@ function renderRelationships(force) {
         + (b.status === s ? ' selected' : '') + '>' + s + '</option>').join('') + '</select></label></div>'
       + (b.facts.length ? '<div class="facts">' + b.facts.map(esc).join(' · ') + '</div>' : '')
       + '<div class="row"><button data-save disabled>Save</button><span class="relNote note muted" style="margin:0"></span></div>'
-      + (char ? '' : '<details><summary>Manage person</summary>'
-        + '<div class="row"><input type="color" class="color" style="width:52px;padding:2px" value="' + esc(p.color || '#9aa8ff') + '">'
-        + '<button class="quiet" data-color>Save colour</button><span class="muted note" style="margin:0">their name colour on Discord</span></div>'
-        + '<div class="row"><select class="linkWith" style="flex:1 1 160px"' + (pool.length ? '' : ' disabled') + '><option value="">'
-        + (pool.length ? 'Join with...' : 'Nobody else to join with yet') + '</option>' + pool.map((o) => '<option value="' + esc(o.id) + '">'
-        + kind(o.id) + ': ' + esc(o.name) + '</option>').join('') + '</select><button class="quiet" data-link' + (pool.length ? '' : ' disabled') + '>Link</button></div>'
-        + '<div class="row"><button class="danger" data-forget>Forget this person</button></div></details>')
       + '</div>';
   }).join('') : '<p class="muted">Nobody yet: the characters meet people as they chat.</p>';
+}
+// The Players tab: each person once, their accounts by kind, and only the links that make sense: a person with game
+// accounts but none on Discord may be linked to someone who is only on Discord, and the other way round.
+function renderPlayers(force) {
+  if (!state || !$('players2')) return;
+  const box = $('players2');
+  if (!force && box.contains(document.activeElement)) return;
+  const people = state.people.filter((p) => !p.id.startsWith('char:'));
+  const accounts = (p) => [{ id: p.id, name: p.name, alias: false }, ...(p.aliases || []).map((a) => ({ ...a, alias: true }))];
+  const kindOf = (p) => { const ids = accounts(p).map((a) => a.id); return { game: ids.some((i) => i.startsWith('game:')), discord: ids.some((i) => i.startsWith('discord:')) }; };
+  const list = (p, prefix) => accounts(p).filter((a) => a.id.startsWith(prefix)).map((a) => esc(a.name)
+    + (a.alias ? ' <button class="quiet" style="min-height:26px;padding:2px 8px;font-size:12px" data-unlink="' + esc(a.id) + '">Unlink</button>' : '')).join('<br>');
+  box.innerHTML = people.length ? people.map((p) => {
+    const k = kindOf(p);
+    const missing = k.game && !k.discord ? 'discord' : k.discord && !k.game ? 'game' : null;
+    const pool = missing ? people.filter((o) => o.id !== p.id && (() => { const ok = kindOf(o); return missing === 'discord' ? ok.discord && !ok.game : ok.game && !ok.discord; })()) : [];
+    const picker = missing ? (pool.length ? '<div class="row" style="margin-top:4px"><select class="linkWith" style="width:auto;min-height:32px">'
+      + '<option value="">Link a ' + (missing === 'game' ? 'game player' : 'Discord user') + '...</option>'
+      + pool.map((o) => '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>').join('') + '</select>'
+      + '<button class="quiet" data-link style="min-height:32px">Link</button></div>'
+      : '<span class="muted note">no unlinked ' + (missing === 'game' ? 'game players' : 'Discord users') + ' yet</span>') : '';
+    const cell = (prefix) => (list(p, prefix) || '<span class="muted">none</span>') + (missing === (prefix === 'game:' ? 'game' : 'discord') ? picker : '');
+    return '<tr data-id="' + esc(p.id) + '" data-name="' + esc(p.name) + '"><td><span class="dot" style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:'
+      + esc(p.color || '#9aa8ff') + '"></span><b>' + esc(p.name) + '</b></td><td>' + cell('game:') + '</td><td>' + cell('discord:') + '</td><td>' + p.talks
+      + '</td><td class="muted">' + agoOf(p.last_at) + '</td><td class="row"><input type="color" class="color" style="width:46px;min-height:32px;padding:2px" value="'
+      + esc(p.color || '#9aa8ff') + '"><button class="quiet" data-color style="min-height:32px">Save</button></td>'
+      + '<td><button class="danger" data-forget style="min-height:32px">Forget</button></td></tr>';
+  }).join('') : '<tr><td colspan="7" class="muted">Nobody yet: people show up here once they chat.</td></tr>';
 }
 let built = false;
 
@@ -200,7 +221,7 @@ function build() {
   app.innerHTML = \`
 <nav class="tabs" id="tabs">
   <button data-tab="overview">Overview</button><button data-tab="characters">Characters</button>
-  <button data-tab="relationships">Relationships</button><button data-tab="activity">Activity</button>
+  <button data-tab="relationships">Relationships</button><button data-tab="players">Players</button><button data-tab="activity">Activity</button>
   <button data-tab="settings">Settings</button>
 </nav>
 <div class="tab" data-panel="overview">
@@ -279,8 +300,7 @@ function build() {
     <label class="field">What she wants in life<textarea id="c_goals" maxlength="3000"></textarea></label>
     <label class="field">Working on now (she changes this herself)<input id="c_goal" maxlength="200"></label>
     <div class="row"><button>Save character</button><button type="button" class="quiet" id="resetMood">Calm her mood</button>
-      <button type="button" class="quiet" id="c_picture">Take a picture now</button>
-      <button type="button" class="quiet" id="c_post">Post her picture to Discord</button>
+      <button type="button" class="quiet" id="c_post">Take a picture and post it</button>
       <button type="button" class="danger" id="c_remove">Remove</button><span id="charNote" class="note muted"></span></div>
   </form></section>
 <section style="margin-top:14px"><h2>Her memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
@@ -292,7 +312,16 @@ function build() {
   <p class="muted note" id="relHead" style="margin:0 0 12px"></p>
   <div class="rels" id="rel"></div>
   <p class="muted note">Characters move these a little at a time as people treat them well or badly. Drag a slider and press Save to set one yourself.
-  Players join their game and Discord selves with <code>!link</code> in game, or under Manage on a card.</p>
+  Accounts, colours and linking are on the Players tab.</p>
+</section>
+</div>
+<div class="tab" data-panel="players">
+<section><h2>Players</h2>
+  <p class="muted note" style="margin:0 0 12px">Each person once, with the game and Discord accounts that are theirs. Someone with only one kind can be linked to a
+  person who has only the other kind (players can also do it themselves: <code>!link</code> in game, then the code in Discord). Unlink undoes a wrong link.</p>
+  <div class="scroll"><table><thead><tr><th>Person</th><th>In game</th><th>On Discord</th><th>Talks</th><th>Last seen</th><th>Colour on Discord</th><th></th></tr></thead>
+  <tbody id="players2"></tbody></table></div>
+  <p class="note muted" id="playersNote"></p>
 </section>
 </div>
 <div class="tab" data-panel="activity">
@@ -308,6 +337,7 @@ function build() {
     for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.panel === name);
     try { localStorage.setItem('blocky.tab', name); } catch {}
     if (name === 'relationships') renderRelationships(true);
+    if (name === 'players') renderPlayers(true);
   };
   $('tabs').onclick = (ev) => { const b = ev.target.closest('button[data-tab]'); if (b) show(b.dataset.tab); };
   let first = hash.get('tab') || 'overview';
@@ -408,11 +438,33 @@ function build() {
   };
   $('m_post').onclick = () => postMap(null, $('m_note'));
   $('c_post').onclick = () => postMap(picked, $('charNote'));
-  $('c_picture').onclick = async () => {
-    $('charNote').textContent = 'Drawing...';
-    try { await api('/api/admin/map-now', { id: picked }); $('charNote').innerHTML = 'Done: <a href="' + esc(state.maps.url) + '" target="_blank" rel="noopener">see the map</a>'; }
-    catch (e) { $('charNote').textContent = e.message; }
-  };
+  // Players: link the missing kind of account, unlink, colour, forget.
+  $('players2').addEventListener('click', async (ev) => {
+    const row = ev.target.closest('tr[data-id]');
+    if (!row) return;
+    const note = $('playersNote');
+    try {
+      if (ev.target.closest('[data-link]')) {
+        const sel = row.querySelector('select.linkWith');
+        if (!sel || !sel.value) { note.textContent = 'Pick the account to link first.'; return; }
+        await api('/api/admin/link', { keep: row.dataset.id, other: sel.value });
+        note.textContent = 'Linked: ' + row.dataset.name + ' and ' + sel.options[sel.selectedIndex].text + ' are one person now.';
+      } else if (ev.target.closest('[data-unlink]')) {
+        await api('/api/admin/unlink', { id: ev.target.closest('[data-unlink]').dataset.unlink });
+        note.textContent = 'Unlinked.';
+      } else if (ev.target.closest('[data-color]')) {
+        await api('/api/admin/person', { id: row.dataset.id, color: row.querySelector('input.color').value });
+        note.textContent = 'Colour saved.';
+      } else if (ev.target.closest('[data-forget]')) {
+        if (!window.confirm('Forget ' + row.dataset.name + ' completely, for every character: feelings, facts and memories?')) return;
+        await api('/api/admin/person', { id: row.dataset.id, forget: true });
+        note.textContent = 'Forgotten.';
+      } else return;
+      await load();
+      renderPlayers(true);
+      renderRelationships(true);
+    } catch (e) { note.textContent = e.message; }
+  });
 
   $('bot').onsubmit = async (ev) => {
     ev.preventDefault();
@@ -502,6 +554,7 @@ function refresh() {
     + esc(e.text) + '</td></tr>').join('') : '<tr><td colspan="5" class="muted">Nothing yet.</td></tr>';
   const ago = agoOf;
   renderRelationships(false);
+  renderPlayers(false);
   const nameOf = (id) => { const p = st.people.find((x) => x.id === id || (x.aliases || []).some((a) => a.id === id)); return p ? p.name : ''; };
   const mems = st.memories.filter((m) => !me || m.character === me.id);
   $('memories').innerHTML = mems.length ? mems.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'

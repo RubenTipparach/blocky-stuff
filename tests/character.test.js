@@ -120,3 +120,12 @@ test('dating takes real closeness, one partner at a time; a breakup leaves an ex
   assert.equal(runCharacterTool(db, moss, 'set_relationship', { person: 'Ruben', status: 'dating', reason: 'x' },
     { ...turn(null), romance: false }).message, 'Romance is switched off on this server.');
 });
+
+test('unlinking an account makes it its own person again', () => {
+  const { db } = fresh();
+  db.link('game:ruben', 'discord:42');
+  assert.equal(db.person('discord:42').id, 'game:ruben');
+  assert.equal(db.unlink('discord:42'), true);
+  assert.equal(db.person('discord:42').id, 'discord:42');
+  assert.equal(db.unlink('discord:42'), false);
+});
