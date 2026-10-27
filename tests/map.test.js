@@ -192,3 +192,35 @@ test('the map store is brought up to date every 5 minutes, only where something 
     clearInterval(answer);
   }
 });
+
+test('what still needs reading survives a restart, and Refresh reads the area in view now', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', DATA_DIR: mkdtempSync(join(tmpdir(), 'blocky-map-')) });
+  const db = openDb(':memory:');
+  const discord = { mode: '', channelIds: [], post: async () => ({ ok: true }), news: async () => ({}), setChannels: () => true, start() {}, stop() {} };
+  const start = () => makeApp({ config, db, bridgeKey: 'k', discord, bot: { ready: true, hear: async () => null }, log: quiet });
+  const first = start();
+  first.game.sync({ players: [] });
+  first.game.act({ type: 'farm', x1: -76, z1: 25, x2: -61, z2: 40 }).catch(() => {});
+  // A deploy restarts the bot before the next survey: the new one still knows what to read.
+  const server = start();
+  assert.deepEqual(server.maps.storeStatus().waiting.sort(), ['-1,0', '-2,0']);
+  const { game } = server;
+  game.sync({ players: [] });
+  const scans = [];
+  const answer = setInterval(() => {
+    const { actions } = game.sync({});
+    for (const a of actions) { scans.push(a); game.sync({ results: [{ id: a.id, ok: true, message: JSON.stringify(fakeRuns(sampleWorld, a)) }] }); }
+  }, 5);
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const r = await (await fetch(`${base}/map/refresh?x1=-128&z1=0&x2=-1&z2=63`, { method: 'POST' })).json();
+    assert.deepEqual(r.read.sort(), ['-1,0', '-2,0']);
+    assert.deepEqual(server.maps.storeStatus().waiting, []);
+    assert.equal((await fetch(`${base}/map/refresh?x1=0&z1=0&x2=1&z2=1`, { method: 'POST' })).status, 429); // once a minute
+    assert.match(await (await fetch(`${base}/map?view=flat&x=-70&z=30`)).text(), /setView\(\[30, -70\]/); // the same spot
+  } finally {
+    clearInterval(answer);
+    await new Promise((r) => server.close(r));
+  }
+});

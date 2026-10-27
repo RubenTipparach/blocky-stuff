@@ -142,6 +142,38 @@ const OPERATOR_TOOLS = [
     input_schema: { type: 'object', properties: { sha: { type: 'string' } }, required: ['sha'], additionalProperties: false },
     run: (ctx, args) => deployBotCode(args),
   },
+  // ---- The map (owner, 2026-10-27: "Check the mcp server, does it have map controls?") ----
+  {
+    name: 'map_status',
+    description: 'How fresh the map is: how many 64-block chunks it keeps, when each was last read from the game, which '
+      + 'are waiting for the next 5-minute update, and when that last ran.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+    run: ({ maps }) => ({ ok: true, message: JSON.stringify(maps.storeStatus(), null, 1) }),
+  },
+  {
+    name: 'refresh_map',
+    description: 'Read an area of the world into the map again now (the chunks under columns x1, z1 to x2, z2; at most '
+      + '16 chunks of 64 by 64), so the map and pictures show it as it is.',
+    input_schema: { type: 'object', properties: { x1: { type: 'integer' }, z1: { type: 'integer' }, x2: { type: 'integer' },
+      z2: { type: 'integer' } }, required: ['x1', 'z1', 'x2', 'z2'], additionalProperties: false },
+    run: async ({ maps, game }, { x1, z1, x2, z2 }) => {
+      if (!game.connected) return { ok: false, message: 'The game is not running.' };
+      const read = await maps.refresh(x1, z1, x2, z2);
+      return { ok: true, message: `Read ${read.length} chunks again: ${read.join('; ') || 'none'}.` };
+    },
+  },
+  {
+    name: 'map_picture',
+    description: 'An isometric picture of the world around (x, z), r blocks each way (8 to 64), from the map (refresh_map '
+      + 'first for the very latest). y: about the ground there, to see deeper or higher.',
+    input_schema: { type: 'object', properties: { x: { type: 'integer' }, z: { type: 'integer' }, y: { type: 'integer' },
+      r: { type: 'integer', minimum: 8, maximum: 64 } }, required: ['x', 'z'], additionalProperties: false },
+    run: async ({ maps }, { x, z, y = null, r = 32 }) => {
+      const out = await maps.render({ x, z, y, r });
+      if (out.error) return { ok: false, message: out.error };
+      return { ok: true, message: `Around ${x}, ${z}, ${r} blocks each way.`, image: out.png.toString('base64') };
+    },
+  },
   {
     name: 'tool_requests',
     description: 'What the characters asked to be able to do that their tools cannot (request_tool), most asked first; '
@@ -219,7 +251,8 @@ export async function mcpCall(msg, ctx) {
         r = await runTool(name, args, { game: ctx.game, asker: { name: 'MCP', admin: true } });
         if (r.ok && TOOLS.find((t) => t.name === name)?.permission) ctx.db.addDeed('MCP', name, args, r.message);
       } else return fail(-32602, `Unknown tool ${name}.`);
-      return reply({ content: [{ type: 'text', text: r.message || (r.ok ? 'Done.' : 'Failed.') }], isError: !r.ok });
+      return reply({ content: [{ type: 'text', text: r.message || (r.ok ? 'Done.' : 'Failed.') },
+        ...(r.image ? [{ type: 'image', data: r.image, mimeType: 'image/png' }] : [])], isError: !r.ok });
     }
     default:
       return fail(-32601, `Method ${msg.method} is not offered.`);

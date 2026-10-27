@@ -9,6 +9,8 @@ export const DEFAULT_POLICY = { give: true, teleport: true, time: true, heal: tr
 const BUILD_MAX = 2048;
 // Most blocks one fill_box may set (done in one go in the game; owner, 2026-10-27: "expand it to something like 100,000").
 const BOX_MAX = 100_000;
+// The roof shapes build_roof makes (roofNodes below).
+export const ROOF_STYLES = ['gable', 'hip', 'pyramid', 'shed', 'gambrel', 'dome', 'cone', 'castle', 'flat'];
 
 const pos = { type: 'integer' };
 const player = { type: 'string', description: 'Player name, exactly as listed by list_players.' };
@@ -196,18 +198,25 @@ export const TOOLS = [
   {
     name: 'build_roof',
     permission: 'build',
-    description: 'A proper roof over walls whose outer corners are x1, z1 and x2, z2, starting at height y (one above '
-      + 'the wall tops). style "gable": two slopes of stairs meeting at a ridge, the ends closed with `gable` blocks; '
-      + '"hip": four slopes rising to a ridge or point; "flat": a slab deck with a raised rim. overhang: how far the '
-      + 'eaves stick out (default 1). Stairs like stairs:stair_wood, stair_pine_wood, stair_junglewood, '
-      + 'stair_acacia_wood, stair_brick, stair_stonebrick, stair_cobble, stair_desert_stonebrick (find_items "stair").',
+    description: 'A real roof over walls whose outer corners are x1, z1 and x2, z2, starting at height y (one above the wall '
+      + 'tops). Shapes: "gable" (two slopes to a ridge, a prism: cottages), "hip" (four slopes: ranch houses), "pyramid" '
+      + '(four slopes to a point, over a square: towers, pavilions), "shed" (one slope rising toward high: sheds, '
+      + 'porches, modern), "gambrel" (a barn roof: steep, then shallow), "dome" (a rounded cap of `block`: temples, '
+      + 'observatories, desert houses), "cone" (a round pointed cap: round towers, turrets), "castle" (a deck behind '
+      + 'crenellations: keeps, towers, gatehouses), "flat" (a slab deck with a rim). pitch "steep" doubles the rise '
+      + '(Gothic, alpine), "low" flattens a dome. overhang: eaves 0 to 2 (default 1; 0 for dome and castle). Stairs '
+      + 'such as stairs:stair_wood, stair_pine_wood, stair_junglewood, stair_acacia_wood, stair_brick, stair_stonebrick, '
+      + 'stair_cobble, stair_desert_stonebrick (find_items "stair"). Pick the shape that suits the building, and vary it.',
     input_schema: {
       type: 'object',
-      properties: { x1: pos, z1: pos, x2: pos, z2: pos, y: pos, style: { type: 'string', enum: ['gable', 'hip', 'flat'] },
-        stairs: { type: 'string' }, gable: { type: 'string', description: 'Block for the gable ends (default: the walls\' look, wood).' },
-        ridge_along: { type: 'string', enum: ['x', 'z'], description: 'Which way the ridge runs (default: the longer side).' },
+      properties: { x1: pos, z1: pos, x2: pos, z2: pos, y: pos, style: { type: 'string', enum: ROOF_STYLES },
+        stairs: { type: 'string' }, block: { type: 'string', description: 'Full block for dome, castle and steep courses (default: the stairs\' own block).' },
+        gable: { type: 'string', description: 'Block for gable ends (default: the stairs\' own block).' },
+        ridge_along: { type: 'string', enum: ['x', 'z'], description: 'Which way a gable ridge runs (default: the longer side).' },
+        high: { type: 'string', enum: ['north', 'east', 'south', 'west'], description: 'For shed: the side the slope rises to.' },
+        pitch: { type: 'string', enum: ['low', 'normal', 'steep'] },
         overhang: { type: 'integer', minimum: 0, maximum: 2 } },
-      required: ['x1', 'z1', 'x2', 'z2', 'y', 'stairs'], additionalProperties: false,
+      required: ['x1', 'z1', 'x2', 'z2', 'y'], additionalProperties: false,
     },
     run: ({ game }, r) => {
       const nodes = roofNodes(r);
@@ -310,20 +319,44 @@ export function describeArea(scan, { ax, ay, az, bx, by, bz }) {
 }
 
 /** The blocks of a box, or null when there are too many. */
-const ROOF_MAX = 8000;
+const ROOF_MAX = 12000;
+const TURN = { north: 'south', south: 'north', east: 'west', west: 'east' };
 /**
- * The blocks of a roof (owner, 2026-10-27: "A lot of the houses are lacking in style"): stairs rising from the eaves
- * to a ridge, each course one in and one up; a gable's ends filled to the slope; a slab ridge where an odd width
- * leaves one row; a hip's four sides; or a flat slab deck with a rim of stairs.
+ * The blocks of a roof over walls with outer corners x1, z1 and x2, z2, from height y (owner, 2026-10-27: "Roofs are
+ * important, they need to learn different roof shapes. Like prism or pyramids, round, castle like"):
+ *   gable    two slopes of stairs to a ridge (a prism), the ends closed up to the slope
+ *   hip      four slopes to a ridge; pyramid is the same, rising to a point over a square
+ *   shed     one slope, rising toward `high` (a lean-to)
+ *   gambrel  a barn roof: steep lower courses, then shallow ones
+ *   dome     a rounded cap of `block`
+ *   cone     a round pointed cap of stairs, for round towers and turrets
+ *   castle   a deck behind a parapet with crenellations (merlons every other block)
+ *   flat     a slab deck with a rim of stairs
+ * pitch: low or normal (a course rises one block and steps in one) or steep (rises two: a full block under each stair).
  */
-export function roofNodes({ x1, z1, x2, z2, y, style = 'gable', stairs, gable, ridge_along: along, overhang = 1 }) {
-  const o = Math.max(0, Math.min(2, Math.round(overhang)));
-  const [ax, bx] = [Math.min(x1, x2) - o, Math.max(x1, x2) + o];
-  const [az, bz] = [Math.min(z1, z2) - o, Math.max(z1, z2) + o];
+export function roofNodes({ x1, z1, x2, z2, y, style = 'gable', stairs = 'stairs:stair_wood', gable, block, ridge_along: along,
+  overhang = 1, pitch = 'normal', high = 'north' }) {
+  const round = style === 'dome' || style === 'cone' || style === 'castle';
+  const o = Math.max(0, Math.min(2, Math.round(overhang ?? (round ? 0 : 1))));
+  const oo = round && style !== 'cone' ? 0 : o;
+  const [ax, bx] = [Math.min(x1, x2) - oo, Math.max(x1, x2) + oo];
+  const [az, bz] = [Math.min(z1, z2) - oo, Math.max(z1, z2) + oo];
   const slab = String(stairs).replace(/stairs:stair_(inner_|outer_)?/, 'stairs:slab_');
-  const fill = gable || String(stairs).replace(/stairs:stair_(inner_|outer_)?/, 'default:');
+  const solid = block || String(stairs).replace(/stairs:stair_(inner_|outer_)?/, 'default:');
+  const fill = gable || solid;
   const nodes = [];
-  const put = (x, yy, z, item, facing) => nodes.push({ x, y: yy, z, item, ...(facing ? { facing } : {}) });
+  const seen = new Set();
+  const put = (x, yy, z, item, facing) => {
+    const k = `${x},${yy},${z}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    nodes.push({ x, y: yy, z, item, ...(facing ? { facing } : {}) });
+  };
+  // Courses: course k sits at height H[k]; a steep course is a full block with a stair on it.
+  const steepAt = (k, n) => pitch === 'steep' || (style === 'gambrel' && k < Math.ceil(n / 2));
+  const courses = (n) => { const out = []; let h = y; for (let k = 0; k < n; k++) { const st = steepAt(k, n); out.push({ h, st }); h += st ? 2 : 1; } return out; };
+  const stair = (x, h, z, facing, st) => { if (st) put(x, h, z, solid); put(x, h + (st ? 1 : 0), z, stairs, facing); };
+
   if (style === 'flat') {
     for (let x = ax; x <= bx; x++) for (let z = az; z <= bz; z++) {
       const rim = x === ax || x === bx || z === az || z === bz;
@@ -331,30 +364,108 @@ export function roofNodes({ x1, z1, x2, z2, y, style = 'gable', stairs, gable, r
     }
     return nodes;
   }
-  const alongX = along ? along === 'x' : bx - ax >= bz - az;
-  if (style === 'hip') {
-    for (let k = 0; ; k++) {
-      const [lx, rx, lz, rz] = [ax + k, bx - k, az + k, bz - k];
-      if (lx > rx || lz > rz) break;
-      if (lx === rx || lz === rz) { for (let x = lx; x <= rx; x++) for (let z = lz; z <= rz; z++) put(x, y + k, z, slab); break; }
-      for (let x = lx; x <= rx; x++) { put(x, y + k, lz, stairs, 'north'); put(x, y + k, rz, stairs, 'south'); }
-      for (let z = lz + 1; z < rz; z++) { put(lx, y + k, z, stairs, 'east'); put(rx, y + k, z, stairs, 'west'); }
+  if (style === 'castle') {
+    // A deck, a parapet round it, and merlons on every other block of the parapet (corners always).
+    for (let x = ax; x <= bx; x++) for (let z = az; z <= bz; z++) {
+      put(x, y, z, solid);
+      const rim = x === ax || x === bx || z === az || z === bz;
+      if (!rim) continue;
+      put(x, y + 1, z, solid);
+      const corner = (x === ax || x === bx) && (z === az || z === bz);
+      if (corner || (x - ax + z - az) % 2 === 0) put(x, y + 2, z, solid);
     }
     return nodes;
   }
-  // Gable: the slopes rise across the short way; the walls under the two ends are closed up to the roof.
+  if (style === 'dome') {
+    // Half an ellipsoid over the footprint, its shell only.
+    const cx = (ax + bx) / 2;
+    const cz = (az + bz) / 2;
+    const rx = (bx - ax) / 2 + 0.5;
+    const rz = (bz - az) / 2 + 0.5;
+    const ry = Math.max(2, Math.min(rx, rz) * (pitch === 'low' ? 0.6 : pitch === 'steep' ? 1.4 : 1));
+    const inside = (x, h, z) => ((x - cx) / rx) ** 2 + ((z - cz) / rz) ** 2 + (h / ry) ** 2 <= 1;
+    for (let x = ax; x <= bx; x++) for (let z = az; z <= bz; z++) for (let h = 0; h <= Math.ceil(ry); h++) {
+      if (!inside(x, h, z)) continue;
+      if (!inside(x + 1, h, z) || !inside(x - 1, h, z) || !inside(x, h, z + 1) || !inside(x, h, z - 1) || !inside(x, h + 1, z)) put(x, y + h, z, solid);
+    }
+    return nodes;
+  }
+  if (style === 'cone') {
+    // Rings of stairs facing in, each a block narrower, to a point (a slab, or a full block when steep).
+    const cx = (ax + bx) / 2;
+    const cz = (az + bz) / 2;
+    const r0 = Math.min(bx - ax, bz - az) / 2 + 0.5;
+    const n = Math.ceil(r0);
+    const cs = courses(n);
+    for (let k = 0; k < n; k++) {
+      const r = r0 - k;
+      for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x++) for (let z = Math.floor(cz - r); z <= Math.ceil(cz + r); z++) {
+        const d = Math.hypot(x - cx, z - cz);
+        if (d > r || d <= r - 1) continue;
+        const dx = x - cx;
+        const dz = z - cz;
+        const facing = Math.abs(dx) >= Math.abs(dz) ? (dx > 0 ? 'west' : 'east') : (dz > 0 ? 'south' : 'north');
+        if (r <= 1) { put(x, cs[k].h, z, cs[k].st ? solid : slab); if (cs[k].st) put(x, cs[k].h + 1, z, solid); }
+        else stair(x, cs[k].h, z, facing, cs[k].st);
+      }
+    }
+    const tip = cs[n - 1];
+    put(Math.round(cx), tip.h + (tip.st ? 2 : 1), Math.round(cz), pitch === 'steep' ? 'default:fence_wood' : slab);
+    return nodes;
+  }
+  if (style === 'shed') {
+    // One slope across the footprint, rising toward `high`.
+    const facing = TURN[TURN[high]] ? high : 'north';
+    const alongZ = facing === 'north' || facing === 'south';
+    const [lo, hiEnd] = alongZ ? [az, bz] : [ax, bx];
+    const n = hiEnd - lo + 1;
+    const cs = courses(n);
+    for (let k = 0; k < n; k++) {
+      const c = facing === 'north' || facing === 'east' ? lo + k : hiEnd - k;
+      for (let s = alongZ ? ax : az; s <= (alongZ ? bx : bz); s++) {
+        const [x, z] = alongZ ? [s, c] : [c, s];
+        stair(x, cs[k].h, z, facing, cs[k].st);
+        // Close the two open sides under the slope.
+        if (s === (alongZ ? Math.min(x1, x2) : Math.min(z1, z2)) || s === (alongZ ? Math.max(x1, x2) : Math.max(z1, z2))) {
+          for (let h = y; h < cs[k].h; h++) put(x, h, z, fill);
+        }
+      }
+    }
+    return nodes;
+  }
+  if (style === 'hip' || style === 'pyramid') {
+    const n = Math.ceil((Math.min(bx - ax, bz - az) + 1) / 2);
+    const cs = courses(n + 1);
+    for (let k = 0; ; k++) {
+      const [lx, rx, lz, rz] = [ax + k, bx - k, az + k, bz - k];
+      if (lx > rx || lz > rz) break;
+      const { h, st } = cs[k];
+      if (lx === rx || lz === rz) {
+        for (let x = lx; x <= rx; x++) for (let z = lz; z <= rz; z++) { if (st) put(x, h, z, solid); put(x, h + (st ? 1 : 0), z, slab); }
+        break;
+      }
+      for (let x = lx; x <= rx; x++) { stair(x, h, lz, 'north', st); stair(x, h, rz, 'south', st); }
+      for (let z = lz + 1; z < rz; z++) { stair(lx, h, z, 'east', st); stair(rx, h, z, 'west', st); }
+    }
+    return nodes;
+  }
+  // Gable and gambrel: the slopes rise across the short way; the walls under the two ends are closed to the roof.
+  const alongX = along ? along === 'x' : bx - ax >= bz - az;
   const [wl, wr] = alongX ? [Math.min(x1, x2), Math.max(x1, x2)] : [Math.min(z1, z2), Math.max(z1, z2)];
   const [lo, hi] = alongX ? [az, bz] : [ax, bx];
   const [s0, s1] = alongX ? [ax, bx] : [az, bz];
-  for (let k = 0; ; k++) {
+  const n = Math.ceil((hi - lo + 1) / 2);
+  const cs = courses(n);
+  for (let k = 0; k < n; k++) {
     const [l, r] = [lo + k, hi - k];
-    if (l > r) break;
+    const { h, st } = cs[k];
     for (let s = s0; s <= s1; s++) {
-      const at = (c, item, facing) => (alongX ? put(s, y + k, c, item, facing) : put(c, y + k, s, item, facing));
-      if (l === r) { at(l, slab); continue; }
-      at(l, stairs, alongX ? 'north' : 'east');
-      at(r, stairs, alongX ? 'south' : 'west');
-      if (s === wl || s === wr) for (let c = l + 1; c < r; c++) at(c, fill);
+      const at = (c, hh, item, facing) => (alongX ? put(s, hh, c, item, facing) : put(c, hh, s, item, facing));
+      if (l === r) { if (st) at(l, h, solid); at(l, h + (st ? 1 : 0), slab); continue; }
+      if (st) { at(l, h, solid); at(r, h, solid); }
+      at(l, h + (st ? 1 : 0), stairs, alongX ? 'north' : 'east');
+      at(r, h + (st ? 1 : 0), stairs, alongX ? 'south' : 'west');
+      if (s === wl || s === wr) for (let c = l + 1; c < r; c++) for (let hh = h; hh <= h + (st ? 1 : 0); hh++) at(c, hh, fill);
     }
   }
   return nodes;

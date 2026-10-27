@@ -139,3 +139,27 @@ test('a gable roof rises a course at a time from the eaves to a slab ridge, its 
   assert.deepEqual([at(hip, 0, 5, 2).facing, at(hip, 4, 5, 2).facing], ['east', 'west']);
   assert.equal(at(hip, 2, 7, 2).item, 'stairs:slab_wood'); // the point
 });
+
+test('every roof shape: steep courses stand on full blocks, a cone and a dome are round, a castle has merlons', () => {
+  const at = (n, x, y, z) => n.find((b) => b.x === x && b.y === y && b.z === z);
+  const base = { x1: 0, z1: 0, x2: 8, z2: 8, y: 5, stairs: 'stairs:stair_stonebrick' };
+  for (const style of ['gable', 'hip', 'pyramid', 'shed', 'gambrel', 'dome', 'cone', 'castle', 'flat']) {
+    const n = roofNodes({ ...base, style });
+    assert.ok(n.length > 20, style);
+    assert.equal(new Set(n.map((b) => `${b.x},${b.y},${b.z}`)).size, n.length, `${style}: no block twice`);
+  }
+  const steep = roofNodes({ ...base, style: 'gable', ridge_along: 'x', pitch: 'steep' });
+  assert.deepEqual([at(steep, 4, 5, -1).item, at(steep, 4, 6, -1).facing], ['default:stonebrick', 'north']);
+  const gambrel = roofNodes({ ...base, style: 'gambrel', ridge_along: 'x' });
+  // Steep below (a full block under the eave), shallow above: lower than a steep gable, higher than a plain one.
+  const top = (n) => Math.max(...n.map((b) => b.y));
+  assert.equal(at(gambrel, 4, 5, -1).item, 'default:stonebrick');
+  assert.ok(top(gambrel) < top(steep) && top(gambrel) > top(roofNodes({ ...base, style: 'gable', ridge_along: 'x' })));
+  const cone = roofNodes({ ...base, style: 'cone' });
+  assert.equal(at(cone, -1, 5, -1), undefined); // round: the corners stay open
+  const dome = roofNodes({ ...base, style: 'dome', block: 'default:sandstonebrick' });
+  assert.equal(at(dome, 4, 6, 4), undefined); // hollow
+  assert.ok(dome.every((b) => b.item === 'default:sandstonebrick'));
+  const castle = roofNodes({ ...base, style: 'castle' });
+  assert.deepEqual([!!at(castle, 0, 7, 0), !!at(castle, 1, 7, 0), !!at(castle, 2, 7, 0)], [true, false, true]); // merlons
+});

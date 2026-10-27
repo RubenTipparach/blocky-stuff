@@ -648,7 +648,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
       if (req.method !== 'POST') return send(res, 405, { error: 'POST JSON-RPC here.' }, { allow: 'POST' });
       const msg = await readBody(req);
       if (!msg) return send(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Not JSON.' } });
-      const ctx = { game, db, status, announce };
+      const ctx = { game, db, status, announce, maps };
       if (Array.isArray(msg)) {
         const out = (await Promise.all(msg.map((m) => mcpCall(m, ctx)))).filter(Boolean);
         return out.length ? send(res, 200, out) : (res.writeHead(202), res.end());
