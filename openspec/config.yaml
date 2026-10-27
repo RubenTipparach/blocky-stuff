@@ -1,0 +1,47 @@
+schema: spec-driven
+
+context: |
+  Blocky Stuff: a public Luanti 5.17 server (Minetest Game) on Fly.io with AI characters (Blocky, Moss) that players
+  talk to in game and on Discord. The owner is the only admin and approves features.
+  - Two deploy paths: bot code (server/, not launcher.mjs, luanti.mjs, hotdeploy.mjs) goes live as a hot update with
+    the game running (MCP deploy_bot_code on a pushed commit). Anything in mods/, luanti/, the Dockerfile or
+    dependencies needs a merge into main, which restarts the game for about a minute: say so in the design, and
+    prefer bot-side changes when either would do.
+  - Every block or item name used must exist in this game's item list (find_items over MCP); Minetest Game, not
+    Minecraft: no mobs, no hunger, no Nether by default.
+  - The characters' AI calls cost money and share a daily limit (80% for their own turns, 20% kept for people):
+    designs that add LLM calls must say how many and how often.
+  - Tests: node --test (npm test) must pass; new behaviour gets a test.
+  - Code style as in the repo: plain Node (node:http, node:sqlite), no new dependencies without asking, comments that
+    quote the owner's request with its date.
+
+# Project context (optional)
+# Add only constraints that should guide OpenSpec artifacts and workflows.
+# Include constraints an agent cannot infer by reading the code.
+# Keep general project documentation and discoverable codebase facts out.
+# Example:
+#   context: |
+#     Designs and tasks must cover Windows, macOS, and Linux
+#     Write all artifacts in Spanish
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
