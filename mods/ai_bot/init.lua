@@ -193,7 +193,7 @@ local cast = {} -- id -> { name, chat, dress, hair }, as the sidecar last sent i
 local order = {} -- the ids, in the sidecar's order
 local bodies = {} -- id -> { obj, follow, go, go_until, go_anim, face, face_until, home, look }
 local has_model = core.get_modpath("player_api") ~= nil
-local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 } }
+local ANIM = { stand = { x = 0, y = 79 }, walk = { x = 168, y = 187 }, mine = { x = 189, y = 198 }, lay = { x = 162, y = 166 } }
 local WALK_SPEED, FAR = 4, 40
 local ARRIVE = 1.2 -- close enough to her place
 local APART = 1.4 -- nearer than this to another body, and they step apart
@@ -305,6 +305,12 @@ core.register_entity("ai_bot:npc", {
 		local obj = self.object
 		local pos = obj:get_pos()
 		local vel = obj:get_velocity()
+		-- Asleep (nobody in the game, and the sleep setting on): lying where she is until someone comes.
+		if cast[self._cid] and cast[self._cid].asleep then
+			obj:set_velocity({ x = 0, y = vel.y, z = 0 })
+			anim(self, "lay")
+			return
+		end
 		self._saved = (self._saved or 0) + dtime
 		if self._saved > SAVE_EVERY then
 			self._saved = 0
@@ -440,7 +446,7 @@ local function tend(list)
 		local fresh, ids = {}, {}
 		for _, c in ipairs(list) do
 			if type(c) == "table" and type(c.id) == "string" and type(c.name) == "string" then
-				fresh[c.id] = { name = line(c.name, 32), chat = c.chat, dress = c.dress, hair = c.hair }
+				fresh[c.id] = { name = line(c.name, 32), chat = c.chat, dress = c.dress, hair = c.hair, asleep = c.asleep == true }
 				ids[#ids + 1] = c.id
 			end
 		end
@@ -461,10 +467,11 @@ local function tend(list)
 		if b.follow and not core.get_player_by_name(b.follow) then b.follow = nil end
 		if alive(b) then
 			b.waiting = nil
-			if b.look ~= c.name .. skin(c) then
-				b.obj:set_properties({ nametag = c.name, nametag_color = hex(c.chat, BOT_COLOR) })
+			-- Her name (with zzz while she sleeps) and colours, refreshed when either changed.
+			if b.look ~= c.name .. skin(c) .. tostring(c.asleep) then
+				b.obj:set_properties({ nametag = c.name .. (c.asleep and " (zzz)" or ""), nametag_color = hex(c.chat, BOT_COLOR) })
 				if has_model then b.obj:set_properties({ textures = { skin(c) } }) end
-				b.look = c.name .. skin(c)
+				b.look = c.name .. skin(c) .. tostring(c.asleep)
 			end
 		elseif home_of(id) then
 			hold(id, home_of(id)) -- where she lives: load it, and she wakes there

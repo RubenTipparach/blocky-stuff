@@ -214,3 +214,61 @@ test('a prank needs real hostility, places only harmless blocks into air, and on
   await hear();
   assert.ok(!client.calls[6].tools.some((t) => t.name === 'prank'));
 });
+
+// Tool calls as the fake model's answers.
+const use = (name, input) => () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: `u${Math.random()}`, name, input }] });
+// Play the mod: answer each action (and scans with an empty area).
+function playMod(game) {
+  const timer = setInterval(() => {
+    const { actions } = game.sync({});
+    game.sync({ results: actions.map((a) => ({ id: a.id, ok: true, message: a.type === 'scan'
+      ? JSON.stringify({ x1: a.x1, z1: a.z1, w: a.w, d: a.d, y1: a.y1, names: ['default:cobble'], cols: Array.from({ length: a.w * a.d }, () => [a.y1, 1, 0]) })
+      : 'Placed 9 blocks.' })) });
+  }, 2);
+  return () => clearInterval(timer);
+}
+
+test('a task is carried to the end: pushed back when left open, finished only after looking at the build', async () => {
+  const box = { item: 'default:cobble', x1: 0, y1: 0, z1: 0, x2: 2, y2: 0, z2: 2 };
+  const { db, game, bot, client } = setup([
+    use('start_task', { goal: 'a cobble floor 3 by 3 at 0, 0', check: 'inspect shows 9 cobble at y 0' }),
+    text('On it!'),                                                // tries to stop with the task open: sent back
+    use('fill_box', box),
+    use('finish_task', { evidence: 'looks fine' }),                // refused: has not looked
+    use('inspect_area', { x1: 0, y1: 0, z1: 0, x2: 2, y2: 0, z2: 2 }),
+    use('finish_task', { evidence: 'inspect shows 9 cobble at y 0' }),
+    text('Your floor is done, alice!'),
+  ]);
+  db.putJson('bot', { cooldown: 0 });
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: ['server'] }] });
+  const stop = playMod(game);
+  try {
+    const answer = await bot.hear({ source: 'game', name: 'alice', text: 'Blocky, make me a cobble floor', admin: true }, () => {});
+    assert.equal(answer, 'Your floor is done, alice!');
+    const sent = client.calls.map((c) => c.messages.at(-1).content);
+    assert.match(String(sent[2]), /\[Not finished\]/);
+    assert.match(JSON.stringify(sent[4]), /Not yet: look at what you built with inspect_area/);
+    const [task] = bot.tasksOf('blocky');
+    assert.deepEqual([task.status, task.built], ['done', true]);
+  } finally { stop(); }
+});
+
+test('an unfinished task goes on in its own turns and the asker hears when it is done', async () => {
+  const { db, game, bot } = setup([
+    use('inspect_area', { x1: 0, y1: 0, z1: 0, x2: 1, y2: 0, z2: 1 }),
+    use('finish_task', { evidence: 'all there' }),
+    text('All done, alice: your path is laid.'),
+  ]);
+  game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] });
+  bot.saveTasks('blocky', [{ id: 't1', goal: 'a path', check: 'cobble from 0,0 to 1,1', by: 'alice', personId: 'game:alice', admin: false,
+    source: 'game', at: 0, rounds: 5, built: false, status: 'open' }]);
+  const stop = playMod(game);
+  try {
+    const heard = [];
+    const line = await bot.work((t, ch, task) => heard.push([t, ch.name, task.by]));
+    assert.equal(line, 'All done, alice: your path is laid.');
+    assert.deepEqual(heard, [['All done, alice: your path is laid.', 'Blocky', 'alice']]);
+    assert.equal(bot.tasksOf('blocky')[0].status, 'done');
+    assert.equal(await bot.work(() => {}), null); // nothing left to do
+  } finally { stop(); }
+});

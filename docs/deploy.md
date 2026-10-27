@@ -104,3 +104,12 @@ Discord (slash commands, registered in each server the bot is in): `/picture` (a
 
 In the game: `/talk <name> <message>`, `/follow <name>`, `/come <name>`, `/stay <name>`, `/rel`, `/link`.
 Talking to the characters is plain chat in either place: say a name, look at one in the game, or just talk.
+
+## Continuous delivery for the bot
+
+The machine runs `server/launcher.mjs`, which runs Luanti and the bot side by side. A push whose changes since the live
+commit are only bot code (`server/`, except the launcher, `luanti.mjs` and `hotdeploy.mjs`), tests or docs is a **hot
+update**: the deploy job runs `server/hotdeploy.mjs <commit>` on the machine over `fly ssh`, which fetches the commit
+from GitHub, checks it loads, switches to it, and restarts the bot only. The game keeps running. Anything else (the mod,
+Luanti's settings, the Dockerfile, dependencies), a run started by hand, or a hot update that does not come up, is a full
+deploy. `GET /api/version` says which commit the bot and the image are on.

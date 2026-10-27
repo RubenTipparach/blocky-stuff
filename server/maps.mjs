@@ -500,7 +500,8 @@ const at = (x, y, z) => [z, x];
 ${markersScript()}
 const Coords = L.Control.extend({ onAdd() { this.el = L.DomUtil.create('div', 'coords'); this.el.textContent = 'x, z'; return this.el; } });
 const coords = new Coords({ position: 'bottomleft' }).addTo(map);
-map.on('mousemove', (e) => { coords.el.textContent = 'x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat); });`;
+map.on('mousemove', (e) => { coords.el.textContent = 'x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat); });
+map.on('click', (e) => { L.popup().setLatLng(e.latlng).setContent('x ' + Math.floor(e.latlng.lng) + ', z ' + Math.floor(e.latlng.lat)).openOn(map); });`;
 }
 
 // The isometric map's script. The page draws the map itself (owner, 2026-10-27: "ship renderer on front end"): it
@@ -667,6 +668,30 @@ fetch('/map/explored.json').then((r) => r.json()).then((e) => {
   }
   load();
 }).catch(() => load());
+
+// Click a block: its coordinates and what it is. The click is a line of sight into the drawing: from the cut down, the
+// first block whose top sits under the pointer (from the chunks already in this page).
+const blockAt = (x, y, z) => {
+  const cx = Math.floor(x / C), cz = Math.floor(z / C), chunk = chunks.get(cx + ',' + cz);
+  if (!chunk || !chunk.g || y < YMIN || y > YMAX) return null;
+  const id = chunk.g[((z - cz * C) * C + (x - cx * C)) * NY + (y - YMIN)];
+  if (!id || (chunk.data.leaves[id - 1] && !view.trees)) return null;
+  return chunk.data.names[id - 1];
+};
+map.on('click', (e) => {
+  const gxc = e.latlng.lng, gyc = -e.latlng.lat;
+  const top = view.cut ? view.cutAt : YMAX;
+  for (let y = top; y >= YMIN; y--) {
+    const u = (gxc - A) / A, v = ((gyc - A / 2) + y * A) * 2 / A;
+    const x = Math.round((u + v) / 2), z = Math.round((v - u) / 2);
+    const name = blockAt(x, y, z);
+    if (name) {
+      L.popup({ className: 'where' }).setLatLng(e.latlng).setContent('x ' + x + ', y ' + y + ', z ' + z + '<br><small>' + name + '</small>').openOn(map);
+      return;
+    }
+  }
+  L.popup({ className: 'where' }).setLatLng(e.latlng).setContent('Nothing here (not explored, or air).').openOn(map);
+});
 
 // ---- The controls ----
 const $ = (id) => document.getElementById(id);

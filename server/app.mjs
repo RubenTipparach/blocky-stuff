@@ -26,8 +26,6 @@ import { TOOLS } from './tools.mjs';
 import { cast as castOf, activeCast, saveCharacter, removeCharacter, personId, characterPersonId, affinityWord,
   trustWord } from './character.mjs';
 
-// The characters keep working on their own for this long after anyone last said or did anything.
-const WORK_AFTER_MS = 60 * 60_000;
 // A /link code lasts this long.
 const LINK_MS = 10 * 60_000;
 // Where new players get the game, in the "server is up" post.
@@ -56,7 +54,8 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   const characters = () => activeCast(db, config, now());
   const host = () => characters()[0] ?? { id: 'blocky', name: 'Blocky', chatColor: '#f2b84b' };
   // What the game needs of each character for its body and its name in chat.
-  const bodies = () => characters().map((c) => ({ id: c.id, name: c.name, chat: c.chatColor, dress: c.dressColor, hair: c.hairColor }));
+  const bodies = () => characters().map((c) => ({ id: c.id, name: c.name, chat: c.chatColor, dress: c.dressColor, hair: c.hairColor,
+    asleep: asleep() }));
   // How each character feels about each player online, for the meter a player sees when looking at one.
   const meters = () => Object.fromEntries(game.players.map((p) => [p.name, Object.fromEntries(characters().map((c) => {
     const b = db.bond(c.id, personId('game', p.name));
@@ -152,10 +151,12 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   // anything for the idle spell (owner, 2026-10-27: "if they are on their own they should build whatever they want,
   // at least for an hour or so").
   let idling = false;
+  /** Asleep: the sleep setting is on and nobody is in the game. */
+  const asleep = () => botSettings(db, config).sleep && game.players.length === 0;
   async function idleTick() {
     const s = botSettings(db, config);
-    if (idling || !s.idle.enabled || !game.connected) return;
-    if (!game.players.length && now() - lastActivity > WORK_AFTER_MS) return;
+    if (idling || !s.idle.enabled || !game.connected || asleep()) return;
+    // With sleep on, they work only while someone is in the game; off, always (within the limits).
     idling = true;
     try {
       await brain.idle?.((t, ch) => botSays(t, ch));
@@ -164,6 +165,20 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     }
   }
   if (daily) setInterval(() => { idleTick().catch((err) => log.error('idle turn failed:', err)); }, 5000).unref();
+
+  // Unfinished tasks go on in turns of their own (server/bot.mjs work), sleep or not: someone asked for them. The one who
+  // asked hears when one is done or set aside, where they asked.
+  let working = false;
+  async function workTick() {
+    if (working || !game.connected) return;
+    working = true;
+    try {
+      await brain.work?.((t, ch, task) => botSays(t, ch, { near: task.source === 'game' ? task.by : undefined, toDiscord: task.source === 'discord' }));
+    } finally {
+      working = false;
+    }
+  }
+  if (daily) setInterval(() => { workTick().catch((err) => log.error('task turn failed:', err)); }, 5000).unref();
 
   // ---- One person in two places: /link in the game gives a private code; /link in Discord with it joins them ----
   const linkCodes = new Map(); // code -> { gameId, name, at }
@@ -310,7 +325,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         connected: game.connected, seenAt: game.seenAt || null, items: game.items.length,
         timeOfDay: game.time === null ? null : Math.round(game.time * 240) / 10, process: luanti?.status() ?? null },
       players: game.players,
-      bot: { ready: brain.ready, name: characters().map((c) => c.name).join(', '), model: s.model, enabled: s.enabled },
+      bot: { ready: brain.ready, name: characters().map((c) => c.name).join(', '), model: s.model, enabled: s.enabled, asleep: asleep() },
       discord: { mode: chat.mode, problem: chat.problem, listening: chat.listening, channelIds: chat.channelIds,
         hasBot: chat.hasBot, invite: inviteUrl() },
     };
@@ -418,6 +433,12 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         if (Number.isFinite(Number(body[k])) && Number(body[k]) >= 0) next[k] = Math.floor(Number(body[k]));
       }
       if (body.listen === 'all' || body.listen === 'mentions') next.listen = body.listen;
+      if (typeof body.sleep === 'boolean') {
+        // Switched off: wake them now (owner: "If I toggle sleep off wake bots up immediately"): the next sync stands
+        // their bodies up, and an own turn starts at once instead of at the next tick.
+        if (!body.sleep && botSettings(db, config).sleep) setTimeout(() => { idleTick().catch((err) => log.error(err)); }, 100);
+        next.sleep = body.sleep;
+      }
       if (typeof body.romance === 'boolean') next.romance = body.romance;
       if (typeof body.pranks === 'boolean') next.pranks = body.pranks;
       if (body.idle && typeof body.idle === 'object') {
@@ -500,6 +521,13 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (route === 'POST /api/admin/unlink') {
       return db.unlink(String(body.id ?? '')) ? send(res, 200, { ok: true }) : send(res, 400, { error: 'That account is not linked to anyone.' });
     }
+    // Cancel a character's task: { character, id }.
+    if (route === 'POST /api/admin/task') {
+      const tasks = brain.tasksOf?.(String(body.character)) ?? [];
+      if (!tasks.some((t) => t.id === body.id)) return send(res, 404, { error: 'No such task.' });
+      brain.saveTasks(String(body.character), tasks.map((t) => (t.id === body.id && t.status === 'open' ? { ...t, status: 'cancelled', done: now() } : t)));
+      return send(res, 200, { ok: true });
+    }
     if (route === 'POST /api/admin/forget-memory') {
       return send(res, 200, { forgotten: db.dropMemory(Number(body.id)) });
     }
@@ -580,6 +608,10 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     if (url.pathname.startsWith('/api/admin')) return admin(req, res, route);
     if (route === 'GET /auth/discord/login') return login(req, res, url);
     if (route === 'GET /auth/discord/callback') return callback(req, res, url);
+    // Which code is live: the bot's commit (a hot release, or the image's) and the image's. The deploy job reads it.
+    if (route === 'GET /api/version') {
+      return send(res, 200, { sha: process.env.BOT_SHA || process.env.GIT_SHA || null, image: process.env.GIT_SHA || null });
+    }
     if (route === 'GET /api/info') {
       return send(res, 200, { game: game.connected, players: game.players.length, bot: brain.ready, discord: chat.mode,
         signIn: !config.missing.signIn.length, missing: config.missing });

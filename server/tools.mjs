@@ -45,6 +45,26 @@ export const TOOLS = [
     run: ({ game }, { columns }) => game.act({ type: 'ground', columns: columns.slice(0, 25) }),
   },
   {
+    name: 'inspect_area',
+    description: 'Look at the real blocks in a box (at most 24 by 24 columns and 16 high), to check a build before saying it '
+      + 'is done: a legend of letters for the blocks, then each layer from the top down as rows of x (west to east), one '
+      + 'row per z (north to south), "." for air; and how many of each block.',
+    input_schema: {
+      type: 'object',
+      properties: { x1: pos, y1: pos, z1: pos, x2: pos, y2: pos, z2: pos },
+      required: ['x1', 'y1', 'z1', 'x2', 'y2', 'z2'], additionalProperties: false,
+    },
+    run: async ({ game }, b) => {
+      const [ax, bx] = [Math.min(b.x1, b.x2), Math.max(b.x1, b.x2)];
+      const [ay, by] = [Math.min(b.y1, b.y2), Math.max(b.y1, b.y2)];
+      const [az, bz] = [Math.min(b.z1, b.z2), Math.max(b.z1, b.z2)];
+      if (bx - ax >= 24 || bz - az >= 24 || by - ay >= 16) return { ok: false, message: 'Too big: at most 24 by 24 columns and 16 high.' };
+      const r = await game.act({ type: 'scan', runs: true, x1: ax, z1: az, w: bx - ax + 1, d: bz - az + 1, y1: ay, y2: by });
+      if (!r.ok) return r;
+      return { ok: true, message: describeArea(JSON.parse(r.message), { ax, ay, az, bx, by, bz }) };
+    },
+  },
+  {
     name: 'give_item',
     permission: 'give',
     self: 'player',
@@ -177,6 +197,41 @@ export async function runTool(name, input, { game, asker, policy = DEFAULT_POLIC
   } catch (err) {
     return { ok: false, message: `${name} failed: ${err.message}` };
   }
+}
+
+/** A scan (runs) of a box as text: a legend, each layer with anything in it top down, and the counts. */
+export function describeArea(scan, { ax, ay, az, bx, by, bz }) {
+  const w = bx - ax + 1;
+  const names = Array.isArray(scan.names) ? scan.names : [];
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const grid = new Map(); // "x,y,z" -> name index
+  (scan.cols ?? []).forEach((col, i) => {
+    const x = ax + (i % w);
+    const z = az + Math.floor(i / w);
+    for (let k = 0; col && k + 2 < col.length; k += 3) for (let y = col[k]; y > col[k] - col[k + 1]; y--) grid.set(`${x},${y},${z}`, col[k + 2]);
+  });
+  const counts = new Map();
+  for (const id of grid.values()) counts.set(id, (counts.get(id) ?? 0) + 1);
+  const legend = [...counts.keys()].map((id, i) => [id, letters[i] ?? '?']);
+  const letterOf = new Map(legend);
+  const layers = [];
+  for (let y = by; y >= ay; y--) {
+    const rows = [];
+    let any = false;
+    for (let z = az; z <= bz; z++) {
+      let row = '';
+      for (let x = ax; x <= bx; x++) {
+        const id = grid.get(`${x},${y},${z}`);
+        if (id !== undefined) any = true;
+        row += id === undefined ? '.' : letterOf.get(id);
+      }
+      rows.push(row);
+    }
+    if (any) layers.push(`y=${y} (rows z=${az}..${bz}, columns x=${ax}..${bx}):\n${rows.join('\n')}`);
+  }
+  if (!layers.length) return `Nothing but air from (${ax}, ${ay}, ${az}) to (${bx}, ${by}, ${bz}).`;
+  return `Legend: ${legend.map(([id, l]) => `${l}=${names[id]}`).join(', ')}\n`
+    + `Counts: ${legend.map(([id]) => `${names[id]} ${counts.get(id)}`).join(', ')}\n${layers.join('\n')}`;
 }
 
 /** The blocks of a box, or null when there are too many. */

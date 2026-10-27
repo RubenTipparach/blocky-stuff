@@ -263,6 +263,7 @@ function build() {
     <div class="three"><label class="field">Cooldown (s)<input id="b_cooldown" type="number" min="0"></label>
     <label class="field">Per player / hour<input id="b_perHour" type="number" min="0"></label>
     <label class="field">Calls / day (0 = no limit)<input id="b_perDay" type="number" min="0"></label></div>
+    <label class="check"><input type="checkbox" id="b_sleep"> Sleep: when nobody is in the game, they sleep (no projects, no AI calls). Off: they stay awake and keep working</label>
     <label class="check"><input type="checkbox" id="b_romance"> Romance: characters fond of someone may flirt, and date (always PG)</label>
     <label class="check"><input type="checkbox" id="b_pranks"> Pranks: characters hostile to someone may drop a few harmless blocks on their build, once a day</label>
     <label class="check"><input type="checkbox" id="b_idle"> They work on their own projects when nobody is asking them anything (while someone is online, and for an hour after anyone's last word)</label>
@@ -319,6 +320,10 @@ function build() {
       <button type="button" class="quiet" id="c_post">Take a picture and post it</button>
       <button type="button" class="danger" id="c_remove">Remove</button><span id="charNote" class="note muted"></span></div>
   </form></section>
+<section style="margin-top:14px"><h2>Her tasks</h2>
+  <p class="muted note" style="margin:0 0 8px">Jobs people asked of her. She keeps at an open one until it is done and checked, or set aside; Cancel stops it.</p>
+  <div class="scroll"><table><thead><tr><th>Asked</th><th>By</th><th>Task</th><th>Status</th><th>Rounds</th><th></th></tr></thead>
+  <tbody id="tasks"></tbody></table></div></section>
 <section style="margin-top:14px"><h2>Her memories</h2><div class="scroll"><table><thead><tr><th>When</th><th>About</th><th>Memory</th><th>Weight</th><th></th></tr></thead>
   <tbody id="memories"></tbody></table></div></section>
 </div>
@@ -436,7 +441,12 @@ function build() {
   $('b_enabled').checked = s.enabled; $('b_model').value = s.model; $('b_effort').value = s.effort;
   $('b_cooldown').value = s.cooldown; $('b_perHour').value = s.perHour; $('b_perDay').value = s.perDay;
   $('b_listen').value = s.listen; $('b_summaryHour').value = s.summaryHour;
-  $('b_romance').checked = s.romance; $('b_pranks').checked = s.pranks;
+  $('b_romance').checked = s.romance; $('b_pranks').checked = s.pranks; $('b_sleep').checked = s.sleep;
+  // Sleep saves at once when switched (switching it off wakes them right away).
+  $('b_sleep').onchange = async () => {
+    try { await api('/api/admin/bot', { sleep: $('b_sleep').checked }); $('botNote').textContent = $('b_sleep').checked ? 'They will sleep while nobody is in the game.' : 'Awake: they are getting up.'; refreshSoon(); }
+    catch (e) { $('botNote').textContent = e.message; }
+  };
   $('b_idle').checked = s.idle.enabled; $('b_idleAfter').value = s.idle.after; $('b_idlePerHour').value = s.idle.perHour;
   const perms = [...new Map(state.policyTools.map((t) => [t.permission, t])).keys()];
   const label = { give: 'Items for themselves', teleport: 'Teleporting themselves', heal: 'Healing themselves', time: 'Changing the time of day', build: 'Building (placing blocks)' };
@@ -497,7 +507,7 @@ function build() {
     try {
       await api('/api/admin/bot', { enabled: $('b_enabled').checked, model: $('b_model').value,
         effort: $('b_effort').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
-        perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, summaryHour: Number($('b_summaryHour').value),
+        perDay: $('b_perDay').value, listen: $('b_listen').value, romance: $('b_romance').checked, pranks: $('b_pranks').checked, sleep: $('b_sleep').checked, summaryHour: Number($('b_summaryHour').value),
         idle: { enabled: $('b_idle').checked, after: $('b_idleAfter').value, perHour: $('b_idlePerHour').value }, policy });
       $('botNote').textContent = 'Saved.';
     } catch (e) { $('botNote').textContent = e.message; }
@@ -536,6 +546,12 @@ function build() {
     } catch (e) { $('mcpOut').textContent = e.message; }
   };
   document.addEventListener('click', async (ev) => {
+    const ct = ev.target.closest('[data-cancel-task]');
+    if (ct) {
+      if (!window.confirm('Cancel this task? She stops working on it.')) return;
+      await api('/api/admin/task', { character: picked, id: ct.dataset.cancelTask }).catch((e) => alert(e.message));
+      return refreshSoon();
+    }
     const m = ev.target.closest('[data-memory]');
     if (m) { await api('/api/admin/forget-memory', { id: Number(m.dataset.memory) }).catch(() => {}); return refreshSoon(); }
     const b = ev.target.closest('[data-act]');
@@ -580,6 +596,13 @@ function refresh() {
   renderRelationships(false);
   renderPlayers(false);
   const nameOf = (id) => { const p = st.people.find((x) => x.id === id || (x.aliases || []).some((a) => a.id === id)); return p ? p.name : ''; };
+  const tasks = ((me && me.tasks) || []).slice().reverse();
+  const tone = { open: 'warn', done: 'ok', blocked: 'bad', cancelled: 'muted' };
+  $('tasks').innerHTML = tasks.length ? tasks.map((t) => '<tr><td class="muted">' + ago(t.at) + '</td><td>' + esc(t.by) + '</td><td>' + esc(t.goal)
+    + '<div class="note muted">' + esc(t.status === 'done' ? 'checked: ' + (t.evidence || '') : t.status === 'blocked' ? 'why: ' + (t.reason || '') : 'check: ' + t.check) + '</div></td>'
+    + '<td class="' + (tone[t.status] || '') + '">' + esc(t.status) + '</td><td>' + (t.rounds || 0) + '</td><td>'
+    + (t.status === 'open' ? '<button class="danger small" data-cancel-task="' + esc(t.id) + '">Cancel</button>' : '') + '</td></tr>').join('')
+    : '<tr><td colspan="6" class="muted">No tasks yet.</td></tr>';
   const mems = st.memories.filter((m) => !me || m.character === me.id);
   $('memories').innerHTML = mems.length ? mems.map((m) => '<tr><td class="muted">' + ago(m.at) + '</td><td>'
     + esc(m.about ? nameOf(m.about) : 'itself') + '</td><td>' + (m.secret ? '<span class="warn">secret</span> ' : '') + esc(m.text) + '</td><td>' + m.weight + '</td>'
@@ -594,7 +617,8 @@ function refresh() {
     ['Game', yes(st.server.connected, 'running', p && p.running ? 'starting...' : 'down')
       + (st.server.timeOfDay !== null ? ' <span class="muted">· ' + st.server.timeOfDay + 'h</span>' : '')],
     ['Process', p ? (p.running ? 'pid ' + p.pid + ', up since ' + clock(p.startedAt) : 'stopped' + (p.lastExit ? ' (exit ' + esc(p.lastExit.signal || p.lastExit.code) + ')' : '')) + (p.crashes ? ' <span class="warn">· ' + p.crashes + ' crashes</span>' : '') : 'not managed here'],
-    ['Bot', yes(st.bot.ready, esc(st.bot.name) + ' on ' + esc(st.bot.model), 'no ANTHROPIC_API_KEY') + (st.bot.enabled ? '' : ' <span class="warn">(switched off)</span>')],
+    ['Bot', yes(st.bot.ready, esc(st.bot.name) + ' on ' + esc(st.bot.model), 'no ANTHROPIC_API_KEY') + (st.bot.enabled ? '' : ' <span class="warn">(switched off)</span>')
+      + (st.bot.asleep ? ' <span class="muted">· asleep (nobody in the game)</span>' : ' <span class="ok">· awake</span>')],
     ['Items', st.server.items ? st.server.items + ' known' : '<span class="muted">waiting for the game</span>'],
     ...(missing.length ? [['Not set', '<span class="warn">' + missing.map(esc).join(', ') + '</span>']] : []),
   ].map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('');

@@ -249,3 +249,30 @@ test('every game server account is listed, saying who on Discord it is linked to
   assert.ok(!JSON.stringify(r.json.gameAccounts).includes('secret'));
   await s.close();
 });
+
+test('asleep while nobody is in the game; switching sleep off wakes them at once', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', ADMIN_DISCORD_ID: '111', ANTHROPIC_API_KEY: '' });
+  const db = openDb(':memory:');
+  let turns = 0;
+  const bot = { ready: true, hear: async () => null, idle: async () => { turns++; return null; } };
+  const discord = createDiscord({ log: quiet });
+  const server = makeApp({ config, db, bridgeKey: 'key', discord, bot, log: quiet });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const as = { authorization: `Bearer ${sign({ kind: 'session', sub: '111', name: 'n' }, db.secret('session'))}`, 'content-type': 'application/json' };
+  try {
+    const sync = async () => (await fetch(`${base}/bridge/sync`, { method: 'POST', headers: { 'x-bridge-key': 'key' },
+      body: JSON.stringify({ players: [] }) })).json();
+    db.putJson('bot', { sleep: true }); // off by default; on here
+    await sync();
+    await server.idleTick();
+    assert.equal(turns, 0); // asleep: nobody in the game
+    assert.equal((await sync()).characters.every((c) => c.asleep), true);
+    await fetch(`${base}/api/admin/bot`, { method: 'POST', headers: as, body: JSON.stringify({ sleep: false }) });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(turns, 1); // woken at once
+    assert.equal((await sync()).characters.some((c) => c.asleep), false);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});

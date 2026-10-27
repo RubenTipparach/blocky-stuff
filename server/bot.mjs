@@ -11,7 +11,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_POLICY, TOOLS, toolsFor, runTool, boxNodes } from './tools.mjs';
 import { CHARACTER_TOOLS, CHARACTER_TOOL_NAMES, activeCast, characterSystem, characterContext, runCharacterTool,
-  personId, characterPersonId, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
+  personId, characterPersonId, setState, PRANK_AT, PRANK_BLOCKS, PRANK_ITEMS } from './character.mjs';
+import { randomBytes } from 'node:crypto';
 
 // The character tools, as sent to the model.
 const INNER_TOOLS = CHARACTER_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
@@ -35,6 +36,41 @@ const PRANK_TOOL = {
   },
 };
 const DAY = 86_400_000;
+
+// ---- Tasks: what someone asked a character to do, carried through to done and checked (owner, 2026-10-27: "if they
+// receive a command to perform that task until it is done and verified ... We need to guard against llm adhd") ----
+// A character may say no before she takes a job on (who she is and how she feels decide that); once she calls
+// start_task it is hers until finish_task (refused for a build she has not looked at since her last change, with
+// inspect_area) or task_blocked. A turn that ends with the task open is sent back to it, and an unfinished task goes on
+// in turns of its own, before her own projects and whether or not she sleeps.
+const TASK_TOOLS = [
+  {
+    name: 'start_task',
+    description: 'Take on a job someone asked of you in the world (a build, gathering, a delivery), before you start on it: '
+      + 'the goal, and how you will check it is done (what inspect_area should show, or what they should have). Only '
+      + 'when you have decided to do it; if you will not, say so instead.',
+    input_schema: { type: 'object', properties: { goal: { type: 'string', maxLength: 300 }, check: { type: 'string', maxLength: 300 } },
+      required: ['goal', 'check'], additionalProperties: false },
+  },
+  {
+    name: 'finish_task',
+    description: 'Your task is done and you have checked it: what you saw that proves it (for a build, what inspect_area '
+      + 'showed). Refused for a build you have not looked at with inspect_area since you last changed it.',
+    input_schema: { type: 'object', properties: { evidence: { type: 'string', maxLength: 400 } }, required: ['evidence'],
+      additionalProperties: false },
+  },
+  {
+    name: 'task_blocked',
+    description: 'Your task cannot be finished (not allowed, missing something, unclear, impossible): why. Tell the person.',
+    input_schema: { type: 'object', properties: { reason: { type: 'string', maxLength: 300 } }, required: ['reason'],
+      additionalProperties: false },
+  },
+];
+const TASK_DEFS = TASK_TOOLS.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema }));
+const TASK_TOOL_NAMES = new Set(TASK_TOOLS.map((t) => t.name));
+const BUILDS = new Set(['fill_box', 'place_blocks']);
+const TASK_ROUNDS_MAX = 60; // tool rounds one task may take in all, so a stuck one cannot run up the bill
+const NUDGES = 3; // times a turn is sent back to an open task before it goes on in the background
 
 // The tools that change the world: what the daily summary tells of.
 export const ACTS = new Set(TOOLS.filter((t) => t.permission).map((t) => t.name));
@@ -77,6 +113,9 @@ export function botSettings(db, config) {
     // Flirting and dating with characters who are fond of someone, and pranks by those who are hostile; both may be
     // switched off on /admin.
     romance: saved.romance ?? true,
+    // Asleep while nobody is in the game (owner, 2026-10-27: "a sleep toggle for bots to go to sleep when no one is on
+    // the server"): no own turns, bodies lying down. Off (the first value): awake and working, within the limits.
+    sleep: saved.sleep ?? false, // (owner: "Sleep is off by default")
     pranks: saved.pranks ?? true,
     // 'all' (the first value): every chat line gets an answer. 'mentions': only lines that name a character.
     listen: saved.listen === 'mentions' ? 'mentions' : 'all',
@@ -217,41 +256,169 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     return g;
   };
 
+  // ---- Tasks ----
+  const tasksOf = (id) => (db.json('characters', []).find((c) => c.id === id)?.tasks ?? []);
+  const saveTasks = (id, tasks) => { cast(); setState(db, id, { tasks: tasks.slice(-20) }); }; // cast(): the list exists first
+  const openTask = (id) => tasksOf(id).find((t) => t.status === 'open') ?? null;
+  const updateTask = (chId, taskId, patch) => saveTasks(chId, tasksOf(chId).map((t) => (t.id === taskId ? { ...t, ...patch } : t)));
+
+  /** start_task, finish_task, task_blocked for `ch`; `turn` holds who asked and what this turn did. */
+  function runTaskTool(ch, name, input, turn) {
+    const open = openTask(ch.id);
+    if (name === 'start_task') {
+      if (open) return { ok: false, message: `You are still on "${open.goal}" for ${open.by}. Finish it (or task_blocked) first, and tell them you will do this next.` };
+      const task = { id: randomBytes(4).toString('hex'), goal: String(input.goal ?? '').slice(0, 300), check: String(input.check ?? '').slice(0, 300),
+        by: turn.asker.name, personId: turn.speakerId, admin: turn.asker.admin === true, source: turn.source, at: now(), rounds: 0,
+        built: false, status: 'open' };
+      saveTasks(ch.id, [...tasksOf(ch.id), task]);
+      turn.inspected = false;
+      note('task', ch, task.by, `took on: ${task.goal}`);
+      return { ok: true, message: `Task taken: ${task.goal}. Do it now, step by step; for a build, look at it with inspect_area; then finish_task.` };
+    }
+    if (!open) return { ok: false, message: 'You have no task open.' };
+    if (name === 'finish_task') {
+      if (open.built && !turn.inspected) {
+        return { ok: false, message: 'Not yet: look at what you built with inspect_area first (since your last change), and check it against: ' + open.check };
+      }
+      updateTask(ch.id, open.id, { status: 'done', evidence: String(input.evidence ?? '').slice(0, 400), done: now() });
+      if (open.personId) db.remember(ch.id, open.personId, `Did what ${open.by} asked: ${open.goal}`, 3, now());
+      note('task', ch, open.by, `done: ${open.goal} (${String(input.evidence ?? '').slice(0, 120)})`);
+      turn.finished = open;
+      return { ok: true, message: `Done and checked. Tell ${open.by} it is finished, in one line.` };
+    }
+    updateTask(ch.id, open.id, { status: 'blocked', reason: String(input.reason ?? '').slice(0, 300), done: now() });
+    note('task', ch, open.by, `blocked: ${open.goal}: ${input.reason}`);
+    turn.finished = { ...open, blocked: true };
+    return { ok: true, message: `Set aside. Tell ${open.by} why, in one line.` };
+  }
+
+  // Run one tool call for `ch` in a turn: character, task, prank or world tool; keeps the task's bookkeeping.
+  async function useTool(ch, use, turn, s) {
+    const task = openTask(ch.id);
+    const r = CHARACTER_TOOL_NAMES.has(use.name) ? runCharacterTool(db, ch, use.name, use.input, turn, now())
+      : TASK_TOOL_NAMES.has(use.name) ? runTaskTool(ch, use.name, use.input, turn)
+        : use.name === 'prank' ? await prank(ch, use.input, turn.speakerId, s)
+          : await runTool(use.name, use.input, { game: turn.game, asker: turn.asker, policy: s.policy });
+    log.log(`${ch.name} ${use.name} for ${turn.asker.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
+    // Kept as a deed (the daily summary, the Activity log), not as a memory: a character remembers only what she judges
+    // worth it, with `remember` (owner, 2026-10-27: "they dont need to remember every block placed").
+    if (r.ok && ACTS.has(use.name)) db.addDeed(`${turn.asker.name} (by ${ch.name})`, use.name, use.input, r.message, now());
+    if (r.ok && BUILDS.has(use.name)) { turn.inspected = false; if (task) updateTask(ch.id, task.id, { built: true }); }
+    if (r.ok && use.name === 'inspect_area') turn.inspected = true;
+    return { type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'), ...(r.ok ? {} : { is_error: true }) };
+  }
+
+  // The harness's push back to an open task, when a turn tries to end with it unfinished.
+  const nudge = (task) => `[Not finished] Your task "${task.goal}" for ${task.by} is still open. Keep at it: do the next part, `
+    + `then check it (${task.check}) with inspect_area, then call finish_task. If it truly cannot be done, call task_blocked with why.`;
+
   async function ask(ch, msg, s, direct) {
     // msg.admin is decided by the caller: the server privilege in game, ADMIN_DISCORD_ID on Discord (by id).
     const asker = { name: msg.name, admin: msg.admin === true };
-    const world = msg.source === 'character' ? [] : toolsFor(asker, s.policy);
+    const person = msg.source !== 'character';
+    const world = person ? toolsFor(asker, s.policy) : [];
     const tools = [...world.map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
-      ...INNER_TOOLS, ...(s.pranks && msg.source !== 'character' ? [PRANK_TOOL] : [])];
-    const turn = { speakerId: msg.personId, moved: new Map(), romance: s.romance };
+      ...INNER_TOOLS, ...(person ? TASK_DEFS : []), ...(s.pranks && person ? [PRANK_TOOL] : [])];
+    const turn = { speakerId: msg.personId, moved: new Map(), romance: s.romance, asker, source: msg.source, game: actingAs(ch), inspected: false };
     const messages = [{ role: 'user', content: situation(ch, msg, asker, direct) }];
-    const g = actingAs(ch);
+    let said = null;
+    let nudges = 0;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const response = await call(s, systemPrompt(ch), tools, messages);
       if (response.stop_reason === 'refusal') return 'I can\'t help with that one.';
+      const task = openTask(ch.id);
+      if (task) {
+        updateTask(ch.id, task.id, { rounds: task.rounds + 1 });
+        if (task.rounds + 1 >= TASK_ROUNDS_MAX) runTaskTool(ch, 'task_blocked', { reason: 'It took too long; ask again in smaller parts.' }, turn);
+      }
       const uses = response.content.filter((b) => b.type === 'tool_use');
       if (response.stop_reason !== 'tool_use' || !uses.length) {
         const out = finalText(response.content);
         // Only a character may be met with silence: a person always gets an answer.
-        if (out && out.replace(/[^A-Z]/g, '') === QUIET) return msg.source === 'character' ? null : '...';
-        return out;
+        if (out && out.replace(/[^A-Z]/g, '') === QUIET) return person ? said ?? '...' : null;
+        said = out ?? said;
+        // A task she took on (or works on) in this turn is not left open: back to it, a few times.
+        const still = openTask(ch.id);
+        if (person && still && nudges < NUDGES && round < MAX_ROUNDS - 1) {
+          nudges++;
+          messages.push({ role: 'assistant', content: response.content });
+          messages.push({ role: 'user', content: nudge(still) });
+          continue;
+        }
+        return said;
       }
       messages.push({ role: 'assistant', content: response.content });
-      const results = await Promise.all(uses.map(async (use) => {
-        const r = CHARACTER_TOOL_NAMES.has(use.name) ? runCharacterTool(db, ch, use.name, use.input, turn, now())
-          : use.name === 'prank' ? await prank(ch, use.input, msg.personId, s)
-            : await runTool(use.name, use.input, { game: g, asker, policy: s.policy });
-        log.log(`${ch.name} ${use.name} for ${asker.name}: ${r.ok ? 'ok' : 'refused'} ${r.message.slice(0, 120)}`);
-        // Kept as a deed (the daily summary, the Activity log), not as a memory: a character remembers only what she
-        // judges worth it, with `remember` (owner, 2026-10-27: "they dont need to remember every block placed, only
-        // ones deemed important to conversation").
-        if (r.ok && ACTS.has(use.name)) db.addDeed(`${asker.name} (by ${ch.name})`, use.name, use.input, r.message, now());
-        return { type: 'tool_result', tool_use_id: use.id, content: r.message || (r.ok ? 'Done.' : 'Failed.'),
-          ...(r.ok ? {} : { is_error: true }) };
-      }));
+      const results = [];
+      for (const use of uses) results.push(await useTool(ch, use, turn, s));
       messages.push({ role: 'user', content: results });
     }
-    return 'That took me too many steps. Could you ask for something smaller?';
+    return openTask(ch.id) ? `${said ?? 'Working on it.'} (I'll keep at it.)` : said ?? 'That took me too many steps. Could you ask for something smaller?';
+  }
+
+  /**
+   * A turn on an unfinished task, for a character who has one: she goes on with it (with the permissions of who asked),
+   * checks it, and finishes or sets it aside. Says so through `reply(text, ch, task)` when it is done or blocked.
+   */
+  async function work(reply) {
+    const s = botSettings(db, config);
+    if (!llm || !s.enabled || busy >= MAX_BUSY - 1 || !game.connected) return null;
+    if (s.perDay && todayCalls() >= s.perDay) return null;
+    const ch = cast().find((c) => openTask(c.id) && now() - (lastBusy.get(c.id) ?? -Infinity) > 5000);
+    if (!ch) return null;
+    const task = openTask(ch.id);
+    lastBusy.set(ch.id, now());
+    busy++;
+    try {
+      const asker = { name: task.by, admin: task.admin };
+      const tools = [...toolsFor(asker, s.policy).map(({ name, description, input_schema: schema }) => ({ name, description, input_schema: schema })),
+        ...INNER_TOOLS.filter((t) => ['remember', 'set_mood', 'recall'].includes(t.name)), ...TASK_DEFS.filter((t) => t.name !== 'start_task')];
+      const turn = { speakerId: task.personId, moved: new Map(), romance: s.romance, asker, source: task.source, game: actingAs(ch), inspected: false };
+      const messages = [{ role: 'user', content: `${context()}\n\n${characterContext(db, ch, { speakerId: task.personId, others: onlineIds(), cast: cast(), now: now() })}`
+        + `\n\nYou are in the middle of a task for ${task.by}${task.source === 'discord' ? ' (on Discord)' : ''}: ${task.goal}\n`
+        + `How to check it is done: ${task.check}\nTool rounds so far: ${task.rounds} of ${TASK_ROUNDS_MAX}.\n\n`
+        + 'Carry on with it now. Look at where it stands with inspect_area, do the next part, check again, and call finish_task '
+        + 'when it is done and checked (or task_blocked if it cannot be). Say nothing in chat until it is finished or blocked; '
+        + 'then one line to them.' }];
+      let said = null;
+      for (let round = 0; round < MAX_ROUNDS; round++) {
+        const response = await call(s, systemPrompt(ch), tools, messages);
+        if (response.stop_reason === 'refusal') break;
+        const current = openTask(ch.id);
+        if (current) {
+          updateTask(ch.id, current.id, { rounds: current.rounds + 1 });
+          if (current.rounds + 1 >= TASK_ROUNDS_MAX) runTaskTool(ch, 'task_blocked', { reason: 'It took too long; ask again in smaller parts.' }, turn);
+        }
+        const uses = response.content.filter((b) => b.type === 'tool_use');
+        if (response.stop_reason !== 'tool_use' || !uses.length) {
+          said = finalText(response.content);
+          if (openTask(ch.id) && round < MAX_ROUNDS - 1) {
+            messages.push({ role: 'assistant', content: response.content });
+            messages.push({ role: 'user', content: nudge(openTask(ch.id)) });
+            continue;
+          }
+          break;
+        }
+        messages.push({ role: 'assistant', content: response.content });
+        const results = [];
+        for (const use of uses) results.push(await useTool(ch, use, turn, s));
+        messages.push({ role: 'user', content: results });
+      }
+      if (turn.finished) {
+        const line = said || (turn.finished.blocked ? `${task.by}, I couldn't finish "${task.goal}": ${turn.finished.reason ?? 'it got stuck'}.`
+          : `${task.by}, it's done: ${task.goal}.`);
+        await reply(line, ch, task);
+        return line;
+      }
+      note('task', ch, task.by, `still working: ${task.goal} (${(openTask(ch.id)?.rounds ?? task.rounds)} rounds)`);
+      return null;
+    } catch (err) {
+      log.error(`${ch.name} task turn failed:`, err?.status ?? '', err?.message ?? err);
+      note('error', ch, task.by, `task turn: ${err?.status ?? ''} ${err?.message ?? err}`);
+      return null;
+    } finally {
+      busy--;
+      lastBusy.set(ch.id, now());
+    }
   }
 
   /** A prank by `ch`, if she is hostile enough to the person and has not pranked them today. */
@@ -305,6 +472,10 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       + 'player to build near if it is not clear), check the ground there with find_ground, then build with '
       + 'fill_box (floors, walls, roofs; hollow for rooms, air to cut doors and windows) and place_blocks for '
       + 'details. Build a few blocks away from players, never on top of them. Say what you built and where.\n'
+      + '- When someone asks you to do something in the world and you will do it, call start_task first (the goal, and how '
+      + 'you will check it), then stay on it: no new topics or projects of your own until it is done. Build it, look at it '
+      + 'with inspect_area, fix what is off, and only then finish_task. If it cannot be done, task_blocked and say why. '
+      + 'Whether you take a job on is up to you and how you feel about them; once you have, you finish it.\n'
       + '- If a tool says someone may not do something, tell them kindly; never try to get around it.\n'
       + '- You cannot grant privileges, change server settings, or do anything your tools do not offer; say so.\n'
       + '- You have a body in the world with your name over its head; players can see you. It stays where it is: you '
@@ -379,7 +550,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     let ch = null;
     for (let k = 0; k < all.length && !ch; k++) {
       const c = all[(idleNext + k) % all.length];
-      if (t - (lastBusy.get(c.id) ?? -Infinity) >= s.idle.after * 1000) { ch = c; idleNext = (idleNext + k + 1) % all.length; }
+      if (!openTask(c.id) && t - (lastBusy.get(c.id) ?? -Infinity) >= s.idle.after * 1000) { ch = c; idleNext = (idleNext + k + 1) % all.length; }
     }
     if (!ch) return null;
     idleTimes.push(t);
@@ -459,7 +630,7 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
   /** The characters a character's line names: they may answer it, up to CHAIN_MAX in a row. */
   const answerers = (text, ch, depth = 0) => (depth >= CHAIN_MAX ? [] : named(text, cast()).filter((c) => c.id !== ch.id));
 
-  return { hear, addressed, answerers, summary, idle, cast, activity: () => [...events].reverse(),
+  return { hear, addressed, answerers, summary, idle, work, cast, tasksOf, saveTasks, activity: () => [...events].reverse(),
     get ready() { return llm !== null; } };
 }
 

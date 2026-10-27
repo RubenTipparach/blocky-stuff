@@ -138,8 +138,8 @@ export function removeCharacter(db, id, config = {}) {
   return true;
 }
 
-// Set a character's own state (mood, goal), keeping everything else.
-function setState(db, id, patch) {
+// Set a character's own state (mood, goal, tasks), keeping everything else.
+export function setState(db, id, patch) {
   const list = db.json('characters', []);
   const c = list.find((x) => x.id === id);
   if (!c) return;
