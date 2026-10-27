@@ -131,7 +131,7 @@ function build() {
     <label class="check"><input type="checkbox" id="b_enabled"> Answers in chat</label>
     <div class="two"><label class="field">Name (players say @name)<input id="b_name" maxlength="20"></label>
     <label class="field">Effort<select id="b_effort">\${state.efforts.map((e) => '<option>' + e + '</option>').join('')}</select></label></div>
-    <label class="field">Model<input id="b_model" list="models"><datalist id="models">\${state.models.map((m) => '<option value="' + m + '">').join('')}</datalist></label>
+    <label class="field">Model<select id="b_model">\${[...new Set([...state.models, s.model])].map((m) => '<option>' + esc(m) + '</option>').join('')}</select></label>
     <label class="field">Persona<textarea id="b_persona" maxlength="2000"></textarea></label>
     <div class="three"><label class="field">Cooldown (s)<input id="b_cooldown" type="number" min="0"></label>
     <label class="field">Per player / hour<input id="b_perHour" type="number" min="0"></label>
@@ -173,7 +173,7 @@ function build() {
     const policy = {};
     for (const el of document.querySelectorAll('[data-perm]')) policy[el.dataset.perm] = el.checked;
     try {
-      await api('/api/admin/bot', { enabled: $('b_enabled').checked, name: $('b_name').value, model: $('b_model').value.trim(),
+      await api('/api/admin/bot', { enabled: $('b_enabled').checked, name: $('b_name').value, model: $('b_model').value,
         effort: $('b_effort').value, persona: $('b_persona').value, cooldown: $('b_cooldown').value, perHour: $('b_perHour').value,
         perDay: $('b_perDay').value, policy });
       $('botNote').textContent = 'Saved.';
