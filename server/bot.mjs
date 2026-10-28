@@ -590,7 +590,17 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
 
   // model: s.model (talking) or s.buildModel (building) (owner, 2026-10-27: "Can we route API to two models? speech via
   // haiku and building via opus").
-  async function call(s, system, tools, messages, model = s.model) {
+  // The shape of the daily tale, so the reply is always JSON that parses.
+  const TALE_SCHEMA = {
+    type: 'object', additionalProperties: false, required: ['title', 'opening', 'bullets', 'closing'],
+    properties: {
+      title: { type: 'string' }, opening: { type: 'string' }, closing: { type: 'string' },
+      bullets: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['emoji', 'text'],
+        properties: { emoji: { type: 'string' }, text: { type: 'string' } } } },
+    },
+  };
+
+  async function call(s, system, tools, messages, model = s.model, format = null) {
     const params = {
       model,
       // Building turns write long lists of blocks: room for them (owner, 2026-10-27: "32 k token limit"; a reply cut off
@@ -599,7 +609,8 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       system,
       ...(tools ? { tools } : {}),
       messages,
-      output_config: { effort: s.effort },
+      // A JSON schema, when given, makes the reply valid JSON of that shape (structured outputs).
+      output_config: { effort: s.effort, ...(format ? { format: { type: 'json_schema', schema: format } } : {}) },
       ...(FALLBACK_MODELS.has(model) ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
     };
     // A reply that long may take minutes, so it streams (the SDK refuses such a request otherwise), and the whole
@@ -733,30 +744,44 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
       .map((t) => `${c.name} ${t.status === 'done' ? 'finished' : 'set aside'} a job for ${t.by}: ${t.goal}`));
     // (owner, 2026-10-27: "Daily summary should look nice, with bullet points emojis. It should tell a story. Not be
     // too distracting, and should be pleasant to read and well thought out and properly narrated with some light humor")
-    const response = await call(s, `You are a character on a Luanti server.\n\n${characterSystem(teller, cast(), s)}`, null,
-      [{ role: 'user', content: `What happened on the server over the past 24 hours (the server carries on; this is an `
-        + `ordinary day, not an ending).\n\nWhat the characters did in the world (${deeds.length} actions):\n${did.join('\n') || '(nothing)'}\n\n`
-        + `Jobs finished or set aside:\n${finished.join('\n') || '(none)'}\n\nChat (${lines.length} lines):\n${said.join('\n') || '(none)'}\n\n`
-        + 'Write today\'s summary for the Discord channel, as the storyteller of this little world, in your own voice. Tell '
-        + 'it as a short story with light, warm humour, pleasant to read in a minute. Pick the highlights; do not list '
-        + 'everything. Give coordinates only for one or two places worth visiting. Name the players who took part.\n\n'
-        + 'Answer with only this JSON: {"title": a title for the day, at most 8 words; "opening": one or two sentences '
-        + 'setting the scene; "bullets": 4 to 6 items, each {"emoji": one emoji that fits it, "text": one sentence, at '
-        + 'most 140 characters}; "closing": one short sentence to end on}.' }]);
-    if (response.stop_reason === 'refusal') return null;
-    const raw = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ');
+    const system = `You are a character on a Luanti server.\n\n${characterSystem(teller, cast(), s)}`;
+    const messages = [{ role: 'user', content: `What happened on the server over the past 24 hours (the server carries on; this is an `
+      + `ordinary day, not an ending).\n\nWhat the characters did in the world (${deeds.length} actions):\n${did.join('\n') || '(nothing)'}\n\n`
+      + `Jobs finished or set aside:\n${finished.join('\n') || '(none)'}\n\nChat (${lines.length} lines):\n${said.join('\n') || '(none)'}\n\n`
+      + 'Write today\'s summary for the Discord channel, as the storyteller of this little world, in your own voice. Tell '
+      + 'it as a short story with light, warm humour, pleasant to read in a minute. Pick the highlights; do not list '
+      + 'everything. Give coordinates only for one or two places worth visiting. Name the players who took part.\n\n'
+      + 'Answer with only this JSON: {"title": a title for the day, at most 8 words; "opening": one or two sentences '
+      + 'setting the scene; "bullets": 4 to 6 items, each {"emoji": one emoji that fits it, "text": one sentence, at '
+      + 'most 140 characters}; "closing": one short sentence to end on}.' }];
     const flat = (t, max) => String(t ?? '').replace(/[`#>]+/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
-    try {
+    const parse = (raw) => {
       const j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
       const bullets = (Array.isArray(j.bullets) ? j.bullets : []).slice(0, 6)
         .map((b) => ({ emoji: flat(b?.emoji, 8) || '•', text: flat(b?.text, 160) })).filter((b) => b.text);
-      if (!j.title || !bullets.length) throw new Error('missing parts');
+      if (!j.title) throw new Error('"title" is missing or empty');
+      if (!bullets.length) throw new Error('"bullets" has no items with text');
       return { title: flat(j.title, 80), opening: flat(j.opening, 300), bullets, closing: flat(j.closing, 200), teller };
-    } catch {
-      // Not the JSON asked for: the words as they came, as one short story.
-      const text = flat(raw, 1200);
-      return text ? { title: 'Today in the world', opening: text, bullets: [], closing: '', teller } : null;
+    };
+    // The reply is checked; JSON that does not parse goes back to the model with the error to fix, twice at most
+    // (owner, 2026-10-28, after raw JSON was posted to Discord: "verify json and kick it back to model to fix").
+    let raw = '';
+    for (let round = 0; round < 3; round++) {
+      const response = await call(s, system, null, messages, s.model, TALE_SCHEMA);
+      if (response.stop_reason === 'refusal') return null;
+      raw = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ');
+      try {
+        return parse(raw);
+      } catch (e) {
+        messages.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `That is not valid `
+          + `JSON of the shape asked for (${e.message}${response.stop_reason === 'max_tokens' ? '; it was cut off' : ''}). `
+          + 'Send the whole summary again as only that JSON, with any double quotes inside the text escaped.' });
+      }
     }
+    // Still broken: never post braces and keys; prose that is not JSON at all is told as one short story.
+    if (/[{}]|"\w+"\s*:/.test(raw)) return null;
+    const text = flat(raw, 1200);
+    return text ? { title: 'Today in the world', opening: text, bullets: [], closing: '', teller } : null;
   }
 
   /**

@@ -158,7 +158,10 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
     () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 't1', name: 'heal_player', input: { player: 'alice' } }] }),
     text('Healed!'),
     text('{"title": "A Day of Bandages", "opening": "The sun rose on a battered alice.", "bullets": [{"emoji": "🩹", "text": "I patched alice right up."}], "closing": "Fewer cacti tomorrow, please."}'),
-    text('Today I patched up alice.'),
+    text('{"title": "Broken", "opening": "She said "hi" and left", "bullets": [{"emoji": "🩹", "text": "cut off'),
+    text('{"title": "Mended", "opening": "Fixed.", "bullets": [{"emoji": "🔧", "text": "Quotes escaped."}], "closing": ""}'),
+    text('Today I patched up alice.'), text('Today I patched up alice.'), text('Today I patched up alice.'),
+    text('{"title": "x", "bul'), text('{"title": "x", "bul'), text('{"title": "x", "bul'),
   ], { t: 1000 });
   game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 3, privs: [] }] });
   const pending = bot.hear({ source: 'game', name: 'alice', text: '@blocky heal me' }, () => {});
@@ -172,8 +175,13 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
     ['A Day of Bandages', '🩹', 'I patched alice right up.', 'Blocky']);
   assert.doesNotMatch(client.calls[2].messages[0].content, /Here is the last day/);
   assert.match(client.calls[2].messages[0].content, /not an ending/);
-  // An answer that is not JSON still makes a summary, as one short story.
+  // JSON that does not parse goes back to the model with the error, and the fixed answer is used.
+  assert.equal((await bot.summary(0)).title, 'Mended');
+  assert.match(client.calls[4].messages.at(-1).content, /not valid JSON/);
+  assert.equal(client.calls[4].messages.at(-2).role, 'assistant');
+  // An answer that is never JSON still makes a summary, as one short story; broken JSON is never posted.
   assert.equal((await bot.summary(0)).opening, 'Today I patched up alice.');
+  assert.equal(await bot.summary(0), null);
   assert.match(client.calls[2].messages[0].content, /heal_player/);
   assert.equal(await setup([]).bot.summary(0), null);
 });
