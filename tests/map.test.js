@@ -234,3 +234,27 @@ test('in a character\'s picture her own pin and name are on top, and names never
   assert.notDeepEqual(blocky, plain); // the order changed what is on top
   assert.deepEqual(renderIso({ ...base, marks: [...marks].reverse() }, { ...opts, focus: 'blocky' }).png, blocky); // focus decides, not the list
 });
+
+test('under water the sea floor is drawn, and water is not stacked on water', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', DATA_DIR: mkdtempSync(join(tmpdir(), 'blocky-map-')) });
+  const db = openDb(':memory:');
+  const discord = { mode: '', channelIds: [], post: async () => ({ ok: true }), news: async () => ({}), setChannels: () => true, start() {}, stop() {} };
+  const server = makeApp({ config, db, bridgeKey: 'k', discord, bot: { ready: true, hear: async () => null }, log: quiet });
+  const { game } = server;
+  // A sea: water from y 1 to 4 over a sand floor at y 0, all across.
+  const sea = (x, y) => (y === 0 ? 'default:sand' : y <= 4 ? 'default:water_source' : null);
+  game.sync({ players: [] });
+  const answer = setInterval(() => {
+    const { actions } = game.sync({});
+    for (const a of actions) game.sync({ results: [{ id: a.id, ok: true, message: JSON.stringify(fakeRuns(sea, a)) }] });
+  }, 5);
+  try {
+    const { scan } = await server.maps.render({ x: 20, z: 20, y: 2, r: 8 });
+    const col = scan.cols[5 * scan.w + 5]; // a column in the middle of the sea: pairs y, name index
+    const names = [];
+    for (let i = 0; i < col.length; i += 2) names.push([col[i], scan.names[col[i + 1]]]);
+    assert.deepEqual(names, [[4, 'default:water_source'], [0, 'default:sand']]); // the surface, then the floor
+  } finally {
+    clearInterval(answer);
+  }
+});
