@@ -806,8 +806,19 @@ function draw(chunk) {
   const img = ctx.createImageData(W, H);
   const px = img.data;
   const leaf = data.leaves;
-  const block = (x, y, z) => (x >= C || z >= C || y > cut || y < YMIN ? 0 : g[(z * C + x) * NY + (y - YMIN)]);
-  const open = (x, y, z) => { const id = block(x, y, z); return id === 0 || leaf[id - 1]; };
+  // Past this chunk's east (x) and south (z) edges: the neighbouring chunk's blocks, when it is loaded. Without them,
+  // water at every chunk border showed its sides all the way down through the see-through water (owner, 2026-10-28:
+  // "why does underwater on [the] map look like that?"). Not loaded or not explored: open, so columns show whole there.
+  const east = chunks.get((chunk.cx + 1) + ',' + chunk.cz);
+  const south = chunks.get(chunk.cx + ',' + (chunk.cz + 1));
+  const openIn = (c, x, y, z) => { const id = c.g[(z * C + x) * NY + (y - YMIN)]; return id === 0 || c.data.leaves[id - 1]; };
+  const open = (x, y, z) => {
+    if (y > cut || y < YMIN) return true;
+    if (x >= C) return east && east.g ? openIn(east, x - C, y, z) : true;
+    if (z >= C) return south && south.g ? openIn(south, x, y, z - C) : true;
+    const id = g[(z * C + x) * NY + (y - YMIN)];
+    return id === 0 || leaf[id - 1];
+  };
   const blit = (sx, sy, rgba) => {
     const alpha = (rgba[3] ?? 255) / 255;
     for (let yy = 0; yy < SP.w; yy++) { const ty = sy + yy; if (ty < 0 || ty >= H) continue;
@@ -818,7 +829,7 @@ function draw(chunk) {
   };
   for (let s = 0; s <= 2 * C - 2; s++) {
     for (let x = Math.max(0, s - C + 1); x <= Math.min(C - 1, s); x++) {
-      const z = s - x, base = (z * C + x) * NY, edge = x === C - 1 || z === C - 1;
+      const z = s - x, base = (z * C + x) * NY, edge = (x === C - 1 && !(east && east.g)) || (z === C - 1 && !(south && south.g));
       for (let y = YMIN; y <= cut; y++) {
         const id = g[base + (y - YMIN)];
         if (!id) continue;
@@ -885,12 +896,14 @@ function load() {
   for (const [cx, cz] of wanted()) {
     const key = cx + ',' + cz;
     if (chunks.has(key)) continue;
-    const chunk = { at: Date.now() };
+    const chunk = { at: Date.now(), cx, cz };
     chunks.set(key, chunk);
     fetchChunk(cx, cz).then((data) => {
       if (!data) { chunks.delete(key); return; }
       chunk.data = data; chunk.g = grid(data); chunk.at = Date.now();
       show(cx, cz, chunk);
+      // The chunks west and north of it draw their edge against this one: drawn again now it is here.
+      for (const [nx, nz] of [[cx - 1, cz], [cx, cz - 1]]) { const n = chunks.get(nx + ',' + nz); if (n && n.g) show(nx, nz, n); }
     });
   }
 }
