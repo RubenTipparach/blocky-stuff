@@ -399,3 +399,15 @@ test('a task that ran out of steps can be taken up again, with a fresh count', (
   assert.deepEqual([bot.tasksOf('blocky')[0].status, bot.tasksOf('blocky')[0].rounds], ['open', 0]);
   assert.equal(bot.resumeTask('Blocky').already, true); // already on it
 });
+
+test('asleep, a character\'s line to another gets no answer, so their chat stops', async () => {
+  const db = openDb(':memory:');
+  let sleeping = true;
+  const client = fakeClient([text('Mm?')]);
+  const bot = createBot({ db, game: createGame(), config: loadConfig({ ANTHROPIC_API_KEY: 'k' }), client, log: quiet, asleep: () => sleeping });
+  const line = { source: 'character', name: 'Blocky', text: 'Moss, are you up?', personId: 'char:blocky', only: 'moss' };
+  assert.equal(await bot.hear(line, () => {}), null);
+  assert.equal(client.calls.length, 0);
+  sleeping = false;
+  assert.equal(await bot.hear(line, () => {}), 'Mm?');
+});

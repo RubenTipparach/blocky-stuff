@@ -131,7 +131,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     lastSeen: { get: (ch) => db.setting(`discord.seen.${ch}`), set: (ch, id) => db.putSetting(`discord.seen.${ch}`, id) },
     onCommand: (c) => { slash(c).catch((err) => log.error(`/${c.name} failed:`, err)); },
   });
-  const brain = bot ?? createBot({ db, game, config, now, log });
+  const brain = bot ?? createBot({ db, game, config, now, log, asleep: () => asleep() });
   const maps = createMaps({ db, game, config, characters: () => characters(), chat, now, log });
   if (daily) setInterval(() => { maps.tick().catch((err) => log.error('map tick failed:', err)); }, 60_000).unref();
 

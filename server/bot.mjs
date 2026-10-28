@@ -186,7 +186,8 @@ export function botSettings(db, config) {
   };
 }
 
-export function createBot({ db, game, config, client = null, now = () => Date.now(), log = console, random = Math.random }) {
+// asleep(): whether the characters are asleep now (the app decides: sleep on, nobody about for the delay).
+export function createBot({ db, game, config, client = null, now = () => Date.now(), log = console, random = Math.random, asleep = () => false }) {
   const llm = client ?? (config.anthropicApiKey ? new Anthropic({ apiKey: config.anthropicApiKey }) : null);
   const recent = new Map(); // person -> times of their questions this hour
   const lastWith = new Map(); // person -> { id: character, at }
@@ -258,6 +259,9 @@ export function createBot({ db, game, config, client = null, now = () => Date.no
     if (!s.enabled) return null;
     // Characters talking among themselves share their own turns' part of the day's calls.
     if (msg.source === 'character' && s.perDay && todayCalls() >= s.perDay * OWN_SHARE) return null;
+    // Asleep, they do not keep talking among themselves (owner, 2026-10-28: "bots arent going to sleep why?": a chat
+    // begun before went on for minutes after).
+    if (msg.source === 'character' && asleep()) return null;
     const pid = msg.personId ?? personId(msg.source, msg.name);
     const m = { ...msg, personId: pid };
     const chosen = responders(m, s);
