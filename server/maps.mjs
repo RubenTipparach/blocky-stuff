@@ -43,6 +43,7 @@ const SURVEY_MS = 5 * 60_000; // the store is brought up to date this often, whe
 const SURVEY_MAX = 40; // chunks read again in one survey at most (the rest wait for the next)
 const TILE_AT_ONCE = 4; // chunks read from the game at once, so the game never stalls on a map
 // See-through on the map, as the mod's scan has it (leaves, and blocks one walks through): the ground under them shows.
+const LIQUID = /water|lava/;
 const SEE_THROUGH = /leaves|needles|foliage|flowers:|sapling|grass_\d|junglegrass|dry_shrub|fern|torch|mushroom|water|lava|farming:(seed|wheat|cotton)|snow$/;
 // Bump when tiles are drawn differently: kept tiles of an older drawing are drawn again.
 const TILE_VERSION = 3;
@@ -363,8 +364,12 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     }
     if (!found) return null;
     const clear = names.map((n) => SEE_THROUGH.test(n));
+    // Water and lava are seen through to what lies under them (the sea floor), but not through to more of themselves,
+    // or the whole sea would be drawn layer upon layer (owner, 2026-10-28: "the sea is bottomless ... since it is
+    // transparent you must draw the sea floor").
+    const liquid = names.map((n) => LIQUID.test(n));
     const at = (x, y, z) => (y < y1 || y > y2 ? -1 : grid[(z * W + x) * H + (y - y1)]);
-    const open = (c) => c < 0 || clear[c];
+    const open = (c, self = -1) => c < 0 || (clear[c] && !(liquid[c] && c === self));
     const cols = [];
     for (let z = 0; z < d; z++) {
       for (let x = 0; x < w; x++) {
@@ -381,7 +386,7 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
         const edge = x === w - 1 || z === d - 1;
         for (let y = h; y >= y1; y--) {
           const c = at(x, y, z);
-          if (c >= 0 && (y === y2 || edge || open(at(x, y + 1, z)) || open(at(x, y, z + 1)) || open(at(x + 1, y, z)))) col.push(y, c);
+          if (c >= 0 && (y === y2 || edge || open(at(x, y + 1, z), c) || open(at(x, y, z + 1), c) || open(at(x + 1, y, z), c))) col.push(y, c);
         }
         cols.push(col);
       }
@@ -806,8 +811,22 @@ function draw(chunk) {
   const img = ctx.createImageData(W, H);
   const px = img.data;
   const leaf = data.leaves;
-  const block = (x, y, z) => (x >= C || z >= C || y > cut || y < YMIN ? 0 : g[(z * C + x) * NY + (y - YMIN)]);
-  const open = (x, y, z) => { const id = block(x, y, z); return id === 0 || leaf[id - 1]; };
+  // Past this chunk's east (x) and south (z) edges: the neighbouring chunk's blocks, when it is loaded. Without them,
+  // water at every chunk border showed its sides all the way down through the see-through water (owner, 2026-10-28:
+  // "why does underwater on [the] map look like that?"). Not loaded or not explored: open, so columns show whole there.
+  const east = chunks.get((chunk.cx + 1) + ',' + chunk.cz);
+  const south = chunks.get(chunk.cx + ',' + (chunk.cz + 1));
+  // Open: air, leaves, or water and lava (seen through to the sea floor), but water is not open to more of the same
+  // water, or the sea would be drawn layer upon layer (owner, 2026-10-28: "you must draw the sea floor").
+  const LIQUID = /water|lava/;
+  const openIn = (c, x, y, z, self) => { const id = c.g[(z * C + x) * NY + (y - YMIN)]; if (id === 0 || c.data.leaves[id - 1]) return true;
+    const name = c.data.names[id - 1]; return LIQUID.test(name) && name !== self; };
+  const open = (x, y, z, self) => {
+    if (y > cut || y < YMIN) return true;
+    if (x >= C) return east && east.g ? openIn(east, x - C, y, z, self) : true;
+    if (z >= C) return south && south.g ? openIn(south, x, y, z - C, self) : true;
+    return openIn(chunk, x, y, z, self);
+  };
   const blit = (sx, sy, rgba) => {
     const alpha = (rgba[3] ?? 255) / 255;
     for (let yy = 0; yy < SP.w; yy++) { const ty = sy + yy; if (ty < 0 || ty >= H) continue;
@@ -818,12 +837,13 @@ function draw(chunk) {
   };
   for (let s = 0; s <= 2 * C - 2; s++) {
     for (let x = Math.max(0, s - C + 1); x <= Math.min(C - 1, s); x++) {
-      const z = s - x, base = (z * C + x) * NY, edge = x === C - 1 || z === C - 1;
+      const z = s - x, base = (z * C + x) * NY, edge = (x === C - 1 && !(east && east.g)) || (z === C - 1 && !(south && south.g));
       for (let y = YMIN; y <= cut; y++) {
         const id = g[base + (y - YMIN)];
         if (!id) continue;
         if (leaf[id - 1] && !view.trees) continue;
-        if (!(y === cut || edge || open(x, y + 1, z) || open(x, y, z + 1) || open(x + 1, y, z))) continue;
+        const self = data.names[id - 1];
+        if (!(y === cut || edge || open(x, y + 1, z, self) || open(x, y, z + 1, self) || open(x + 1, y, z, self))) continue;
         blit(OX + (x - z) * A, OY + ((x + z) * A) / 2 - (y - YMIN) * A, data.colors[id - 1]);
       }
     }
@@ -885,12 +905,14 @@ function load() {
   for (const [cx, cz] of wanted()) {
     const key = cx + ',' + cz;
     if (chunks.has(key)) continue;
-    const chunk = { at: Date.now() };
+    const chunk = { at: Date.now(), cx, cz };
     chunks.set(key, chunk);
     fetchChunk(cx, cz).then((data) => {
       if (!data) { chunks.delete(key); return; }
       chunk.data = data; chunk.g = grid(data); chunk.at = Date.now();
       show(cx, cz, chunk);
+      // The chunks west and north of it draw their edge against this one: drawn again now it is here.
+      for (const [nx, nz] of [[cx - 1, cz], [cx, cz - 1]]) { const n = chunks.get(nx + ',' + nz); if (n && n.g) show(nx, nz, n); }
     });
   }
 }

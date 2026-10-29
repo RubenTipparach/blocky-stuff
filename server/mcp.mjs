@@ -148,10 +148,48 @@ const OPERATOR_TOOLS = [
     run: (ctx, args) => deployBotCode(args),
   },
   {
+    name: 'bot_settings',
+    description: 'Read the characters\' settings, or change some with set: model and buildModel (talking and building), '
+      + 'effort, taskRounds (steps one task may take), perDay (AI calls a day, 0 = no limit), perHour and cooldown (per '
+      + 'person), sleep and sleepAfter (minutes), listen (all, every, mentions), romance, pranks, enabled, and idle: '
+      + '{ enabled, after (seconds of quiet before an own turn), perHour, social (%), kindness (%) }. Only what set names changes.',
+    input_schema: { type: 'object', properties: { set: { type: 'object' } }, additionalProperties: false },
+    run: ({ settings, saveSettings }, { set }) => ({ ok: true, message: JSON.stringify(set ? saveSettings(set) : settings(), null, 1) }),
+  },
+  {
+    name: 'resume_task',
+    description: 'Take up a character\'s last stopped task again (set aside, cancelled, or out of steps), with a fresh '
+      + 'count of steps; she carries it on in her task turns and tells the person when it is done.',
+    input_schema: { type: 'object', properties: { name: { type: 'string', description: 'The character.' } }, required: ['name'],
+      additionalProperties: false },
+    run: ({ resumeTask }, { name }) => {
+      const t = resumeTask(name);
+      if (!t) return { ok: false, message: `${name} has no stopped task to take up.` };
+      return { ok: true, message: t.already ? `${name} is already on a task: ${t.goal}` : `Taken up again: ${t.goal} (for ${t.by}).` };
+    },
+  },
+  {
     name: 'restart_game',
     description: 'Restart the Luanti game server (the bot stays up). Refused while anyone is playing, unless force.',
     input_schema: { type: 'object', properties: { force: { type: 'boolean' } }, additionalProperties: false },
     run: ({ restartGame }, args) => restartGame(args),
+  },
+  {
+    name: 'sleep_now',
+    description: 'Put the characters to sleep now (on: true), or wake them (on: false). Asleep, they take no turns and '
+      + 'make no AI calls; they wake by themselves when a player next chats or joins.',
+    input_schema: { type: 'object', properties: { on: { type: 'boolean' } }, additionalProperties: false },
+    run: ({ sleepNow }, { on = true }) => {
+      const { asleep } = sleepNow(on);
+      return { ok: true, message: asleep ? 'They are asleep until a player next chats or joins.' : 'They are awake.' };
+    },
+  },
+  {
+    name: 'kick_player',
+    description: 'Disconnect a player from the game (for a client left connected, say).',
+    input_schema: { type: 'object', properties: { player: { type: 'string' }, reason: { type: 'string', maxLength: 200 } },
+      required: ['player'], additionalProperties: false },
+    run: ({ game }, { player, reason }) => game.act({ type: 'kick', player, reason: reason ?? 'Disconnected by an admin.' }),
   },
   {
     name: 'talk_to_character',

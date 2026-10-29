@@ -158,7 +158,10 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
     () => ({ stop_reason: 'tool_use', usage: {}, content: [{ type: 'tool_use', id: 't1', name: 'heal_player', input: { player: 'alice' } }] }),
     text('Healed!'),
     text('{"title": "A Day of Bandages", "opening": "The sun rose on a battered alice.", "bullets": [{"emoji": "🩹", "text": "I patched alice right up."}], "closing": "Fewer cacti tomorrow, please."}'),
-    text('Today I patched up alice.'),
+    text('{"title": "Broken", "opening": "She said "hi" and left", "bullets": [{"emoji": "🩹", "text": "cut off'),
+    text('{"title": "Mended", "opening": "Fixed.", "bullets": [{"emoji": "🔧", "text": "Quotes escaped."}], "closing": ""}'),
+    text('Today I patched up alice.'), text('Today I patched up alice.'), text('Today I patched up alice.'),
+    text('{"title": "x", "bul'), text('{"title": "x", "bul'), text('{"title": "x", "bul'),
   ], { t: 1000 });
   game.sync({ players: [{ name: 'alice', pos: { x: 0, y: 0, z: 0 }, hp: 3, privs: [] }] });
   const pending = bot.hear({ source: 'game', name: 'alice', text: '@blocky heal me' }, () => {});
@@ -172,8 +175,13 @@ test('what the bot does is kept, and the daily summary tells of it', async () =>
     ['A Day of Bandages', '🩹', 'I patched alice right up.', 'Blocky']);
   assert.doesNotMatch(client.calls[2].messages[0].content, /Here is the last day/);
   assert.match(client.calls[2].messages[0].content, /not an ending/);
-  // An answer that is not JSON still makes a summary, as one short story.
+  // JSON that does not parse goes back to the model with the error, and the fixed answer is used.
+  assert.equal((await bot.summary(0)).title, 'Mended');
+  assert.match(client.calls[4].messages.at(-1).content, /not valid JSON/);
+  assert.equal(client.calls[4].messages.at(-2).role, 'assistant');
+  // An answer that is never JSON still makes a summary, as one short story; broken JSON is never posted.
   assert.equal((await bot.summary(0)).opening, 'Today I patched up alice.');
+  assert.equal(await bot.summary(0), null);
   assert.match(client.calls[2].messages[0].content, /heal_player/);
   assert.equal(await setup([]).bot.summary(0), null);
 });
@@ -390,4 +398,24 @@ test('a reply cut off mid-call, or pushed back by the harness, leaves no tool ca
     const answered = (sent[i + 1]?.content ?? []).filter((b) => b.type === 'tool_result').map((b) => b.tool_use_id);
     assert.deepEqual(answered.sort(), ids.sort(), `message ${i}`);
   }
+});
+
+test('a task that ran out of steps can be taken up again, with a fresh count', () => {
+  const { bot } = setup([]);
+  bot.saveTasks('blocky', [{ id: 't1', goal: 'detail the tower', check: 'windows', by: 'ruben', status: 'blocked', rounds: 60, at: 0 }]);
+  assert.equal(bot.resumeTask('Blocky').goal, 'detail the tower');
+  assert.deepEqual([bot.tasksOf('blocky')[0].status, bot.tasksOf('blocky')[0].rounds], ['open', 0]);
+  assert.equal(bot.resumeTask('Blocky').already, true); // already on it
+});
+
+test('asleep, a character\'s line to another gets no answer, so their chat stops', async () => {
+  const db = openDb(':memory:');
+  let sleeping = true;
+  const client = fakeClient([text('Mm?')]);
+  const bot = createBot({ db, game: createGame(), config: loadConfig({ ANTHROPIC_API_KEY: 'k' }), client, log: quiet, asleep: () => sleeping });
+  const line = { source: 'character', name: 'Blocky', text: 'Moss, are you up?', personId: 'char:blocky', only: 'moss' };
+  assert.equal(await bot.hear(line, () => {}), null);
+  assert.equal(client.calls.length, 0);
+  sleeping = false;
+  assert.equal(await bot.hear(line, () => {}), 'Mm?');
 });
