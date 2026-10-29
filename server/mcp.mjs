@@ -179,7 +179,10 @@ const OPERATOR_TOOLS = [
     description: 'Put the characters to sleep now (on: true), or wake them (on: false). Asleep, they take no turns and '
       + 'make no AI calls; they wake by themselves when a player next chats or joins.',
     input_schema: { type: 'object', properties: { on: { type: 'boolean' } }, additionalProperties: false },
-    run: ({ sleepNow }, { on = true }) => sleepNow(on),
+    run: ({ sleepNow }, { on = true }) => {
+      const { asleep } = sleepNow(on);
+      return { ok: true, message: asleep ? 'They are asleep until a player next chats or joins.' : 'They are awake.' };
+    },
   },
   {
     name: 'kick_player',
