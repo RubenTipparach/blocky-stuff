@@ -175,6 +175,20 @@ const OPERATOR_TOOLS = [
     run: ({ restartGame }, args) => restartGame(args),
   },
   {
+    name: 'sleep_now',
+    description: 'Put the characters to sleep now (on: true), or wake them (on: false). Asleep, they take no turns and '
+      + 'make no AI calls; they wake by themselves when a player next chats or joins.',
+    input_schema: { type: 'object', properties: { on: { type: 'boolean' } }, additionalProperties: false },
+    run: ({ sleepNow }, { on = true }) => sleepNow(on),
+  },
+  {
+    name: 'kick_player',
+    description: 'Disconnect a player from the game (for a client left connected, say).',
+    input_schema: { type: 'object', properties: { player: { type: 'string' }, reason: { type: 'string', maxLength: 200 } },
+      required: ['player'], additionalProperties: false },
+    run: ({ game }, { player, reason }) => game.act({ type: 'kick', player, reason: reason ?? 'Disconnected by an admin.' }),
+  },
+  {
     name: 'talk_to_character',
     description: 'Say something to one character, as the server\'s builders (an admin), and get her answer; she answers '
       + 'in the game and on Discord as usual. For news ("doors work now"), instructions or questions.',

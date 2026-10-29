@@ -279,8 +279,38 @@ test('asleep once nobody has been around for the delay; switching sleep off, or 
     assert.equal((await sync()).characters.every((c) => c.asleep), true);
     server.fromDiscord({ name: 'ruben', text: 'evening all' });
     assert.equal((await sync()).characters.some((c) => c.asleep), false);
+    // Put to sleep by hand: asleep at once, and a player's next word wakes them.
+    await fetch(`${base}/api/admin/sleep`, { method: 'POST', headers: as, body: JSON.stringify({ on: true }) });
+    assert.equal((await sync()).characters.every((c) => c.asleep), true);
+    server.fromDiscord({ name: 'ruben', text: 'back again' });
+    assert.equal((await sync()).characters.some((c) => c.asleep), false);
     await fetch(`${base}/api/admin/bot`, { method: 'POST', headers: as, body: JSON.stringify({ sleepAfter: 1 }) });
     assert.equal(db.json('bot', {}).sleepAfter, 5); // at least 5 minutes
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('a player who has not moved or looked about for the sleep delay does not keep them awake', async () => {
+  const config = loadConfig({ PUBLIC_URL: 'http://localhost', ADMIN_DISCORD_ID: '111', ANTHROPIC_API_KEY: '' });
+  const db = openDb(':memory:');
+  db.putSetting('activity.last', '1');
+  db.putJson('bot', { sleep: true, sleepAfter: 5 });
+  let clock = 10_000_000;
+  const bot = { ready: true, hear: async () => null, idle: async () => null };
+  const server = makeApp({ config, db, bridgeKey: 'key', discord: createDiscord({ log: quiet }), bot, log: quiet, now: () => clock });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const at = (x) => [{ name: 'ruben', pos: { x, y: 0, z: 0 }, hp: 20, privs: [] }];
+  const sync = async (players) => (await fetch(`${base}/bridge/sync`, { method: 'POST', headers: { 'x-bridge-key': 'key' },
+    body: JSON.stringify({ players }) })).json();
+  try {
+    assert.equal((await sync(at(0))).characters.some((c) => c.asleep), false); // just arrived
+    clock += 4 * 60_000;
+    assert.equal((await sync(at(0))).characters.some((c) => c.asleep), false);
+    clock += 2 * 60_000; // six minutes standing still
+    assert.equal((await sync(at(0))).characters.every((c) => c.asleep), true);
+    assert.equal((await sync(at(3))).characters.some((c) => c.asleep), false); // moves: awake again
   } finally {
     await new Promise((r) => server.close(r));
   }
