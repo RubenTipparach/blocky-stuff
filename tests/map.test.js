@@ -127,7 +127,17 @@ test('pictures go to Discord only while someone is online, at most every 30 minu
     clock += 21 * 60_000;
     game.sync({});
     await server.maps.tick();
-    assert.equal(pictures.length, 2);
+    assert.equal(pictures.length, 1); // the same picture again: not posted
+    clock += 31 * 60_000;
+    game.sync({ bodies: [{ id: 'blocky', x: 110, y: 7, z: -40 }] });
+    await server.maps.tick();
+    assert.equal(pictures.length, 2); // somewhere new
+    db.putJson('bot', { sleep: true, sleepAfter: 5 });
+    await server.maps.tick(); // (the app looks at who is about every few seconds)
+    clock += 31 * 60_000; // alice has stood still since: asleep
+    game.sync({ bodies: [{ id: 'blocky', x: 120, y: 7, z: -40 }] });
+    await server.maps.tick();
+    assert.equal(pictures.length, 2); // not while they sleep
   } finally {
     clearInterval(answer);
   }

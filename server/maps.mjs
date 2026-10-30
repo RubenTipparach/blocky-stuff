@@ -52,7 +52,7 @@ export const ISO = { A: 4, YMIN: -32, YMAX: 127, C: 64 };
 // Every post ends with this (owner: "have the discord bot tell players to check out this site for more maps").
 const MORE = (url) => `More maps: ${url}/map`;
 
-export function createMaps({ db, game, config, characters, chat, now = () => Date.now(), log = console }) {
+export function createMaps({ db, game, config, characters, chat, now = () => Date.now(), log = console, asleep = () => false }) {
   const dir = join(config.dataDir, 'maps');
   if (db.json('maps.tiles.version', 0) !== TILE_VERSION) {
     db.putJson('maps.tiles', {});
@@ -125,13 +125,19 @@ export function createMaps({ db, game, config, characters, chat, now = () => Dat
     try {
       const posted = db.json('maps.posted', {});
       const { every } = settings();
-      const postNow = every > 0 && chat.mode && game.players.length > 0 && now() - (posted.at ?? 0) >= every * 60_000;
+      // Not while the characters sleep (nobody about, or the one player online idle), and not the same picture again
+      // (owner, 2026-10-30: "The map rendering to discord is stuck. It keeps updating even though bots are asleep").
+      const postNow = every > 0 && chat.mode && game.players.length > 0 && !asleep()
+        && now() - (posted.at ?? 0) >= every * 60_000;
       for (const ch of characters()) {
         const was = kept()[ch.id];
         if (!postNow && was && now() - was.at < EVERY_MS) continue;
         const snap = await snapshot(ch);
         if (!snap || !postNow) continue;
         const finished = ch.lastProject && ch.lastProject.at > (posted[`${ch.id}:finished`] ?? 0);
+        const spot = `${snap.x},${snap.y},${snap.z}:${snap.title}`;
+        if (!finished && posted[`${ch.id}:spot`] === spot) continue;
+        posted[`${ch.id}:spot`] = spot;
         if (finished) posted[`${ch.id}:finished`] = ch.lastProject.at;
         await postPicture(snap, finished
           ? `${ch.name} finished ${ch.lastProject.title} at ${ch.lastProject.site.x}, ${ch.lastProject.site.y}, ${ch.lastProject.site.z}!`

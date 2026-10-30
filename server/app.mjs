@@ -132,7 +132,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
     onCommand: (c) => { slash(c).catch((err) => log.error(`/${c.name} failed:`, err)); },
   });
   const brain = bot ?? createBot({ db, game, config, now, log, asleep: () => asleep() });
-  const maps = createMaps({ db, game, config, characters: () => characters(), chat, now, log });
+  const maps = createMaps({ db, game, config, characters: () => characters(), chat, now, log, asleep: () => asleep() });
   if (daily) setInterval(() => { maps.tick().catch((err) => log.error('map tick failed:', err)); }, 60_000).unref();
 
   // ---- Chat, between the game, Discord and the bot ----
