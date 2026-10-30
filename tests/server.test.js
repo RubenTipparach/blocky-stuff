@@ -279,8 +279,14 @@ test('asleep once nobody has been around for the delay; switching sleep off, or 
     assert.equal((await sync()).characters.every((c) => c.asleep), true);
     server.fromDiscord({ name: 'ruben', text: 'evening all' });
     assert.equal((await sync()).characters.some((c) => c.asleep), false);
-    // Put to sleep by hand: asleep at once, and a player's next word wakes them.
-    await fetch(`${base}/api/admin/sleep`, { method: 'POST', headers: as, body: JSON.stringify({ on: true }) });
+    // Put to sleep by hand: everyone in the game is disconnected, asleep at once, and a player's next word wakes them.
+    await (await fetch(`${base}/bridge/sync`, { method: 'POST', headers: { 'x-bridge-key': 'key' },
+      body: JSON.stringify({ players: [{ name: 'zack', pos: { x: 0, y: 0, z: 0 }, hp: 20, privs: [] }] }) })).json();
+    const slept = await (await fetch(`${base}/api/admin/sleep`, { method: 'POST', headers: as, body: JSON.stringify({ on: true }) })).json();
+    assert.deepEqual(slept.kicked, ['zack']);
+    const { actions } = await (await fetch(`${base}/bridge/sync`, { method: 'POST', headers: { 'x-bridge-key': 'key' },
+      body: JSON.stringify({ players: [] }) })).json();
+    assert.ok(actions.some((a) => a.type === 'kick' && a.player === 'zack'));
     assert.equal((await sync()).characters.every((c) => c.asleep), true);
     server.fromDiscord({ name: 'ruben', text: 'back again' });
     assert.equal((await sync()).characters.some((c) => c.asleep), false);

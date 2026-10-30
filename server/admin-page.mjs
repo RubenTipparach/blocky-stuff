@@ -354,7 +354,7 @@ function build() {
     <label class="check"><input type="checkbox" id="b_sleep"> Sleep: when nobody is around, they sleep (no projects, no AI calls). Off: they stay awake and keep working</label>
     <label class="field" id="sleepAfterRow">Fall asleep after <b id="sleepAfterText"></b> with nobody in the game and no chat from players (game or Discord)
       <input id="b_sleepAfter" type="range" min="5" max="720" step="5"></label>
-    <div><button id="b_sleepNow">Put them to sleep now</button> <button id="b_wakeNow">Wake them</button>
+    <div><button id="b_sleepNow">Put them to sleep now (disconnects everyone)</button> <button id="b_wakeNow">Wake them</button>
       <span class="muted">Asleep by hand, they wake when a player next chats or joins.</span></div>
     <label class="check"><input type="checkbox" id="b_romance"> Romance: characters fond of someone may flirt, and date (always PG)</label>
     <label class="check"><input type="checkbox" id="b_pranks"> Pranks: characters hostile to someone may drop a few harmless blocks on their build, once a day</label>
@@ -559,7 +559,7 @@ function build() {
     try { await api('/api/admin/bot', { sleep: $('b_sleep').checked }); $('botNote').textContent = $('b_sleep').checked ? 'They will sleep after ' + sleepWords(Number($('b_sleepAfter').value)) + ' with nobody around.' : 'Awake: they are getting up.'; refreshSoon(); }
     catch (e) { $('botNote').textContent = e.message; }
   };
-  $('b_sleepNow').onclick = async () => { try { await api('/api/admin/sleep', { on: true }); $('botNote').textContent = 'Asleep.'; refreshSoon(); } catch (e) { $('botNote').textContent = e.message; } };
+  $('b_sleepNow').onclick = async () => { if (!confirm('Put them to sleep and disconnect everyone in the game?')) return; try { await api('/api/admin/sleep', { on: true }); $('botNote').textContent = 'Asleep.'; refreshSoon(); } catch (e) { $('botNote').textContent = e.message; } };
   $('b_wakeNow').onclick = async () => { try { await api('/api/admin/sleep', { on: false }); $('botNote').textContent = 'Awake.'; refreshSoon(); } catch (e) { $('botNote').textContent = e.message; } };
   // The delay saves when let go (and shows as it moves).
   $('b_sleepAfter').oninput = showSleep;

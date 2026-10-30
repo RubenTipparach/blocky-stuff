@@ -169,7 +169,15 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
   // Put to sleep by hand (admin page or MCP): they stay asleep until a player next says something or joins
   // (owner, 2026-10-29: "Is there a way to put them to sleep manually").
   let napping = db.setting('sleep.now') === '1';
-  const sleepNow = (on) => { napping = Boolean(on); db.putSetting('sleep.now', napping ? '1' : '0'); return { asleep: asleep() }; };
+  // Going to sleep by hand disconnects everyone in the game too (owner, 2026-10-30: "Force Sleep should kick all players").
+  const sleepNow = (on) => {
+    napping = Boolean(on); db.putSetting('sleep.now', napping ? '1' : '0');
+    const kicked = napping ? game.players.map((p) => p.name) : [];
+    for (const player of kicked) {
+      game.act({ type: 'kick', player, reason: 'The server is going to sleep. Come back any time!' }).catch((err) => log.error(err));
+    }
+    return { asleep: asleep(), kicked };
+  };
   const active = () => {
     lastActivity = now(); db.putSetting('activity.last', String(lastActivity));
     if (napping) sleepNow(false);
