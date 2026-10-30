@@ -175,6 +175,18 @@ const OPERATOR_TOOLS = [
     run: ({ restartGame }, args) => restartGame(args),
   },
   {
+    name: 'game_log',
+    description: 'The Luanti server\'s own log, newest last: joins, denied connections (wrong password, bad name, old '
+      + 'client), errors. match keeps only lines containing it (case does not matter).',
+    input_schema: { type: 'object', properties: { lines: { type: 'integer', minimum: 1, maximum: 120 }, match: { type: 'string' } },
+      additionalProperties: false },
+    run: ({ gameLog }, { lines = 120, match }) => {
+      const all = gameLog(120).map(String);
+      const kept = match ? all.filter((l) => l.toLowerCase().includes(match.toLowerCase())) : all;
+      return { ok: true, message: kept.slice(-lines).join('\n') || '(nothing)' };
+    },
+  },
+  {
     name: 'sleep_now',
     description: 'Put the characters to sleep now (on: true), or wake them (on: false). Asleep, they take no turns and '
       + 'make no AI calls; they wake by themselves when a player next chats or joins.',

@@ -706,7 +706,7 @@ export function makeApp({ config, db, bridgeKey, luanti = null, fetchImpl = fetc
         luanti.restart().catch((err) => log.error('restart failed:', err));
         return { ok: true, message: 'Restarting the game; back in about 20 seconds.' };
       };
-      const ctx = { game, db, status, announce, maps, talk, restartGame, sleepNow, settings: () => botSettings(db, config),
+      const ctx = { game, db, status, announce, maps, talk, restartGame, sleepNow, gameLog: (n) => luanti?.log(n) ?? [], settings: () => botSettings(db, config),
         saveSettings: saveBotSettings, resumeTask: (name) => brain.resumeTask?.(name) ?? null };
       if (Array.isArray(msg)) {
         const out = (await Promise.all(msg.map((m) => mcpCall(m, ctx)))).filter(Boolean);
